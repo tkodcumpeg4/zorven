@@ -610,4 +610,3 @@ func (s *Session) Metrics() *protocol.Metrics {
 	defer s.metricsMu.RUnlock()
 	return s.latestMetrics
 }
-

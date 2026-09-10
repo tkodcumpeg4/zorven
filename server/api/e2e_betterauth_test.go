@@ -158,7 +158,7 @@ func TestBetterAuth_E2E_Flow(t *testing.T) {
 		}
 
 		var body struct {
-			Authenticated bool `json:"authenticated"`
+			Authenticated bool   `json:"authenticated"`
 			Method        string `json:"method"`
 			User          struct {
 				ID    string `json:"id"`

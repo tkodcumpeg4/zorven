@@ -154,7 +154,7 @@ func TestAPITokensAndIPAllowlist_Lifecycle(t *testing.T) {
 			t.Fatalf("status %d, body: %s", w.Code, w.Body.String())
 		}
 		var res struct {
-			Token    string        `json:"token"`
+			Token    string         `json:"token"`
 			APIToken store.APIToken `json:"api_token"`
 		}
 		if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {

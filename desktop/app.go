@@ -40,7 +40,7 @@ func NewApp() *App {
 		cfg:    cfg,
 		status: agent.Status{State: agent.StateStopped, Message: "baglanti yok"},
 		auto:   auto,
-		log: slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		log:    slog.New(slog.NewTextHandler(os.Stderr, nil)),
 	}
 }
 

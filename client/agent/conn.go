@@ -244,9 +244,9 @@ func (a *Agent) connectOnce(ctx context.Context) error {
 
 func (a *Agent) handshake(ctx context.Context, conn *websocket.Conn) error {
 	hello, err := protocol.Marshal(protocol.Hello{
-		Type:            protocol.TypeHello,
-		ClientVersion:   protocol.Version,
-		Platform:        runtime.GOOS + "/" + runtime.GOARCH,
+		Type:          protocol.TypeHello,
+		ClientVersion: protocol.Version,
+		Platform:      runtime.GOOS + "/" + runtime.GOARCH,
 		// Akis kontrolunu destekledigimizi bildir. Sunucu desteklemiyorsa
 		// hello_ack'te geri onaylamaz ve eski davranis surer.
 		Features:        []string{protocol.FeatureFlowControl},
@@ -572,4 +572,3 @@ func (a *Agent) CloseSessions() {
 		sm.closeAll()
 	}
 }
-

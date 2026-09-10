@@ -77,10 +77,10 @@ func NewService(st store.Store) *Service {
 	return &Service{st: st, screenSlots: make(map[string]int)}
 }
 
-func (s *Service) CanCreateClient(context.Context, string) error      { return nil }
-func (s *Service) CanCreateTunnel(context.Context, string) error      { return nil }
-func (s *Service) CanAddCustomDomain(context.Context, string) error   { return nil }
-func (s *Service) CanAddMember(context.Context, string) error         { return nil }
+func (s *Service) CanCreateClient(context.Context, string) error       { return nil }
+func (s *Service) CanCreateTunnel(context.Context, string) error       { return nil }
+func (s *Service) CanAddCustomDomain(context.Context, string) error    { return nil }
+func (s *Service) CanAddMember(context.Context, string) error          { return nil }
 func (s *Service) CheckFeature(context.Context, string, Feature) error { return nil }
 
 // AcquireScreenSlot, limitsiz slot verir; yalnizca anlik sayimi tutar.

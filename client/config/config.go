@@ -51,8 +51,8 @@ func Path() (string, error) {
 }
 
 // SystemPath, sistem geneli (service modu) yapilandirma dosyasinin yolunu doner.
-//  - Windows: %ProgramData%\zorven\config.json
-//  - Linux/macOS: /etc/zorven/config.json
+//   - Windows: %ProgramData%\zorven\config.json
+//   - Linux/macOS: /etc/zorven/config.json
 func SystemPath() string {
 	if pd := os.Getenv("ProgramData"); pd != "" {
 		return filepath.Join(pd, "zorven", "config.json")
@@ -164,4 +164,3 @@ func SetServerSystem(server string) error {
 	cfg.ServerAddr = strings.TrimSpace(server)
 	return SaveSystem(cfg)
 }
-

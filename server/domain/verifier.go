@@ -9,8 +9,8 @@ import (
 )
 
 var (
-	ErrInvalidDomain     = errors.New("gecersiz alan adi formati")
-	ErrPlatformSubdomain = errors.New("platform alan adinin sub-domainleri ozel alan adi olarak eklenemez")
+	ErrInvalidDomain      = errors.New("gecersiz alan adi formati")
+	ErrPlatformSubdomain  = errors.New("platform alan adinin sub-domainleri ozel alan adi olarak eklenemez")
 	ErrVerificationFailed = errors.New("DNS dogrulamasi basarisiz: CNAME veya TXT kaydi eslesmedi")
 )
 

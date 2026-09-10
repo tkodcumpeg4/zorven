@@ -38,14 +38,14 @@ func TestValidateDomain(t *testing.T) {
 		{"api.example.com", false},
 		{"sub.domain.co.uk", false},
 		{"my-site.org", false},
-		{"app.rpshell.app", true},     // platform subdomain
-		{"rpshell.app", true},         // platform domain kendisi
+		{"app.rpshell.app", true},          // platform subdomain
+		{"rpshell.app", true},              // platform domain kendisi
 		{"test--tenant.rpshell.app", true}, // platform scoped subdomain
-		{"localhost", true},           // nokta yok
-		{"-invalid.com", true},        // tire ile basliyor
-		{"invalid-.com", true},        // tire ile bitiyor
-		{"in valid.com", true},        // bosluk var
-		{"", true},                    // bos
+		{"localhost", true},                // nokta yok
+		{"-invalid.com", true},             // tire ile basliyor
+		{"invalid-.com", true},             // tire ile bitiyor
+		{"in valid.com", true},             // bosluk var
+		{"", true},                         // bos
 	}
 
 	for _, tt := range tests {

@@ -77,10 +77,10 @@ func TestSecurity_NormalizeHost_InjectionProtection(t *testing.T) {
 	}
 
 	validHosts := map[string]string{
-		"api.example.com:8443":   "api.example.com",
-		"API.EXAMPLE.COM":        "api.example.com",
-		"[::1]:8443":             "[::1]",
-		"example.com.":           "example.com",
+		"api.example.com:8443": "api.example.com",
+		"API.EXAMPLE.COM":      "api.example.com",
+		"[::1]:8443":           "[::1]",
+		"example.com.":         "example.com",
 	}
 
 	for input, expected := range validHosts {

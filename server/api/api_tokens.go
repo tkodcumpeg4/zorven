@@ -46,9 +46,9 @@ func (s *Server) createAPIToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
-		Name      string    `json:"name"`
-		Scopes    []string  `json:"scopes"`
-		ExpiresIn *int      `json:"expires_in_days"` // gun cinsinden, null = suresiz
+		Name      string   `json:"name"`
+		Scopes    []string `json:"scopes"`
+		ExpiresIn *int     `json:"expires_in_days"` // gun cinsinden, null = suresiz
 	}
 	if !decode(w, r, &body) {
 		return

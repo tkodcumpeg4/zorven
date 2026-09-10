@@ -1,38 +1,21 @@
-# Sunucu modulunun testleri.
+# Server module: build, vet and unit tests.
 #
-# Neden ayri bir Postgres servisi: pgstore testleri GERCEK bir veritabani
-# ister. ZORVEN_TEST_PG_DSN ayarli olmadiginda o testler t.Skip ile atlanir;
-# burada ayarli oldugu icin CI onlari gercekten kosar.
+# Postgres-backed integration tests self-skip when ZORVEN_TEST_PG_DSN is unset
+# (they require a real database plus the Better Auth service and DNS). Run them
+# locally with a Postgres instance; see the tests under server/ for details.
 name: server
 
 on: [push, pull_request]
 
 jobs:
-  test:
+  build:
     runs-on: ubuntu-latest
-
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: rpshell
-          POSTGRES_PASSWORD: rpshell
-          # Adinda "test" GECMELI: testler tablolari TRUNCATE ediyor ve
-          # pgstore_test.go gercek gorunumlu bir veritabanini reddediyor.
-          POSTGRES_DB: rpshell_test
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
         with:
-          # go.work ve server/go.mod "go 1.25.0" ister; daha dusuk surum derlemez.
+          # go.work and server/go.mod require Go 1.25.
           go-version: "1.25"
 
       - name: build + vet
@@ -41,8 +24,6 @@ jobs:
           go build ./...
           go vet ./...
 
-      - name: test (Postgres dahil)
+      - name: unit tests
         working-directory: server
-        env:
-          ZORVEN_TEST_PG_DSN: postgres://rpshell:rpshell@localhost:5432/rpshell_test
         run: go test ./...
