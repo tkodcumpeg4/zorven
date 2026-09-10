@@ -23,6 +23,7 @@
       <a href="#fiyat">Fiyatlandırma</a>
       <a href="/download">İndir</a>
       <a href="/docs">Dokümanlar</a>
+          <a href="https://github.com/tkodcumpeg4/zorven" target="_blank" rel="noopener">GitHub</a>
     </nav>
     <div class="nav-cta">
       <a class="btn btn-ghost" href="https://panel.zorven.app">Panele Giriş</a>
@@ -138,25 +139,67 @@
       <div class="top"><i></i><i></i><i></i><span class="u">panel.zorven.app</span></div>
       <div class="cnt">
         <div class="side">
-          <div class="item on">Genel Bakış</div>
-          <div class="item">Tüneller</div>
-          <div class="item">Domainler</div>
-          <div class="item">Loglar</div>
-          <div class="item">Ekip</div>
-          <div class="item">Güvenlik</div>
+          <div class="item on" data-tab="overview">Genel Bakış</div>
+          <div class="item" data-tab="tunnels">Tüneller</div>
+          <div class="item" data-tab="domains">Domainler</div>
+          <div class="item" data-tab="logs">Loglar</div>
+          <div class="item" data-tab="team">Ekip</div>
+          <div class="item" data-tab="security">Güvenlik</div>
         </div>
         <div class="main">
-          <div class="stat-row">
-            <div class="stat"><div class="k">Aktif tünel</div><div class="v g">3</div></div>
-            <div class="stat"><div class="k">Bağlı cihaz</div><div class="v">2</div></div>
-            <div class="stat"><div class="k">İstek / dk</div><div class="v">1.2k</div></div>
-            <div class="stat"><div class="k">p95 yanıt</div><div class="v">38ms</div></div>
+          <div class="panel" data-panel="overview">
+            <div class="stat-row">
+              <div class="stat"><div class="k">Aktif tünel</div><div class="v g">3</div></div>
+              <div class="stat"><div class="k">Bağlı cihaz</div><div class="v">2</div></div>
+              <div class="stat"><div class="k">İstek / dk</div><div class="v">1.2k</div></div>
+              <div class="stat"><div class="k">p95 yanıt</div><div class="v">38ms</div></div>
+            </div>
+            <div class="logs">
+              <div class="logrow"><span class="m-get">GET</span><span class="s2">200</span><span>/api/v1/orders</span><span>14ms</span></div>
+              <div class="logrow"><span class="m-post">POST</span><span class="s2">201</span><span>/webhooks/stripe</span><span>62ms</span></div>
+              <div class="logrow"><span class="m-get">GET</span><span class="s4">404</span><span>/assets/old.js</span><span>8ms</span></div>
+              <div class="logrow"><span class="m-get">GET</span><span class="s2">200</span><span>/health</span><span>3ms</span></div>
+            </div>
           </div>
-          <div class="logs">
-            <div class="logrow"><span class="m-get">GET</span><span class="s2">200</span><span>/api/v1/orders</span><span>14ms</span></div>
-            <div class="logrow"><span class="m-post">POST</span><span class="s2">201</span><span>/webhooks/stripe</span><span>62ms</span></div>
-            <div class="logrow"><span class="m-get">GET</span><span class="s4">404</span><span>/assets/old.js</span><span>8ms</span></div>
-            <div class="logrow"><span class="m-get">GET</span><span class="s2">200</span><span>/health</span><span>3ms</span></div>
+          <div class="panel" data-panel="tunnels" hidden>
+            <div class="logs">
+              <div class="trow"><span class="lbl">api &rarr; localhost:8000</span><span class="val g">Aktif</span></div>
+              <div class="trow"><span class="lbl">web &rarr; localhost:3000</span><span class="val g">Aktif</span></div>
+              <div class="trow"><span class="lbl">grafana &rarr; localhost:3001</span><span class="val g">Aktif</span></div>
+              <div class="trow"><span class="lbl">db &rarr; localhost:5432</span><span class="val">Pasif</span></div>
+            </div>
+          </div>
+          <div class="panel" data-panel="domains" hidden>
+            <div class="logs">
+              <div class="trow"><span class="lbl">api.sirket.com</span><span class="val g">Doğrulandı</span></div>
+              <div class="trow"><span class="lbl">app.sirket.com</span><span class="val g">Doğrulandı</span></div>
+              <div class="trow"><span class="lbl">web--acme.zorven.app</span><span class="val">Otomatik ad</span></div>
+            </div>
+          </div>
+          <div class="panel" data-panel="logs" hidden>
+            <div class="logs">
+              <div class="logrow"><span class="m-get">GET</span><span class="s2">200</span><span>/api/v1/users</span><span>11ms</span></div>
+              <div class="logrow"><span class="m-post">POST</span><span class="s2">200</span><span>/api/v1/login</span><span>44ms</span></div>
+              <div class="logrow"><span class="m-get">GET</span><span class="s2">200</span><span>/api/v1/products</span><span>9ms</span></div>
+              <div class="logrow"><span class="m-post">POST</span><span class="s2">201</span><span>/api/v1/orders</span><span>73ms</span></div>
+              <div class="logrow"><span class="m-get">GET</span><span class="s4">404</span><span>/favicon.ico</span><span>4ms</span></div>
+              <div class="logrow"><span class="m-get">GET</span><span class="s2">200</span><span>/health</span><span>3ms</span></div>
+            </div>
+          </div>
+          <div class="panel" data-panel="team" hidden>
+            <div class="logs">
+              <div class="trow"><span class="lbl">Ahmet Göksü</span><span class="val g">Sahip</span></div>
+              <div class="trow"><span class="lbl">Zeynep Kaya</span><span class="val">Yönetici</span></div>
+              <div class="trow"><span class="lbl">Mert Demir</span><span class="val">Üye</span></div>
+            </div>
+          </div>
+          <div class="panel" data-panel="security" hidden>
+            <div class="logs">
+              <div class="trow"><span class="lbl">API Token · prod</span><span class="val g">Aktif</span></div>
+              <div class="trow"><span class="lbl">IP İzin Listesi</span><span class="val">3 kural</span></div>
+              <div class="trow"><span class="lbl">İki adımlı doğrulama</span><span class="val g">Açık</span></div>
+              <div class="trow"><span class="lbl">Aktif oturumlar</span><span class="val">2 cihaz</span></div>
+            </div>
           </div>
         </div>
       </div>

@@ -51,6 +51,24 @@
     try { prev = localStorage.getItem(KEY); } catch (e) {}
     if (prev === 'accepted') loadAnalytics();
     if (!prev) initConsent();
+
+    // (4) Panel mockup sekmeleri — tıklayınca ilgili içerik gösterilir.
+    var side = document.querySelector('.preview .side');
+    if (side) {
+      side.addEventListener('click', function (e) {
+        var it = e.target.closest('.item');
+        if (!it) return;
+        var tab = it.getAttribute('data-tab');
+        var items = side.querySelectorAll('.item');
+        for (var i = 0; i < items.length; i++) {
+          items[i].classList.toggle('on', items[i] === it);
+        }
+        var panels = document.querySelectorAll('.preview .panel');
+        for (var j = 0; j < panels.length; j++) {
+          panels[j].hidden = panels[j].getAttribute('data-panel') !== tab;
+        }
+      });
+    }
   });
 
   // (3) çerez rızası — kabul/ret

@@ -76,7 +76,7 @@ if ($Insecure -or $Server.StartsWith("localhost") -or $Server.StartsWith("127.0.
     [System.Net.ServicePointManager]::ServerCertificateValidationCallback = {$true}
 }
 
-$downloadUrl = "$scheme://$Server/bin/$binName"
+$downloadUrl = "${scheme}://$Server/bin/$binName"
 Write-Host "`n1. Zorven istemci ikilisi indiriliyor..." -ForegroundColor Cyan
 Write-Host "   Kaynak: $downloadUrl"
 

@@ -35,6 +35,10 @@ func contentType(name string) string {
 		return "image/svg+xml"
 	case ".json":
 		return "application/json"
+	case ".xml":
+		return "application/xml; charset=utf-8"
+	case ".txt":
+		return "text/plain; charset=utf-8"
 	default:
 		return "application/octet-stream"
 	}

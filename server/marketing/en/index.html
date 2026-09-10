@@ -23,6 +23,7 @@
       <a href="/en/#pricing">Pricing</a>
       <a href="/en/download">Download</a>
       <a href="/en/docs">Docs</a>
+          <a href="https://github.com/tkodcumpeg4/zorven" target="_blank" rel="noopener">GitHub</a>
     </nav>
     <div class="nav-cta">
       <a class="btn btn-ghost" href="https://panel.zorven.app">Sign in</a>
@@ -119,25 +120,67 @@
       <div class="top"><i></i><i></i><i></i><span class="u">panel.zorven.app</span></div>
       <div class="cnt">
         <div class="side">
-          <div class="item on">Overview</div>
-          <div class="item">Tunnels</div>
-          <div class="item">Domains</div>
-          <div class="item">Logs</div>
-          <div class="item">Team</div>
-          <div class="item">Security</div>
+          <div class="item on" data-tab="overview">Overview</div>
+          <div class="item" data-tab="tunnels">Tunnels</div>
+          <div class="item" data-tab="domains">Domains</div>
+          <div class="item" data-tab="logs">Logs</div>
+          <div class="item" data-tab="team">Team</div>
+          <div class="item" data-tab="security">Security</div>
         </div>
         <div class="main">
-          <div class="stat-row">
-            <div class="stat"><div class="k">Active tunnels</div><div class="v g">3</div></div>
-            <div class="stat"><div class="k">Devices</div><div class="v">2</div></div>
-            <div class="stat"><div class="k">Req / min</div><div class="v">1.2k</div></div>
-            <div class="stat"><div class="k">p95 latency</div><div class="v">38ms</div></div>
+          <div class="panel" data-panel="overview">
+            <div class="stat-row">
+              <div class="stat"><div class="k">Active tunnels</div><div class="v g">3</div></div>
+              <div class="stat"><div class="k">Devices</div><div class="v">2</div></div>
+              <div class="stat"><div class="k">Req / min</div><div class="v">1.2k</div></div>
+              <div class="stat"><div class="k">p95 latency</div><div class="v">38ms</div></div>
+            </div>
+            <div class="logs">
+              <div class="logrow"><span class="m-get">GET</span><span class="s2">200</span><span>/api/v1/orders</span><span>14ms</span></div>
+              <div class="logrow"><span class="m-post">POST</span><span class="s2">201</span><span>/webhooks/stripe</span><span>62ms</span></div>
+              <div class="logrow"><span class="m-get">GET</span><span class="s4">404</span><span>/assets/old.js</span><span>8ms</span></div>
+              <div class="logrow"><span class="m-get">GET</span><span class="s2">200</span><span>/health</span><span>3ms</span></div>
+            </div>
           </div>
-          <div class="logs">
-            <div class="logrow"><span class="m-get">GET</span><span class="s2">200</span><span>/api/v1/orders</span><span>14ms</span></div>
-            <div class="logrow"><span class="m-post">POST</span><span class="s2">201</span><span>/webhooks/stripe</span><span>62ms</span></div>
-            <div class="logrow"><span class="m-get">GET</span><span class="s4">404</span><span>/assets/old.js</span><span>8ms</span></div>
-            <div class="logrow"><span class="m-get">GET</span><span class="s2">200</span><span>/health</span><span>3ms</span></div>
+          <div class="panel" data-panel="tunnels" hidden>
+            <div class="logs">
+              <div class="trow"><span class="lbl">api &rarr; localhost:8000</span><span class="val g">Online</span></div>
+              <div class="trow"><span class="lbl">web &rarr; localhost:3000</span><span class="val g">Online</span></div>
+              <div class="trow"><span class="lbl">grafana &rarr; localhost:3001</span><span class="val g">Online</span></div>
+              <div class="trow"><span class="lbl">db &rarr; localhost:5432</span><span class="val">Paused</span></div>
+            </div>
+          </div>
+          <div class="panel" data-panel="domains" hidden>
+            <div class="logs">
+              <div class="trow"><span class="lbl">api.company.com</span><span class="val g">Verified</span></div>
+              <div class="trow"><span class="lbl">app.company.com</span><span class="val g">Verified</span></div>
+              <div class="trow"><span class="lbl">web--acme.zorven.app</span><span class="val">Auto name</span></div>
+            </div>
+          </div>
+          <div class="panel" data-panel="logs" hidden>
+            <div class="logs">
+              <div class="logrow"><span class="m-get">GET</span><span class="s2">200</span><span>/api/v1/users</span><span>11ms</span></div>
+              <div class="logrow"><span class="m-post">POST</span><span class="s2">200</span><span>/api/v1/login</span><span>44ms</span></div>
+              <div class="logrow"><span class="m-get">GET</span><span class="s2">200</span><span>/api/v1/products</span><span>9ms</span></div>
+              <div class="logrow"><span class="m-post">POST</span><span class="s2">201</span><span>/api/v1/orders</span><span>73ms</span></div>
+              <div class="logrow"><span class="m-get">GET</span><span class="s4">404</span><span>/favicon.ico</span><span>4ms</span></div>
+              <div class="logrow"><span class="m-get">GET</span><span class="s2">200</span><span>/health</span><span>3ms</span></div>
+            </div>
+          </div>
+          <div class="panel" data-panel="team" hidden>
+            <div class="logs">
+              <div class="trow"><span class="lbl">Ahmet Göksü</span><span class="val g">Owner</span></div>
+              <div class="trow"><span class="lbl">Zeynep Kaya</span><span class="val">Admin</span></div>
+              <div class="trow"><span class="lbl">Mert Demir</span><span class="val">Member</span></div>
+            </div>
+          </div>
+          <div class="panel" data-panel="security" hidden>
+            <div class="logs">
+              <div class="trow"><span class="lbl">API Token · prod</span><span class="val g">Active</span></div>
+              <div class="trow"><span class="lbl">IP allow-list</span><span class="val">3 rules</span></div>
+              <div class="trow"><span class="lbl">Two-factor auth</span><span class="val g">On</span></div>
+              <div class="trow"><span class="lbl">Active sessions</span><span class="val">2 devices</span></div>
+            </div>
           </div>
         </div>
       </div>

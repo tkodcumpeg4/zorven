@@ -39,11 +39,11 @@ async function loadData() {
   }
 }
 
-async function handleSwitchToTenant(t: TenantWithCounts) {
-  switching.value = t.id
+async function handleSwitchToTenant(ten: TenantWithCounts) {
+  switching.value = ten.id
   try {
-    await api.adminSwitchTenant(t.id)
-    toast.success(t('platform.switchedTo', { slug: t.slug }))
+    await api.adminSwitchTenant(ten.id)
+    toast.success(t('platform.switchedTo', { slug: ten.slug }))
     await check()
     await navigateTo('/')
   } catch (err: any) {
@@ -66,9 +66,9 @@ const PLAN_OPTIONS = [
   { id: 'enterprise', label: t('platform.planEnterprise') },
 ]
 
-function openChangePlan(t: TenantWithCounts) {
-  selectedTenant.value = t
-  selectedPlan.value = t.plan || 'free'
+function openChangePlan(ten: TenantWithCounts) {
+  selectedTenant.value = ten
+  selectedPlan.value = ten.plan || 'free'
   showPlanModal.value = true
 }
 

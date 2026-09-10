@@ -15,7 +15,29 @@ import (
 	"github.com/tkodcumpeg4/zorven/server/ratelimit"
 	"github.com/tkodcumpeg4/zorven/server/session"
 	"github.com/tkodcumpeg4/zorven/server/store"
+	"github.com/tkodcumpeg4/zorven/server/store/pgstore"
 )
+
+// isDefaultTenantOwner, kullanicinin platform (ten_default) kiracisinda owner/admin
+// uyeligi olup olmadigini soyler. Platform Admin durumu BUNUNLA belirlenir: boylece
+// admin "Yonetime Gec" ile baska bir org'a gecse bile yetkisini KORUR ve geri
+// donebilir. Aksi halde isPlat yalnizca "aktif org == default" iken dogru oldugu
+// icin, admin baska org'a gecince platform yetkisini kaybedip geri donemiyordu
+// (tek-yonlu tuzak). ten_default disindaki org sahipleri platform admin OLMAZ.
+func (m *Middleware) isDefaultTenantOwner(ctx context.Context, userID string) bool {
+	if userID == "" || m.Store == nil {
+		return false
+	}
+	pgSt, ok := m.Store.(*pgstore.Store)
+	if !ok || pgSt.Pool() == nil {
+		return false
+	}
+	var role string
+	err := pgSt.Pool().QueryRow(ctx,
+		`SELECT "role" FROM "member" WHERE "organizationId" = $1 AND "userId" = $2 LIMIT 1`,
+		store.DefaultTenantID, userID).Scan(&role)
+	return err == nil && (role == "owner" || role == "admin")
+}
 
 // AdminKey, dogrulama icin gereken admin anahtari bilgisi.
 // Tam anahtar yalnizca uretildigi anda bilinir; sonrasinda sadece hash saklanir.
@@ -152,6 +174,12 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				// olanlari da admin sayarak yeni/public kullanicilari yanlislikla
 				// Platform Admin yapiyordu. (Super-admin icin admin key yolu ayridir.)
 				isPlat := activeTenant == store.DefaultTenantID && (sess.Role == "owner" || sess.Role == "admin")
+				if !isPlat {
+					// Aktif org default degilse (or. baska bir org'a "Yonetime Gec"
+					// ile gecilmisse) kullanici yine de ten_default sahibiyse
+					// platform admindir; boylece impersonation geri donulebilir.
+					isPlat = m.isDefaultTenantOwner(r.Context(), sess.UserID)
+				}
 				if isPlat {
 					if reqTenant := r.Header.Get("X-Tenant-ID"); reqTenant != "" {
 						activeTenant = reqTenant
@@ -252,6 +280,12 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				// olanlari da admin sayarak yeni/public kullanicilari yanlislikla
 				// Platform Admin yapiyordu. (Super-admin icin admin key yolu ayridir.)
 				isPlat := activeTenant == store.DefaultTenantID && (sess.Role == "owner" || sess.Role == "admin")
+				if !isPlat {
+					// Aktif org default degilse (or. baska bir org'a "Yonetime Gec"
+					// ile gecilmisse) kullanici yine de ten_default sahibiyse
+					// platform admindir; boylece impersonation geri donulebilir.
+					isPlat = m.isDefaultTenantOwner(r.Context(), sess.UserID)
+				}
 				if isPlat {
 					if reqTenant := r.Header.Get("X-Tenant-ID"); reqTenant != "" {
 						activeTenant = reqTenant

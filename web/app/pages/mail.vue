@@ -62,6 +62,33 @@ const fromOptions = computed<string[]>(() => {
   return [...own, ...sys]
 })
 
+// Kutu (mailbox) filtresi: kiracının kendi adresi + (owner/platform admin ise)
+// sistem kutulari (info@, sales@ ...). Boylece admin, tek gelen kutusu icinde
+// yalnizca secilen adrese gelen/giden mailleri gorebilir.
+const mailbox = ref<string>('all')
+const mailboxOptions = computed<string[]>(() => {
+  const own = info.value?.address ? [info.value.address] : []
+  const sys = info.value?.system_addresses ?? []
+  return [...own, ...sys]
+})
+const visibleMessages = computed(() => {
+  if (mailbox.value === 'all') return messages.value
+  const mb = mailbox.value.toLowerCase()
+  return messages.value.filter(m =>
+    box.value === 'inbox'
+      ? (m.to || '').toLowerCase() === mb
+      : (m.from || '').toLowerCase() === mb,
+  )
+})
+
+// Özel (estetik) mailbox açılır menüsü — native select'in açılan listesi
+// stillenemedigi icin kendi dropdown'umuzu ciziyoruz.
+const mailboxOpen = ref(false)
+function selectMailbox(v: string) {
+  mailbox.value = v
+  mailboxOpen.value = false
+}
+
 onMounted(load)
 
 async function load() {
@@ -251,14 +278,63 @@ async function copyAddress() {
         </button>
       </div>
 
+      <!-- Kutu (mailbox) filtresi — yalnizca sistem kutusu olan (owner/platform admin) icin -->
+      <div v-if="mailboxOptions.length > 1" class="flex items-center gap-2 text-xs">
+        <span class="text-fg-muted">{{ t('mail.mailbox') }}</span>
+        <div class="relative">
+          <button
+            type="button"
+            class="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-surface-2 px-2.5 py-1.5 font-mono text-xs text-fg transition-colors duration-150 hover:border-accent"
+            @click="mailboxOpen = !mailboxOpen"
+          >
+            <Icon :name="mailbox === 'all' ? 'lucide:inbox' : 'lucide:at-sign'" class="size-3.5 text-fg-muted" />
+            <span>{{ mailbox === 'all' ? t('mail.allMailboxes') : mailbox }}</span>
+            <Icon
+              name="lucide:chevron-down"
+              class="size-3.5 text-fg-subtle transition-transform duration-150"
+              :class="mailboxOpen ? 'rotate-180' : ''"
+            />
+          </button>
+
+          <template v-if="mailboxOpen">
+            <div class="fixed inset-0 z-10" @click="mailboxOpen = false" />
+            <div class="absolute left-0 top-full z-20 mt-1.5 min-w-[240px] overflow-hidden rounded-lg border border-line bg-surface shadow-xl">
+              <button
+                type="button"
+                class="flex w-full cursor-pointer items-center gap-2 px-3 py-2 text-left text-xs transition-colors duration-150 hover:bg-surface-2"
+                :class="mailbox === 'all' ? 'bg-accent/10 text-accent' : 'text-fg'"
+                @click="selectMailbox('all')"
+              >
+                <Icon name="lucide:inbox" class="size-3.5 shrink-0" />
+                <span class="flex-1">{{ t('mail.allMailboxes') }}</span>
+                <Icon v-if="mailbox === 'all'" name="lucide:check" class="size-3.5" />
+              </button>
+              <div class="h-px bg-line" />
+              <button
+                v-for="mb in mailboxOptions"
+                :key="mb"
+                type="button"
+                class="flex w-full cursor-pointer items-center gap-2 px-3 py-2 text-left font-mono text-xs transition-colors duration-150 hover:bg-surface-2"
+                :class="mailbox === mb ? 'bg-accent/10 text-accent' : 'text-fg'"
+                @click="selectMailbox(mb)"
+              >
+                <Icon name="lucide:at-sign" class="size-3.5 shrink-0 text-fg-muted" />
+                <span class="flex-1 truncate">{{ mb }}</span>
+                <Icon v-if="mailbox === mb" name="lucide:check" class="size-3.5 shrink-0 text-accent" />
+              </button>
+            </div>
+          </template>
+        </div>
+      </div>
+
       <div class="grid gap-4 lg:grid-cols-[minmax(0,360px)_1fr]">
         <!-- Liste -->
-        <PanelFrame :label="box === 'inbox' ? t('mail.inbox') : t('mail.sent')" :meta="String(messages.length)">
+        <PanelFrame :label="box === 'inbox' ? t('mail.inbox') : t('mail.sent')" :meta="String(visibleMessages.length)">
           <p v-if="loadingMsg" class="px-4 py-6 text-sm text-fg-muted">{{ t('common.loading') }}</p>
-          <p v-else-if="!messages.length" class="px-4 py-8 text-center text-sm text-fg-muted">{{ t('mail.empty') }}</p>
+          <p v-else-if="!visibleMessages.length" class="px-4 py-8 text-center text-sm text-fg-muted">{{ t('mail.empty') }}</p>
           <div v-else class="max-h-[70vh] divide-y divide-line overflow-auto">
             <button
-              v-for="m in messages"
+              v-for="m in visibleMessages"
               :key="m.id"
               type="button"
               class="flex w-full cursor-pointer flex-col gap-0.5 px-4 py-3 text-left transition-colors"

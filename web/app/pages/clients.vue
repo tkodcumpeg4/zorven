@@ -190,6 +190,19 @@ const currentCmd = computed(() => {
 
         <pre class="overflow-x-auto rounded border border-line bg-bg p-3 font-mono text-xs text-fg selection:bg-accent selection:text-on-accent whitespace-pre-wrap">{{ currentCmd }}</pre>
 
+        <!-- Masaustu uygulamasi (Windows): CLI yerine hazir .exe kurulumu. -->
+        <div v-if="selectedTab === 'windows'" class="mt-2.5 flex flex-wrap items-center gap-2">
+          <a
+            :href="`${origin}/bin/Zorven-Setup-windows-amd64.exe`"
+            download
+            class="inline-flex items-center gap-1.5 rounded border border-line bg-surface-2 px-3 py-1.5 text-xs font-medium text-fg transition-colors duration-150 hover:border-accent hover:text-accent"
+          >
+            <Icon name="lucide:monitor-down" class="size-3.5" />
+            {{ t('clients.downloadDesktop') }}
+          </a>
+          <span class="text-[11px] text-fg-subtle">{{ t('clients.desktopHint') }}</span>
+        </div>
+
         <div class="mt-2.5 flex items-center gap-2 text-[11px] text-fg-subtle">
           <Icon name="lucide:shield-check" class="size-3.5 text-accent shrink-0" />
           <span>{{ t('clients.installNote') }}</span>

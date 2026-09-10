@@ -326,7 +326,9 @@
     "createFailed": "Could not create client",
     "cmdCopied": "Command copied to clipboard",
     "removed": "Client '{name}' deleted",
-    "removeFailed": "Could not delete client"
+    "removeFailed": "Could not delete client",
+    "downloadDesktop": "Download desktop app (.exe)",
+    "desktopHint": "Open the app and paste the token above."
   },
   "tokens": {
     "title": "API & Security Management",
@@ -908,6 +910,8 @@
     "addressCopied": "Address copied",
     "internalOnly": "On this plan you can only send to {domain} addresses. External sending is Enterprise-only.",
     "attach": "Attach",
-    "attachTooLarge": "Attachments cannot exceed 20 MB total."
+    "attachTooLarge": "Attachments cannot exceed 20 MB total.",
+    "mailbox": "Mailbox",
+    "allMailboxes": "All mailboxes"
   }
 }

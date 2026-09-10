@@ -326,7 +326,9 @@
     "createFailed": "İstemci oluşturulamadı",
     "cmdCopied": "Komut panoya kopyalandı",
     "removed": "'{name}' istemcisi silindi",
-    "removeFailed": "İstemci silinemedi"
+    "removeFailed": "İstemci silinemedi",
+    "downloadDesktop": "Masaüstü uygulamasını indir (.exe)",
+    "desktopHint": "Uygulamayı açıp yukarıdaki token'ı yapıştır."
   },
   "tokens": {
     "title": "API & Güvenlik Yönetimi",
@@ -908,6 +910,8 @@
     "sentToast": "Gönderildi",
     "internalOnly": "Bu planda yalnızca {domain} adreslerine gönderebilirsin. Harici gönderim Enterprise planına özeldir.",
     "attach": "Dosya Ekle",
-    "attachTooLarge": "Ekler toplamı 20 MB'ı aşamaz."
+    "attachTooLarge": "Ekler toplamı 20 MB'ı aşamaz.",
+    "mailbox": "Kutu",
+    "allMailboxes": "Tüm kutular"
   }
 }
