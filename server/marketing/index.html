@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Zorven — Kendi sunucunda barınan tünel platformu</title>
+<meta name="description" content="Yerel servisini tek komutla, kendi domaininde, güvenle internete aç. Zorven; self-hosted, yayınlanabilir bir Cloudflare Tunnel / ngrok alternatifidir.">
+<link rel="icon" type="image/svg+xml" href="/logo.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/home.css">
+</head>
+<body>
+<div class="bg-fx"><div class="grid"></div><div class="glow"></div></div>
+
+<header>
+  <div class="wrap nav">
+    <a class="brand" href="/"><img class="mark" src="/logo.svg" alt="Zorven" width="30" height="30"> zorven</a>
+    <nav class="nav-links">
+      <a href="#ozellikler">Özellikler</a>
+      <a href="#nasil">Nasıl çalışır</a>
+      <a href="#fiyat">Fiyatlandırma</a>
+      <a href="/download">İndir</a>
+      <a href="/docs">Dokümanlar</a>
+    </nav>
+    <div class="nav-cta">
+      <a class="btn btn-ghost" href="https://panel.zorven.app">Panele Giriş</a>
+      <a class="btn btn-primary" href="https://panel.zorven.app">Ücretsiz Başla</a>
+    </div>
+  </div>
+</header>
+
+<!-- HERO -->
+<section class="hero">
+  <div class="wrap">
+    <span class="badge"><span class="dot"></span> Kendi sunucunda barınan tünel platformu</span>
+    <h1>Localhost'u <span class="grad">dünyaya</span> aç.<br>Kendi domaininde, kendi kurallarınla.</h1>
+    <p class="sub">Yerel servisini tek komutla, güvenli TLS ile internete aç. Zorven; self-hosted,
+      yayınlanabilir bir <b style="color:var(--fg)">ngrok / Cloudflare Tunnel alternatifidir</b> — verin senin sunucunda kalır.</p>
+    <div class="hero-cta">
+      <a class="btn btn-primary btn-lg" href="https://panel.zorven.app">Ücretsiz Başla →</a>
+      <a class="btn btn-ghost btn-lg" href="#nasil">Nasıl çalışır?</a>
+    </div>
+    <p class="hero-note"><b>Kredi kartı gerekmez</b> · Açık kaynak · Windows · macOS · Linux</p>
+
+    <div class="terminal">
+      <div class="bar"><i></i><i></i><i></i><span class="t">bash — zorven</span></div>
+      <div class="body">
+<div class="l"><span class="pr">$</span> <span class="cm">curl -fsSL https://zorven.app/install.sh | sh</span></div>
+<div class="l"><span class="fl">→ Zorven istemcisi kuruldu (v1.0)</span></div>
+<div class="l"><span class="pr">$</span> <span class="cm">zorven http 3000</span></div>
+<div class="l"><span class="ok"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span> <span class="fl">Tünel hazır:</span> <span class="url">https://mavi-panda.zorven.app</span> <span class="fl">→ localhost:3000</span></div>
+<div class="l"><span class="ok"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span> <span class="fl">TLS aktif · WebSocket destekli · canlı loglar akıyor</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ÖZELLİKLER -->
+<section class="section" id="ozellikler">
+  <div class="wrap">
+    <div class="center">
+      <div class="eyebrow">Özellikler</div>
+      <h2>Bir tünelden fazlası.</h2>
+      <p class="lead">Geliştirme sunucunu paylaşmaktan üretimde özel domain yayınlamaya kadar — tek platform.</p>
+    </div>
+    <div class="bento">
+      <div class="card col-3 big feature-glow">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg></div>
+        <h3>Anında güvenli tünel</h3>
+        <p>Herhangi bir yerel portu tek komutla, geçerli TLS sertifikasıyla internete aç. HTTP, WebSocket ve uzun ömürlü bağlantılar sorunsuz geçer.</p>
+      </div>
+      <div class="card col-3 big feature-glow">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg></div>
+        <h3>Kendi özel domainin</h3>
+        <p>api.sirketin.com gibi kendi alan adını bağla; Zorven Let's Encrypt ile sertifikayı otomatik alır ve yeniler.</p>
+      </div>
+      <div class="card col-2">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></div>
+        <h3>Canlı loglar</h3>
+        <p>Her isteği gerçek zamanlı izle; gelişmiş filtreler, durum kodları, süre ve dışa aktarma.</p>
+      </div>
+      <div class="card col-2">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></svg></div>
+        <h3>2FA & güvenlik</h3>
+        <p>İki adımlı doğrulama, IP izin listesi ve API anahtarlarıyla erişimi sıkılaştır.</p>
+      </div>
+      <div class="card col-2">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></div>
+        <h3>Ekip yönetimi</h3>
+        <p>Organizasyon, roller ve üye token'larıyla ekibinle birlikte yönet.</p>
+      </div>
+      <div class="card col-3">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m4 17 6-6-6-6"/><path d="M12 19h8"/></svg></div>
+        <h3>Uzak terminal & ekran</h3>
+        <p>Bağlı cihazlara panelden güvenli uzak terminal ve ekran erişimi — canlı donanım telemetrisiyle.</p>
+      </div>
+      <div class="card col-3">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="8" x="2" y="2" rx="2"/><rect width="20" height="8" x="2" y="14" rx="2"/><path d="M6 6h.01"/><path d="M6 18h.01"/></svg></div>
+        <h3>Self-hosted, veri sende</h3>
+        <p>Kendi sunucunda çalışır. Trafiğin ve logların üçüncü bir tarafa gitmez — tamamen senin kontrolünde.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- NASIL ÇALIŞIR -->
+<section class="section" id="nasil">
+  <div class="wrap">
+    <div class="center">
+      <div class="eyebrow">Nasıl çalışır</div>
+      <h2>Üç adımda yayında.</h2>
+    </div>
+    <div class="steps">
+      <div class="step">
+        <div class="n">1</div>
+        <h3>Kur</h3>
+        <p>Tek komutla istemciyi kur veya masaüstü uygulamasını indir.</p>
+        <code>curl -fsSL zorven.app/install.sh | sh</code>
+      </div>
+      <div class="step">
+        <div class="n">2</div>
+        <h3>Bağlan</h3>
+        <p>Panelden aldığın token'la giriş yap; cihazın anında eşleşir.</p>
+        <code>zorven auth &lt;token&gt;</code>
+      </div>
+      <div class="step">
+        <div class="n">3</div>
+        <h3>Yayınla</h3>
+        <p>Yerel portunu aç; Zorven güvenli bir genel URL üretir.</p>
+        <code>zorven http 3000</code>
+      </div>
+    </div>
+
+    <!-- Panel mockup -->
+    <div class="preview">
+      <div class="top"><i></i><i></i><i></i><span class="u">panel.zorven.app</span></div>
+      <div class="cnt">
+        <div class="side">
+          <div class="item on">Genel Bakış</div>
+          <div class="item">Tüneller</div>
+          <div class="item">Domainler</div>
+          <div class="item">Loglar</div>
+          <div class="item">Ekip</div>
+          <div class="item">Güvenlik</div>
+        </div>
+        <div class="main">
+          <div class="stat-row">
+            <div class="stat"><div class="k">Aktif tünel</div><div class="v g">3</div></div>
+            <div class="stat"><div class="k">Bağlı cihaz</div><div class="v">2</div></div>
+            <div class="stat"><div class="k">İstek / dk</div><div class="v">1.2k</div></div>
+            <div class="stat"><div class="k">p95 yanıt</div><div class="v">38ms</div></div>
+          </div>
+          <div class="logs">
+            <div class="logrow"><span class="m-get">GET</span><span class="s2">200</span><span>/api/v1/orders</span><span>14ms</span></div>
+            <div class="logrow"><span class="m-post">POST</span><span class="s2">201</span><span>/webhooks/stripe</span><span>62ms</span></div>
+            <div class="logrow"><span class="m-get">GET</span><span class="s4">404</span><span>/assets/old.js</span><span>8ms</span></div>
+            <div class="logrow"><span class="m-get">GET</span><span class="s2">200</span><span>/health</span><span>3ms</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- FİYATLANDIRMA -->
+<section class="section" id="fiyat">
+  <div class="wrap">
+    <div class="center">
+      <div class="eyebrow">Fiyatlandırma</div>
+      <h2>Basit, öngörülebilir.</h2>
+      <p class="lead">Ücretsiz başla, ihtiyacın büyüdükçe yükselt. İstediğin an iptal et.</p>
+    </div>
+    <div class="plans">
+      <div class="plan">
+        <div class="pname">Free</div>
+        <div class="price">$0<span> / ay</span></div>
+        <ul>
+          <li><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg> 2 tünel · 2 cihaz</li>
+          <li><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg> zorven.app alt alan adları · 5 GB</li>
+          <li><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg> Canlı loglar (1 gün)</li>
+          <li><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg> 2FA & topluluk desteği</li>
+        </ul>
+        <a class="btn btn-ghost" href="https://panel.zorven.app">Başla</a>
+      </div>
+      <div class="plan pop">
+        <span class="tag">En popüler</span>
+        <div class="pname">Pro</div>
+        <div class="price">$12<span> / ay</span></div>
+        <ul>
+          <li><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg> 20 tünel · 15 cihaz · 100 GB</li>
+          <li><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg> Özel domain + otomatik TLS</li>
+          <li><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg> API erişimi & IP filtreleme</li>
+          <li><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg> Log saklama (7 gün) · 3 üye</li>
+        </ul>
+        <a class="btn btn-primary" href="https://panel.zorven.app">Pro'ya Geç</a>
+      </div>
+      <div class="plan">
+        <div class="pname">Team</div>
+        <div class="price">$29<span> / ay</span></div>
+        <ul>
+          <li><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg> 50 tünel · 50 cihaz · 250 GB</li>
+          <li><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg> Ekip & rol yönetimi (5 üye)</li>
+          <li><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg> Log saklama (30 gün)</li>
+          <li><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg> Öncelikli destek</li>
+        </ul>
+        <a class="btn btn-ghost" href="https://panel.zorven.app">Başla</a>
+      </div>
+      <div class="plan">
+        <div class="pname">Enterprise</div>
+        <div class="price">Özel<span> / teklif</span></div>
+        <ul>
+          <li><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg> Sınırsız tünel · cihaz · veri</li>
+          <li><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg> SSO & özel entegrasyonlar</li>
+          <li><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg> SLA & 7/24 öncelikli destek</li>
+          <li><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg> Kendi sunucunda kurulum</li>
+        </ul>
+        <a class="btn btn-ghost" href="mailto:sales@zorven.app?subject=Zorven%20Enterprise%20Plan%20Talebi">İletişime Geç</a>
+      </div>
+    </div>
+    <p style="text-align:center;margin-top:24px;color:var(--fg-subtle);font-size:14px">Hobby ($5/ay) planı da mevcuttur. Ödemeler Paddle güvencesiyle alınır.</p>
+  </div>
+</section>
+
+<!-- CTA -->
+<section class="wrap">
+  <div class="cta-band">
+    <h2>Bir sonraki tünelin bir komut uzağında.</h2>
+    <p>Ücretsiz hesabını aç, ilk servisini 60 saniyede yayınla.</p>
+    <div class="hero-cta">
+      <a class="btn btn-primary btn-lg" href="https://panel.zorven.app">Ücretsiz Başla →</a>
+      <a class="btn btn-ghost btn-lg" href="/docs">Dokümanları Oku</a>
+    </div>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer>
+  <div class="wrap">
+    <div class="foot">
+      <div class="col about">
+        <a class="brand" href="/"><img class="mark" src="/logo.svg" alt="Zorven" width="30" height="30"> zorven</a>
+        <p>Kendi sunucunda barınan, yayınlanabilir tünel platformu. Verin senin kontrolünde.</p>
+      </div>
+      <div class="col">
+        <h4>Ürün</h4>
+        <a href="#ozellikler">Özellikler</a>
+        <a href="#fiyat">Fiyatlandırma</a>
+        <a href="/docs">Dokümanlar</a>
+        <a href="/download">İndir</a>
+      </div>
+      <div class="col">
+        <h4>Şirket</h4>
+        <a href="/about">Hakkında</a>
+        <a href="/contact">İletişim</a>
+        <a href="mailto:abuse@zorven.app">Kötüye kullanım</a>
+      </div>
+      <div class="col">
+        <h4>Yasal</h4>
+        <a href="/legal/terms">Kullanım Koşulları</a>
+        <a href="/legal/privacy">Gizlilik Politikası</a>
+        <a href="/legal/kvkk">KVKK Aydınlatma</a>
+        <a href="/legal/cookies">Çerez Politikası</a>
+        <a href="/legal/aup">Kabul Edilebilir Kullanım</a>
+      </div>
+    </div>
+    <div class="foot-bottom">
+      <span>© 2026 Zorven. Tüm hakları saklıdır.</span>
+      <span class="mono">Türkiye'de tasarlandı · self-hosted</span>
+    </div>
+  </div>
+</footer>
+<script src="/site.js" defer></script>
+</body>
+</html>

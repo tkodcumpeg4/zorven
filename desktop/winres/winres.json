@@ -1,0 +1,71 @@
+{
+  "RT_GROUP_ICON": {
+    "#3": {
+      "0000": [
+        "icon_256.png",
+        "icon_128.png",
+        "icon_64.png",
+        "icon_48.png",
+        "icon_32.png",
+        "icon_16.png"
+      ]
+    },
+    "#1": {
+      "0000": [
+        "icon_256.png",
+        "icon_128.png",
+        "icon_64.png",
+        "icon_48.png",
+        "icon_32.png",
+        "icon_16.png"
+      ]
+    },
+    "APP": {
+      "0000": [
+        "icon_256.png",
+        "icon_128.png",
+        "icon_64.png",
+        "icon_48.png",
+        "icon_32.png",
+        "icon_16.png"
+      ]
+    }
+  },
+  "RT_MANIFEST": {
+    "#1": {
+      "0409": {
+        "identity": {
+          "name": "Zorven",
+          "version": "0.1.0.0"
+        },
+        "description": "Zorven Güvenli Tünel İstemcisi",
+        "minimum-os": "win10",
+        "execution-level": "as invoker",
+        "dpi-awareness": "system",
+        "use-common-controls-v6": true
+      }
+    }
+  },
+  "RT_VERSION": {
+    "#1": {
+      "0000": {
+        "fixed": {
+          "file_version": "0.1.0.0",
+          "product_version": "0.1.0.0"
+        },
+        "info": {
+          "0409": {
+            "CompanyName": "Zorven",
+            "FileDescription": "Zorven Güvenli Tünel İstemcisi",
+            "FileVersion": "0.1.0.0",
+            "InternalName": "Zorven",
+            "LegalCopyright": "Zorven",
+            "OriginalFilename": "Zorven.exe",
+            "ProductName": "Zorven",
+            "ProductVersion": "0.1.0.0"
+          }
+        }
+      }
+    }
+  }
+}

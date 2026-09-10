@@ -1,0 +1,12 @@
+-- Ayri bir TEST veritabani olustur.
+--
+-- NEDEN: pgstore testleri tablolari TRUNCATE ediyor. Gercek veritabaniyla
+-- calistirilirsa tum istemci, tunel ve ayarlar yok olur; bu bir kez yasandi.
+-- pgstore_test.go artik adinda "test" gecmeyen bir DSN'i REDDEDIYOR, bu dosya
+-- da o veritabanini hazir ediyor.
+--
+-- Bu betik yalnizca volume ILK kez olusturulurken calisir. Mevcut bir kurulumda
+-- elle olusturmak icin:
+--   docker exec reverse-proxy-shell-postgres-1 \
+--     psql -U rpshell -d rpshell -c "CREATE DATABASE rpshell_test OWNER rpshell;"
+CREATE DATABASE rpshell_test OWNER rpshell;

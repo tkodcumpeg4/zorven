@@ -1,0 +1,35 @@
+{
+  "name": "reverse-proxy-shell-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "nuxt dev",
+    "build": "nuxt build",
+    "preview": "nuxt preview",
+    "typecheck": "nuxt typecheck",
+    "generate": "nuxt generate"
+  },
+  "dependencies": {
+    "@nuxtjs/i18n": "^9.5.6",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "better-auth": "^1.7.3",
+    "nodemailer": "^6.10.1",
+    "nuxt": "^4.0.0",
+    "pg": "^8.23.0",
+    "qrcode": "^1.5.4",
+    "vue": "^3.5.0",
+    "vue-router": "^4.4.0"
+  },
+  "devDependencies": {
+    "@nuxt/fonts": "^0.11.0",
+    "@nuxt/icon": "^1.10.0",
+    "@tailwindcss/vite": "^4.0.0",
+    "@types/nodemailer": "^6.4.24",
+    "@types/pg": "^8.23.1",
+    "@types/qrcode": "^1.5.6",
+    "tailwindcss": "^4.0.0",
+    "typescript": "^5.6.0",
+    "vue-tsc": "^2.1.0"
+  }
+}

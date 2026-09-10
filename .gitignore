@@ -1,0 +1,91 @@
+# Environment variables & secrets
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+*.cert
+*.crt
+
+# Node.js / Nuxt
+node_modules/
+.nuxt/
+.output/
+.nitro/
+/dist/
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+yarn-error.log*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv/
+
+# Go / Binary outputs
+bin/
+dist/
+build/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Logs
+logs/
+*.log
+
+# IDE & Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Go binary ciktilari (*.exe zaten yukarida)
+*.test
+rpshell-server
+rpshell-client
+
+# Database dumps & backups
+*.db
+*.db-wal
+*.db-shm
+*.yedek
+*.bak
+/rpshell*.sql
+*.dump
+
+# TLS sertifikalari (rpshell-server cert ile uretilir, ASLA commit edilmez).
+# Uretilen sertifikalar certs/ dizinine yazilir; Go kaynagi server/tlscert/
+# altinda oldugu icin bu desen kaynak kodu yakalamaz.
+certs/
+
+# Wails derleme ciktilari
+desktop/build/bin/
+desktop/frontend/wailsjs/
+
+# Wails frontend'i KAYNAK dosyadir, derleme ciktisi degil.
+# Yukaridaki /dist/ koke sabitli olsa da acikca istisna tutuyoruz ki
+# ileride genel bir dist/ deseni eklenirse uygulama bozulmasin.
+!desktop/frontend/dist/
+
+# Gomulu dashboard: uretilmis dosyalar (scripts/build-dashboard.sh).
+# Yer tutucu index.html commit'li kalir ki sunucu her zaman derlensin.
+server/webdist/*
+!server/webdist/index.html
+
+# Kurulum ve gecici planlama dosyalari
+deploy/kurulum-bilgileri.txt
+.planning/
+

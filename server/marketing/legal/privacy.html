@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gizlilik Politikası — Zorven</title>
+<meta name="description" content="Zorven gizlilik politikası: hangi verileri, neden ve nasıl işlediğimiz.">
+<meta name="robots" content="index,follow">
+<link rel="icon" type="image/svg+xml" href="/logo.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="bg-fx"><div class="grid"></div><div class="glow"></div></div>
+<header><div class="wrap nav">
+  <a class="brand" href="/"><img class="mark" src="/logo.svg" alt="Zorven" width="30" height="30"> zorven</a>
+  <nav class="nav-links"><a href="/#ozellikler">Özellikler</a><a href="/#fiyat">Fiyatlandırma</a><a href="/docs">Dokümanlar</a></nav>
+  <div class="nav-cta"><a class="btn btn-ghost" href="https://panel.zorven.app">Panele Giriş</a><a class="btn btn-primary" href="https://panel.zorven.app">Ücretsiz Başla</a></div>
+</div></header>
+
+<section class="page-hero"><div class="narrow">
+  <div class="eyebrow">Yasal</div>
+  <h1>Gizlilik Politikası</h1>
+  <p>Zorven olarak gizliliğine önem veriyoruz. Bu politika hangi verileri, neden ve nasıl işlediğimizi açıklar.</p>
+  <div class="updated">Son güncelleme: 09.09.2026</div>
+</div></section>
+
+<article class="prose"><div class="narrow">
+  <div class="note">Bilgilendirme amaçlıdır; tüzel kişilik kurulunca resmi bilgilerle güncellenecektir. Yasal ayrıntılar için <a href="/legal/kvkk">KVKK Aydınlatma Metni</a>'ne de bakın.</div>
+
+  <h2>1. Topladığımız veriler</h2>
+  <ul>
+    <li><strong>Hesap:</strong> ad, e-posta, şifre (yalnızca güvenli hash olarak).</li>
+    <li><strong>Güvenlik:</strong> oturum ve 2FA kayıtları, IP adresi, tarayıcı/cihaz bilgisi.</li>
+    <li><strong>Kullanım:</strong> tünellerden geçen isteklerin meta verisi (zaman, yöntem, yol, durum, süre, kaynak IP) ve bağlı cihaz telemetrisi (CPU/RAM/disk).</li>
+    <li><strong>Ödeme:</strong> abonelikler <strong>Paddle (Merchant of Record)</strong> üzerinden yürütülür; kart bilgilerinizi biz görmez ve saklamayız.</li>
+  </ul>
+  <p>Tünellerinizden geçen <strong>içeriği</strong> (istek/yanıt gövdelerini) kalıcı olarak saklamayız; yalnızca yukarıdaki meta veriyi log olarak tutarız.</p>
+
+  <h2>2. Verileri neden işliyoruz</h2>
+  <ul>
+    <li>Hizmeti sunmak, hesabını doğrulamak ve tünellerini yönetmek.</li>
+    <li>Güvenliği sağlamak, kötüye kullanımı ve dolandırıcılığı önlemek.</li>
+    <li>İşlemsel e-postalar (doğrulama, şifre sıfırlama, giriş kodu) göndermek.</li>
+    <li>Yasal yükümlülükleri yerine getirmek.</li>
+  </ul>
+
+  <h2>3. Paylaşım</h2>
+  <p>Verilerini satmayız. Yalnızca hizmeti sunmak için gerekli hizmet sağlayıcılarla paylaşırız: ödeme için <strong>Paddle</strong>, barındırma için veri merkezimiz. E-postalar kendi mail sunucumuzdan (Postfix) gönderilir.</p>
+
+  <h2>4. Güvenlik</h2>
+  <p>Tüm trafik TLS ile şifrelenir. Şifreler modern algoritmalarla hash'lenir. İsteğe bağlı iki adımlı doğrulama (2FA), IP izin listesi ve API anahtarı kapsamları sunulur. Hassas işlemlere istek sınırı (rate limit) uygulanır.</p>
+
+  <h2>5. Saklama ve silme</h2>
+  <p>Hesap verileri hesabın aktif olduğu sürece; loglar planına bağlı süre (ör. 1–30 gün) boyunca tutulur. Hesabını kapattığında verilerin makul sürede silinir veya anonimleştirilir.</p>
+
+  <h2>6. Haklarını kullanma</h2>
+  <p>Verilerine erişebilir, düzeltebilir veya silinmesini isteyebilirsin. <a href="https://panel.zorven.app/profile">Profil</a> sayfasından ad/e-posta/şifreni yönetebilir, taleplerini <a href="mailto:kvkk@zorven.app">kvkk@zorven.app</a> adresine iletebilirsin.</p>
+
+  <h2>7. İletişim</h2>
+  <p>Gizlilikle ilgili sorular için: <a href="mailto:privacy@zorven.app">privacy@zorven.app</a>.</p>
+</div></article>
+
+<footer><div class="wrap">
+  <div class="foot">
+    <div class="col about"><a class="brand" href="/"><img class="mark" src="/logo.svg" alt="Zorven" width="30" height="30"> zorven</a><p>Kendi sunucunda barınan, yayınlanabilir tünel platformu. Verin senin kontrolünde.</p></div>
+    <div class="col"><h4>Ürün</h4><a href="/#ozellikler">Özellikler</a><a href="/#fiyat">Fiyatlandırma</a><a href="/docs">Dokümanlar</a><a href="/download">İndir</a></div>
+    <div class="col"><h4>Şirket</h4><a href="/about">Hakkında</a><a href="/contact">İletişim</a><a href="mailto:abuse@zorven.app">Kötüye kullanım</a></div>
+    <div class="col"><h4>Yasal</h4><a href="/legal/terms">Kullanım Koşulları</a><a href="/legal/privacy">Gizlilik Politikası</a><a href="/legal/kvkk">KVKK Aydınlatma</a><a href="/legal/cookies">Çerez Politikası</a><a href="/legal/aup">Kabul Edilebilir Kullanım</a></div>
+  </div>
+  <div class="foot-bottom"><span>© 2026 Zorven. Tüm hakları saklıdır.</span><span class="mono">Türkiye'de tasarlandı · self-hosted</span></div>
+</div></footer>
+<script src="/site.js" defer></script>
+</body></html>

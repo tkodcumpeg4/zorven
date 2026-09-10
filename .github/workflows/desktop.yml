@@ -1,0 +1,82 @@
+# Masaustu uygulamasini uc platform icin derler.
+#
+# NEDEN CI GEREKLI: Wails cross-compile DESTEKLEMEZ. Go'nun aksine her
+# platformun binary'si o platformda derlenmelidir — macOS Xcode/WebKit,
+# Linux WebKitGTK, Windows WebView2 gerektirir. Bu yuzden matrix kullaniyoruz.
+name: desktop
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows/amd64
+            artifact: rpshell-desktop-windows-amd64
+            ext: .exe
+          - os: macos-latest
+            platform: darwin/universal   # Intel + Apple Silicon tek pakette
+            artifact: rpshell-desktop-macos
+            ext: ""
+          - os: ubuntu-latest
+            platform: linux/amd64
+            artifact: rpshell-desktop-linux-amd64
+            ext: ""
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      # Linux'ta WebKitGTK ve gtk3 gerekli; digerleri hazir gelir.
+      - name: Linux bagimliliklari
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
+
+      - name: Wails kur
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.15.0
+
+      # Windows'ta NSIS ile profesyonel .exe installer da uret.
+      - name: NSIS kur (Windows)
+        if: matrix.os == 'windows-latest'
+        run: choco install nsis -y
+
+      - name: Derle
+        working-directory: desktop
+        run: wails build -platform ${{ matrix.platform }} -o rpshell-desktop${{ matrix.ext }}
+
+      # Windows installer: -nsis, build/bin altina rpshell-*-installer.exe koyar.
+      - name: Windows installer uret
+        if: matrix.os == 'windows-latest'
+        working-directory: desktop
+        run: wails build -platform ${{ matrix.platform }} -nsis -o rpshell-desktop${{ matrix.ext }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: desktop/build/bin/*
+
+  # CLI Go ile cross-compile edilebildigi icin tek is yeterli.
+  cli:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+      - run: ./scripts/build-clients.sh ${{ github.ref_name }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpshell-client-all-platforms
+          path: dist/*

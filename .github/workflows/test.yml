@@ -1,0 +1,32 @@
+name: test
+
+on: [push, pull_request]
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      # -race cgo gerektirir; ubuntu runner'da gcc hazir gelir.
+      # Gelistirme makinesinde (Windows, gcc yok) calistirilamiyordu —
+      # es zamanlilik hatalari burada yakalanmali.
+      - name: Test (race detector ile)
+        run: |
+          for m in shared server client; do
+            (cd "$m" && CGO_ENABLED=1 go test -race ./...) || exit 1
+          done
+
+      - name: Vet
+        run: |
+          for m in shared server client; do
+            (cd "$m" && go vet ./...) || exit 1
+          done
+
+      - name: gofmt
+        run: |
+          out=$(gofmt -l shared server client desktop)
+          if [ -n "$out" ]; then echo "Formatlanmamis dosyalar:"; echo "$out"; exit 1; fi

@@ -1,0 +1,30 @@
+# Docker build context'i yalın tut: sunucu imajı yalnızca server/ + shared/ ister.
+.git
+.github
+.claude
+
+# Diğer modüller / uygulamalar (sunucu derlemesi için gereksiz)
+client
+desktop
+web
+installer
+docs
+scripts
+
+# Derleme çıktıları / ikili artefaktlar
+bin
+dist
+server/bin
+server/certs
+**/node_modules
+web/.nuxt
+web/.output
+desktop/build
+
+# Yerel gizli dosyalar ve dokümanlar
+deploy/.env
+deploy/certs
+*.md
+*.exe
+*.log
+extracted_exe_icon.png

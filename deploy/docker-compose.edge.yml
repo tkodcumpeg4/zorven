@@ -1,0 +1,35 @@
+services:
+  zorven-edge:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8443:8443"
+    environment:
+      # Primary VPS üzerindeki Postgres'e bağlanır
+      - ZORVEN_DB_DSN=${PRIMARY_DB_DSN}
+      - ZORVEN_PLATFORM_DOMAIN=${PLATFORM_DOMAIN:-zorven.app}
+      - ZORVEN_ADMIN_KEY=${ADMIN_KEY}
+      - ZORVEN_CLUSTER_ROLE=edge
+      - ZORVEN_NODE_ID=${NODE_ID:-vps-edge-1}
+      - ZORVEN_CLUSTER_SECRET=${CLUSTER_SECRET}
+      - ZORVEN_CLUSTER_ADDR=https://${PUBLIC_IP_OR_HOST}:8443
+    volumes:
+      - certs:/app/certs
+    command: >
+      serve
+      --addr :8443
+      --http-addr :80
+      --tls-cert /app/certs/server.crt
+      --tls-key /app/certs/server.key
+      --platform-domain ${PLATFORM_DOMAIN:-zorven.app}
+      --cluster-role edge
+      --node-id ${NODE_ID:-vps-edge-1}
+      --cluster-secret ${CLUSTER_SECRET}
+      --cluster-addr https://${PUBLIC_IP_OR_HOST}:8443
+
+volumes:
+  certs:

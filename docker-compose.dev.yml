@@ -1,0 +1,31 @@
+# Yerel gelistirme icin Postgres.
+#
+# Kullanim:
+#   docker compose -f docker-compose.dev.yml up -d
+#   cd server && go run . serve --allow-insecure \
+#     --db-dsn "postgres://rpshell:rpshell@localhost:5432/rpshell"
+#
+# Kimlik bilgileri YALNIZCA yerel gelistirme icindir; uretimde kullanilmaz.
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: rpshell
+      POSTGRES_PASSWORD: rpshell
+      POSTGRES_DB: rpshell
+    ports:
+      - "5432:5432"
+    volumes:
+      - rpshell_pg:/var/lib/postgresql/data
+      # Ilk kurulumda ayri bir TEST veritabani olusturur (rpshell_test).
+      # Testler tablolari TRUNCATE ettigi icin gercek veritabaniyla
+      # calistirilmamalari sart; pgstore_test.go bunu ayrica zorluyor.
+      - ./scripts/pg-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rpshell -d rpshell"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  rpshell_pg:

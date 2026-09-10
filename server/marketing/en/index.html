@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Zorven — Self-hosted tunnel platform</title>
+<meta name="description" content="Expose your local service in one command, on your own domain, securely. Zorven is a self-hosted, publishable ngrok / Cloudflare Tunnel alternative.">
+<link rel="icon" type="image/svg+xml" href="/logo.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/home.css">
+</head>
+<body>
+<div class="bg-fx"><div class="grid"></div><div class="glow"></div></div>
+
+<header>
+  <div class="wrap nav">
+    <a class="brand" href="/en"><img class="mark" src="/logo.svg" alt="Zorven" width="30" height="30"> zorven</a>
+    <nav class="nav-links">
+      <a href="/en/#features">Features</a>
+      <a href="/en/#how">How it works</a>
+      <a href="/en/#pricing">Pricing</a>
+      <a href="/en/download">Download</a>
+      <a href="/en/docs">Docs</a>
+    </nav>
+    <div class="nav-cta">
+      <a class="btn btn-ghost" href="https://panel.zorven.app">Sign in</a>
+      <a class="btn btn-primary" href="https://panel.zorven.app">Start Free</a>
+    </div>
+  </div>
+</header>
+
+<section class="hero">
+  <div class="wrap">
+    <span class="badge"><span class="dot"></span> Self-hosted tunnel platform</span>
+    <h1>Open localhost <span class="grad">to the world.</span><br>On your domain, by your rules.</h1>
+    <p class="sub">Expose your local service in a single command, over secure TLS. Zorven is a self-hosted,
+      publishable <b style="color:var(--fg)">ngrok / Cloudflare Tunnel alternative</b> — your data stays on your server.</p>
+    <div class="hero-cta">
+      <a class="btn btn-primary btn-lg" href="https://panel.zorven.app">Start Free →</a>
+      <a class="btn btn-ghost btn-lg" href="/en/#how">How it works?</a>
+    </div>
+    <p class="hero-note"><b>No credit card</b> · Open source · Windows · macOS · Linux</p>
+
+    <div class="terminal">
+      <div class="bar"><i></i><i></i><i></i><span class="t">bash — zorven</span></div>
+      <div class="body">
+<div class="l"><span class="pr">$</span> <span class="cm">curl -fsSL https://zorven.app/install.sh | sh</span></div>
+<div class="l"><span class="fl">→ Zorven client installed (v1.0)</span></div>
+<div class="l"><span class="pr">$</span> <span class="cm">zorven http 3000</span></div>
+<div class="l"><span class="ok"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span> <span class="fl">Tunnel ready:</span> <span class="url">https://blue-panda.zorven.app</span> <span class="fl">→ localhost:3000</span></div>
+<div class="l"><span class="ok"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span> <span class="fl">TLS on · WebSocket ready · live logs streaming</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="features">
+  <div class="wrap">
+    <div class="center">
+      <div class="eyebrow">Features</div>
+      <h2>More than a tunnel.</h2>
+      <p class="lead">From sharing your dev server to publishing a custom domain in production — one platform.</p>
+    </div>
+    <div class="bento">
+      <div class="card col-3 big feature-glow">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg></div>
+        <h3>Instant secure tunnels</h3>
+        <p>Expose any local port in one command with a valid TLS certificate. HTTP, WebSocket and long-lived connections pass through cleanly.</p>
+      </div>
+      <div class="card col-3 big feature-glow">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg></div>
+        <h3>Your own custom domain</h3>
+        <p>Bring your own domain like api.yourco.com; Zorven issues and renews the certificate automatically via Let's Encrypt.</p>
+      </div>
+      <div class="card col-2">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></div>
+        <h3>Live logs</h3>
+        <p>Watch every request in real time with advanced filters, status codes, latency and export.</p>
+      </div>
+      <div class="card col-2">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></svg></div>
+        <h3>2FA & security</h3>
+        <p>Harden access with two-factor auth, IP allowlists and scoped API keys.</p>
+      </div>
+      <div class="card col-2">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></div>
+        <h3>Team management</h3>
+        <p>Manage with your team using organizations, roles and member tokens.</p>
+      </div>
+      <div class="card col-3">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m4 17 6-6-6-6"/><path d="M12 19h8"/></svg></div>
+        <h3>Remote terminal & screen</h3>
+        <p>Secure remote terminal and screen access to connected devices from the panel — with live hardware telemetry.</p>
+      </div>
+      <div class="card col-3">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="8" x="2" y="2" rx="2"/><rect width="20" height="8" x="2" y="14" rx="2"/><path d="M6 6h.01"/><path d="M6 18h.01"/></svg></div>
+        <h3>Self-hosted, your data</h3>
+        <p>Runs on your own server. Your traffic and logs never leave for a third party — fully under your control.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="how">
+  <div class="wrap">
+    <div class="center">
+      <div class="eyebrow">How it works</div>
+      <h2>Live in three steps.</h2>
+    </div>
+    <div class="steps">
+      <div class="step"><div class="n">1</div><h3>Install</h3><p>Install the client in one command, or grab the desktop app.</p><code>curl -fsSL zorven.app/install.sh | sh</code></div>
+      <div class="step"><div class="n">2</div><h3>Connect</h3><p>Sign in with a token from the panel; your device pairs instantly.</p><code>zorven auth &lt;token&gt;</code></div>
+      <div class="step"><div class="n">3</div><h3>Publish</h3><p>Expose your local port; Zorven gives you a secure public URL.</p><code>zorven http 3000</code></div>
+    </div>
+
+    <div class="preview">
+      <div class="top"><i></i><i></i><i></i><span class="u">panel.zorven.app</span></div>
+      <div class="cnt">
+        <div class="side">
+          <div class="item on">Overview</div>
+          <div class="item">Tunnels</div>
+          <div class="item">Domains</div>
+          <div class="item">Logs</div>
+          <div class="item">Team</div>
+          <div class="item">Security</div>
+        </div>
+        <div class="main">
+          <div class="stat-row">
+            <div class="stat"><div class="k">Active tunnels</div><div class="v g">3</div></div>
+            <div class="stat"><div class="k">Devices</div><div class="v">2</div></div>
+            <div class="stat"><div class="k">Req / min</div><div class="v">1.2k</div></div>
+            <div class="stat"><div class="k">p95 latency</div><div class="v">38ms</div></div>
+          </div>
+          <div class="logs">
+            <div class="logrow"><span class="m-get">GET</span><span class="s2">200</span><span>/api/v1/orders</span><span>14ms</span></div>
+            <div class="logrow"><span class="m-post">POST</span><span class="s2">201</span><span>/webhooks/stripe</span><span>62ms</span></div>
+            <div class="logrow"><span class="m-get">GET</span><span class="s4">404</span><span>/assets/old.js</span><span>8ms</span></div>
+            <div class="logrow"><span class="m-get">GET</span><span class="s2">200</span><span>/health</span><span>3ms</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="pricing">
+  <div class="wrap">
+    <div class="center">
+      <div class="eyebrow">Pricing</div>
+      <h2>Simple, predictable.</h2>
+      <p class="lead">Start free and upgrade as you grow. Cancel anytime.</p>
+    </div>
+    <div class="plans">
+      <div class="plan">
+        <div class="pname">Free</div>
+        <div class="price">$0<span> / mo</span></div>
+        <ul>
+          <li><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg> 2 tunnels · 2 devices</li>
+          <li><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg> zorven.app subdomains · 5 GB</li>
+          <li><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg> Live logs (1 day)</li>
+          <li><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg> 2FA & community support</li>
+        </ul>
+        <a class="btn btn-ghost" href="https://panel.zorven.app">Get started</a>
+      </div>
+      <div class="plan pop">
+        <span class="tag">Most popular</span>
+        <div class="pname">Pro</div>
+        <div class="price">$12<span> / mo</span></div>
+        <ul>
+          <li><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg> 20 tunnels · 15 devices · 100 GB</li>
+          <li><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg> Custom domain + auto TLS</li>
+          <li><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg> API access & IP filtering</li>
+          <li><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg> Log retention (7 days) · 3 members</li>
+        </ul>
+        <a class="btn btn-primary" href="https://panel.zorven.app">Go Pro</a>
+      </div>
+      <div class="plan">
+        <div class="pname">Team</div>
+        <div class="price">$29<span> / mo</span></div>
+        <ul>
+          <li><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg> 50 tunnels · 50 devices · 250 GB</li>
+          <li><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg> Team & role management (5 members)</li>
+          <li><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg> Log retention (30 days)</li>
+          <li><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg> Priority support</li>
+        </ul>
+        <a class="btn btn-ghost" href="https://panel.zorven.app">Get started</a>
+      </div>
+      <div class="plan">
+        <div class="pname">Enterprise</div>
+        <div class="price">Custom<span> / quote</span></div>
+        <ul>
+          <li><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg> Unlimited tunnels · devices · data</li>
+          <li><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg> SSO & custom integrations</li>
+          <li><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg> SLA & 24/7 priority support</li>
+          <li><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg> On-premise deployment</li>
+        </ul>
+        <a class="btn btn-ghost" href="mailto:sales@zorven.app?subject=Zorven%20Enterprise%20Plan%20Inquiry">Contact us</a>
+      </div>
+    </div>
+    <p style="text-align:center;margin-top:24px;color:var(--fg-subtle);font-size:14px">A Hobby ($5/mo) plan is also available. Payments are handled securely by Paddle.</p>
+  </div>
+</section>
+
+<section class="wrap">
+  <div class="cta-band">
+    <h2>Your next tunnel is one command away.</h2>
+    <p>Create a free account and publish your first service in 60 seconds.</p>
+    <div class="hero-cta">
+      <a class="btn btn-primary btn-lg" href="https://panel.zorven.app">Start Free →</a>
+      <a class="btn btn-ghost btn-lg" href="/en/docs">Read the docs</a>
+    </div>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="foot">
+    <div class="col about">
+      <a class="brand" href="/en"><img class="mark" src="/logo.svg" alt="Zorven" width="30" height="30"> zorven</a>
+      <p>Self-hosted, publishable tunnel platform. Your data, under your control.</p>
+    </div>
+    <div class="col"><h4>Product</h4><a href="/en/#features">Features</a><a href="/en/#pricing">Pricing</a><a href="/en/docs">Docs</a><a href="/en/download">Download</a></div>
+    <div class="col"><h4>Company</h4><a href="/en/about">About</a><a href="/en/contact">Contact</a><a href="mailto:abuse@zorven.app">Abuse</a></div>
+    <div class="col"><h4>Legal</h4><a href="/en/legal/terms">Terms of Service</a><a href="/en/legal/privacy">Privacy Policy</a><a href="/en/legal/kvkk">Data Protection (KVKK)</a><a href="/en/legal/cookies">Cookie Policy</a><a href="/en/legal/aup">Acceptable Use</a></div>
+  </div>
+  <div class="foot-bottom"><span>© 2026 Zorven. All rights reserved.</span><span class="mono">Designed in Türkiye · self-hosted</span></div>
+</div></footer>
+<script src="/site.js" defer></script>
+</body></html>

@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dokümanlar — Zorven</title>
+<meta name="description" content="Zorven hızlı başlangıç: kur, bağlan, yayınla. CLI ve masaüstü uygulaması kullanımı.">
+<meta name="robots" content="index,follow">
+<link rel="icon" type="image/svg+xml" href="/logo.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="bg-fx"><div class="grid"></div><div class="glow"></div></div>
+<header><div class="wrap nav">
+  <a class="brand" href="/"><img class="mark" src="/logo.svg" alt="Zorven" width="30" height="30"> zorven</a>
+  <nav class="nav-links"><a href="/#ozellikler">Özellikler</a><a href="/#fiyat">Fiyatlandırma</a><a href="/docs">Dokümanlar</a></nav>
+  <div class="nav-cta"><a class="btn btn-ghost" href="https://panel.zorven.app">Panele Giriş</a><a class="btn btn-primary" href="https://panel.zorven.app">Ücretsiz Başla</a></div>
+</div></header>
+
+<section class="page-hero"><div class="narrow">
+  <div class="eyebrow">Dokümanlar</div>
+  <h1>Hızlı Başlangıç</h1>
+  <p>Üç adımda ilk tünelini aç: kur, bağlan, yayınla.</p>
+</div></section>
+
+<article class="prose"><div class="narrow">
+  <h2>1. Kur</h2>
+  <p>Linux / macOS için tek komut:</p>
+  <div class="code-block">curl -fsSL https://zorven.app/install.sh | sh</div>
+  <p>Windows için PowerShell:</p>
+  <div class="code-block">irm https://zorven.app/install.ps1 | iex</div>
+  <p>Tercihen <a href="/download">masaüstü uygulamasını</a> da indirebilirsin.</p>
+
+  <h2>2. Bağlan</h2>
+  <p><a href="https://panel.zorven.app">Panelden</a> bir istemci token'ı oluştur ve bağlan:</p>
+  <div class="code-block">zorven auth zrv_live_...</div>
+
+  <h2>3. Yayınla</h2>
+  <p>Yerel bir portu güvenli bir genel URL ile aç:</p>
+  <div class="code-block">zorven http 3000</div>
+  <p>Çıktıdaki <code>https://&lt;ad&gt;.zorven.app</code> adresi anında yayında olur — geçerli TLS ve WebSocket desteğiyle.</p>
+
+  <h2>Özel domain</h2>
+  <p>Kendi alan adını (ör. <code>api.sirketin.com</code>) panelden ekleyip DNS doğrulamasını tamamladığında, Zorven sertifikayı otomatik alır ve yeniler.</p>
+
+  <h2>Daha fazlası</h2>
+  <p>Ayrıntılı rehberler ve API referansı yakında bu sayfada. Sorular için <a href="/contact">iletişim</a> sayfasına göz at.</p>
+</div></article>
+
+<footer><div class="wrap">
+  <div class="foot">
+    <div class="col about"><a class="brand" href="/"><img class="mark" src="/logo.svg" alt="Zorven" width="30" height="30"> zorven</a><p>Kendi sunucunda barınan, yayınlanabilir tünel platformu. Verin senin kontrolünde.</p></div>
+    <div class="col"><h4>Ürün</h4><a href="/#ozellikler">Özellikler</a><a href="/#fiyat">Fiyatlandırma</a><a href="/docs">Dokümanlar</a><a href="/download">İndir</a></div>
+    <div class="col"><h4>Şirket</h4><a href="/about">Hakkında</a><a href="/contact">İletişim</a><a href="mailto:abuse@zorven.app">Kötüye kullanım</a></div>
+    <div class="col"><h4>Yasal</h4><a href="/legal/terms">Kullanım Koşulları</a><a href="/legal/privacy">Gizlilik Politikası</a><a href="/legal/kvkk">KVKK Aydınlatma</a><a href="/legal/cookies">Çerez Politikası</a><a href="/legal/aup">Kabul Edilebilir Kullanım</a></div>
+  </div>
+  <div class="foot-bottom"><span>© 2026 Zorven. Tüm hakları saklıdır.</span><span class="mono">Türkiye'de tasarlandı · self-hosted</span></div>
+</div></footer>
+<script src="/site.js" defer></script>
+</body></html>

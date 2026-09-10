@@ -1,0 +1,13 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "Zorven",
+  "outputfilename": "Zorven",
+  "frontend:dir": "frontend",
+  "wailsjsdir": "./frontend",
+  "info": {
+    "productName": "Zorven",
+    "productVersion": "0.1.0",
+    "companyName": "Zorven",
+    "comments": "Zorven Güvenli Tünel İstemcisi"
+  }
+}

@@ -1,0 +1,149 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-rpshell}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-zorven_db_secure_pass_123}
+      POSTGRES_DB: ${POSTGRES_DB:-rpshell}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      # Küme içi diğer Edge düğümlerin veritabanına erişebilmesi için (veya dahili VPN/VPC üzerinden)
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-rpshell} -d ${POSTGRES_DB:-rpshell}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  zorven-primary:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      web:
+        condition: service_started
+    ports:
+      - "80:80"
+      - "443:443"
+      # 8443 geriye dönük uyumluluk için container'ın 443'üne yönlendirilir
+      # (INSTALL.md ve eski CLI dokümanları :8443 kullanır).
+      - "8443:443"
+      # Webmail inbound SMTP: mail.<domain> MX buraya gelen mailleri teslim eder.
+      # NOT: sunucu firewall'unda ve hosting sağlayıcıda inbound 25 açık olmalı.
+      - "25:25"
+    environment:
+      - ZORVEN_DB_DSN=postgres://${POSTGRES_USER:-rpshell}:${POSTGRES_PASSWORD:-zorven_db_secure_pass_123}@postgres:5432/${POSTGRES_DB:-rpshell}?sslmode=disable
+      - ZORVEN_PLATFORM_DOMAIN=${PLATFORM_DOMAIN:-zorven.app}
+      - ZORVEN_ADMIN_KEY=${ADMIN_KEY}
+      - ZORVEN_CLUSTER_ROLE=primary
+      - ZORVEN_NODE_ID=${NODE_ID:-vps-primary-1}
+      - ZORVEN_CLUSTER_SECRET=${CLUSTER_SECRET}
+      - ZORVEN_CLUSTER_ADDR=https://${PUBLIC_IP_OR_HOST:-vps-primary.internal}:443
+      - ZORVEN_ACME_EMAIL=${ACME_EMAIL}
+      # Better Auth (kayit/giris/e-posta dogrulama) ucları web (Nitro) servisine proxy'lenir.
+      - ZORVEN_AUTH_UPSTREAM=http://web:3000
+      # Self-hosted analytics (Umami): /_a/* umami'ye proxy'lenir.
+      - ZORVEN_ANALYTICS_UPSTREAM=http://umami:3000
+      # Webmail: gelen SMTP alıcısını (:25) ve giden relay'i (mail:587) etkinleştirir.
+      # Adresler org-slug@mail.<domain> biçimindedir. Boş bırakılırsa webmail kapalı.
+      - ZORVEN_MAIL_DOMAIN=mail.${PLATFORM_DOMAIN:-zorven.app}
+    volumes:
+      # certs bir bind mount: setup öncesi buraya self-signed server.crt/server.key
+      # yerleştirilir. DualCertManager bilinmeyen host'lar (ör. IP) için anında
+      # dev sertifikası üretir, doğrulanmış custom domain'ler için ACME kullanır.
+      - ./certs:/app/certs
+      - client_bins:/app/server/bin
+    command: >
+      serve
+      --addr :443
+      --http-addr :80
+      --tls-cert /app/certs/server.crt
+      --tls-key /app/certs/server.key
+      --platform-domain ${PLATFORM_DOMAIN:-zorven.app}
+      --control-host ${PLATFORM_DOMAIN:-zorven.app}
+      --control-host www.${PLATFORM_DOMAIN:-zorven.app}
+      --control-host panel.${PLATFORM_DOMAIN:-zorven.app}
+      --control-host app.${PLATFORM_DOMAIN:-zorven.app}
+      --control-host localhost
+      --control-host 127.0.0.1
+      --cluster-role primary
+      --node-id ${NODE_ID:-vps-primary-1}
+      --cluster-secret ${CLUSTER_SECRET}
+      --cluster-addr https://${PUBLIC_IP_OR_HOST:-vps-primary.internal}:443
+      --auth-upstream http://web:3000
+
+  # Better Auth (Nitro node-server): kayit/giris/e-posta dogrulama uclari.
+  # Dashboard SPA'sini Go gomulu servis eder; bu servis yalnizca /api/auth/*
+  # calistirir ve tunel sunucusu tarafindan proxy'lenir (disari port ACMAZ).
+  web:
+    build:
+      context: ../web
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mail:
+        condition: service_started
+    environment:
+      - DATABASE_URL=postgres://${POSTGRES_USER:-rpshell}:${POSTGRES_PASSWORD:-zorven_db_secure_pass_123}@postgres:5432/${POSTGRES_DB:-rpshell}?sslmode=disable
+      - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET}
+      # Panel panel.zorven.app'te; auth uclari, dogrulama linkleri ve callback'ler bu host uzerinden.
+      - BETTER_AUTH_URL=https://panel.${PLATFORM_DOMAIN:-zorven.app}
+      - PLATFORM_DOMAIN=${PLATFORM_DOMAIN:-zorven.app}
+      - GITHUB_CLIENT_ID=${GITHUB_CLIENT_ID:-}
+      - GITHUB_CLIENT_SECRET=${GITHUB_CLIENT_SECRET:-}
+      # E-posta: dahili Postfix (mail servisi). Lokal ag, auth gerektirmez.
+      - SMTP_HOST=mail
+      - SMTP_PORT=587
+      - SMTP_FROM=${SMTP_FROM:-Zorven <no-reply@zorven.app>}
+      - SMTP_ALLOW_SELF_SIGNED=true
+    expose:
+      - "3000"
+
+  # Kendi sunucumuzda giden e-posta (Postfix + OpenDKIM). Harici saglayici yok.
+  # DKIM_AUTOGENERATE ilk acilista anahtar uretir; DNS'e eklenecek TXT kaydini
+  # loglara yazar:  docker compose logs mail | grep -A3 "DKIM"
+  # Teslim edilebilirlik icin SPF/DKIM/DMARC/PTR sart (bkz. docs/auth-plan.md).
+  mail:
+    image: boky/postfix:latest
+    restart: unless-stopped
+    hostname: mail.${PLATFORM_DOMAIN:-zorven.app}
+    environment:
+      # Hem zorven.app (auth mailleri) hem mail.zorven.app (webmail giden) izinli.
+      # boky/postfix domainleri BOŞLUKLA ayırır (virgül tek literal domain sayılır
+      # ve relay'i bozar). Bu yüzden aralarında boşluk var.
+      - ALLOWED_SENDER_DOMAINS=${PLATFORM_DOMAIN:-zorven.app} mail.${PLATFORM_DOMAIN:-zorven.app}
+      - DKIM_AUTOGENERATE=true
+      - POSTFIX_myhostname=mail.${PLATFORM_DOMAIN:-zorven.app}
+    volumes:
+      - dkim_keys:/etc/opendkim/keys
+    expose:
+      - "587"
+
+  # Self-hosted, gizlilik dostu (cerezsiz) analytics. Kendi Postgres'imizi kullanir
+  # (umami veritabani). BASE_PATH=/_a ile alt yolda calisir; tunel sunucusu
+  # /_a/* isteklerini buraya proxy'ler (disari port ACMAZ). Panel: https://zorven.app/_a
+  umami:
+    image: ghcr.io/umami-software/umami:postgresql-latest
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-rpshell}:${POSTGRES_PASSWORD:-zorven_db_secure_pass_123}@postgres:5432/umami
+      - DATABASE_TYPE=postgresql
+      - APP_SECRET=${UMAMI_APP_SECRET}
+      - DISABLE_TELEMETRY=1
+    expose:
+      - "3000"
+
+volumes:
+  pgdata:
+  client_bins:
+  dkim_keys:
