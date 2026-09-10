@@ -21,7 +21,8 @@ function shell(inner: string): string {
         <tr><td style="padding:28px 32px 8px 32px;">
           <table role="presentation" cellpadding="0" cellspacing="0"><tr>
             <td style="vertical-align:middle;">
-              <span style="display:inline-block;width:34px;height:34px;border-radius:9px;background:${BRAND};color:${BG};text-align:center;line-height:34px;font-weight:800;font-family:Arial,Helvetica,sans-serif;font-size:18px;">Z</span>
+              <img src="https://zorven.app/logo-email.png" width="34" height="34" alt="Zorven" style="display:block;width:34px;height:34px;border-radius:9px;border:0;outline:none;text-decoration:none;">
+
             </td>
             <td style="vertical-align:middle;padding-left:12px;font-family:Arial,Helvetica,sans-serif;font-size:19px;font-weight:700;color:${FG};letter-spacing:-0.3px;">Zorven</td>
           </tr></table>
