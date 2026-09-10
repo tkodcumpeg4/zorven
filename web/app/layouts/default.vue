@@ -48,9 +48,12 @@ const nav = computed(() => {
     { to: '/requests', label: t('nav.logs'),     icon: 'lucide:list' },
     { to: '/mail',     label: t('nav.mail'),     icon: 'lucide:mail' },
   ]
-  // Profil ve 2FA yalnızca e-posta/şifre (Better Auth) hesaplarında anlamlı.
+  // Profil her oturum acmis kullanicida gorunur (sayfa, e-posta/sifre disi
+  // hesaplar icin uygun bir mesaj gosterir). 2FA yalnizca Better Auth'ta anlamli.
+  if (authed.value) {
+    items.push({ to: '/profile', label: t('nav.profile'), icon: 'lucide:user-round' })
+  }
   if (method.value === 'better-auth') {
-    items.push({ to: '/profile',  label: t('nav.profile'),         icon: 'lucide:user-round' })
     items.push({ to: '/security', label: t('nav.accountSecurity'), icon: 'lucide:shield-check' })
   }
   if (platformAdmin.value) {
@@ -237,7 +240,9 @@ async function handleCreateOrg() {
           <div v-if="authed && user" class="hidden sm:flex items-center gap-1.5 rounded-lg border border-line bg-surface px-2.5 py-1 text-xs text-fg-muted">
             <Icon name="lucide:user" class="size-3.5 text-fg-muted" />
             <span class="max-w-[120px] truncate text-fg font-medium">{{ user.name || user.email }}</span>
-            <span v-if="user.role" class="rounded bg-surface-2 border border-line px-1.5 py-0.2 text-[9px] uppercase tracking-wider text-fg-muted font-mono font-semibold">
+            <!-- Rol rozeti: 'owner' herkeste (kisisel org sahibi) cikacagi icin
+                 gosterilmez; yalnizca anlamli roller (admin/member) gosterilir. -->
+            <span v-if="user.role && user.role !== 'owner'" class="rounded bg-surface-2 border border-line px-1.5 py-0.2 text-[9px] uppercase tracking-wider text-fg-muted font-mono font-semibold">
               {{ user.role }}
             </span>
           </div>
@@ -283,7 +288,7 @@ async function handleCreateOrg() {
           </button>
 
           <a
-            href="https://github.com/tkodcumpeg4/reverse-proxy-shell"
+            href="https://github.com/tkodcumpeg4/zorven"
             target="_blank" rel="noopener noreferrer"
             class="grid size-8 cursor-pointer place-items-center rounded-lg border border-line
                    text-fg-muted transition-colors duration-150 hover:bg-surface hover:text-fg"
