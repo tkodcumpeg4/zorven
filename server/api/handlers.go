@@ -796,12 +796,12 @@ func (s *Server) listRequests(w http.ResponseWriter, r *http.Request) {
 				f.Until = t
 			}
 		}
-		// Kiraci kapsami: platform admin tum kiracilari gorur; degilse
-		// yalnizca kendi (etkin) kiracisinin loglari.
-		if !isPlatformAdmin(r.Context()) {
-			if tenantID, ok := s.tenantFor(r); ok {
-				f.TenantID = tenantID
-			}
+		// Kiraci kapsami: Genel Bakis HER ZAMAN ETKIN kiracinin loglarini gosterir
+		// (platform admin baska org'a "Yonetime Gec" yaptiginda o org'un loglarini
+		// gorur; aksi halde kendi org'unun trafigini gorurdu — capraz-kiraci
+		// sizinti). Platform geneli izleme /platform sayfasindadir.
+		if tenantID, ok := s.tenantFor(r); ok {
+			f.TenantID = tenantID
 		}
 
 		if logs, err := s.Store.QueryRequestLogs(r.Context(), f); err == nil {
@@ -814,7 +814,18 @@ func (s *Server) listRequests(w http.ResponseWriter, r *http.Request) {
 		// Sorgu hatasinda bellek ring'e dus (asagida).
 	}
 
-	writeJSON(w, http.StatusOK, s.Log.List(limit, q.Get("tunnel_id")))
+	// Bellek ring fallback (Postgres sorgusu basarisizsa): tenant'a gore suz.
+	entries := s.Log.List(limit, q.Get("tunnel_id"))
+	if tenantID, ok := s.tenantFor(r); ok && tenantID != "" {
+		scoped := make([]reqlog.Entry, 0, len(entries))
+		for _, e := range entries {
+			if e.TenantID == tenantID {
+				scoped = append(scoped, e)
+			}
+		}
+		entries = scoped
+	}
+	writeJSON(w, http.StatusOK, entries)
 }
 
 // stream, GET /api/v1/events — SSE canli olay akisi.
@@ -837,6 +848,11 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 	ch, stop := s.Events.Subscribe()
 	defer stop()
 
+	// Kiraci kapsami: bu akis yalnizca ETKIN kiracinin request.completed
+	// olaylarini gonderir; aksi halde bir platform admin baska org'u izlerken
+	// kendi org'unun canli trafigini gorurdu (capraz-kiraci sizinti).
+	viewerTenant, _ := s.tenantFor(r)
+
 	// Bosta kalan baglantiyi ara proxy'ler kapatmasin diye periyodik yorum.
 	ticker := time.NewTicker(events.HeartbeatInterval)
 	defer ticker.Stop()
@@ -853,6 +869,12 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 		case e, open := <-ch:
 			if !open {
 				return
+			}
+			// request.completed olaylarini etkin kiraciya gore suz.
+			if e.Type == events.TypeRequestCompleted && viewerTenant != "" {
+				if entry, ok := e.Data.(reqlog.Entry); ok && entry.TenantID != "" && entry.TenantID != viewerTenant {
+					continue
+				}
 			}
 			data, err := json.Marshal(e.Data)
 			if err != nil {
