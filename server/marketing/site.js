@@ -8,12 +8,7 @@
   var path = location.pathname;
   var isEN = path === '/en' || path.indexOf('/en/') === 0;
   var lang = isEN ? 'en' : 'tr';
-
-  // --- Tema (aç/koyu) — varsayılan koyu; localStorage'da saklanır ---
-  var THEME_KEY = 'zorven_theme';
-  function currentTheme() { try { return localStorage.getItem(THEME_KEY) === 'light' ? 'light' : 'dark'; } catch (e) { return 'dark'; } }
-  function applyTheme(t) { try { document.documentElement.setAttribute('data-theme', t); } catch (e) {} }
-  applyTheme(currentTheme()); // olabildiğince erken uygula (flash'ı azalt)
+  // Tema tamamen CSS ile: sistem rengine gore (prefers-color-scheme). JS yok.
 
   function trPath() { return isEN ? (path.replace(/^\/en/, '') || '/') : path; }
   function enPath() { return isEN ? path : ('/en' + (path === '/' ? '' : path)); }
@@ -51,22 +46,6 @@
       a.setAttribute('aria-label', isEN ? 'Türkçe' : 'English');
       a.textContent = isEN ? 'TR' : 'EN';
       cta.insertBefore(a, cta.firstChild);
-
-      // Tema geçiş butonu (güneş/ay). Tıklayınca aç/koyu ve localStorage.
-      var SUN = '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M6.3 17.7l-1.4 1.4M19.1 4.9l-1.4 1.4"/></svg>';
-      var MOON = '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>';
-      var tb = document.createElement('button');
-      tb.className = 'btn btn-ghost';
-      tb.style.padding = '0 10px';
-      tb.setAttribute('aria-label', lang === 'en' ? 'Toggle theme' : 'Temayı değiştir');
-      function paintTheme() { tb.innerHTML = currentTheme() === 'light' ? MOON : SUN; }
-      paintTheme();
-      tb.onclick = function () {
-        var next = currentTheme() === 'light' ? 'dark' : 'light';
-        try { localStorage.setItem(THEME_KEY, next); } catch (e) {}
-        applyTheme(next); paintTheme();
-      };
-      cta.insertBefore(tb, cta.firstChild);
     }
     // Onceki rıza kabulse analytics'i yükle
     var prev = null;

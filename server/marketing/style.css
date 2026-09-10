@@ -9,12 +9,15 @@
   --font:'IBM Plex Sans',ui-sans-serif,system-ui,sans-serif;
   --mono:'JetBrains Mono',ui-monospace,monospace;
 }
-:root[data-theme="light"]{
-  --bg:#ffffff; --surface:#ffffff; --surface-2:#f4f4f5;
-  --line:rgba(0,0,0,.09); --line-2:rgba(0,0,0,.15);
-  --fg:#0b0b0d; --fg-muted:#52525b; --fg-subtle:#8a8a93;
-  --accent:#16a34a; --accent-bright:#15803d; --on-accent:#ffffff;
-  --header-bg:rgba(255,255,255,.78); --hover:rgba(0,0,0,.04); --code-bg:#f4f4f5;
+/* Sistem rengi acik ise otomatik acik tema (toggle yok). */
+@media (prefers-color-scheme:light){
+  :root{
+    --bg:#ffffff; --surface:#ffffff; --surface-2:#f4f4f5;
+    --line:rgba(0,0,0,.09); --line-2:rgba(0,0,0,.15);
+    --fg:#0b0b0d; --fg-muted:#52525b; --fg-subtle:#8a8a93;
+    --accent:#16a34a; --accent-bright:#15803d; --on-accent:#ffffff;
+    --header-bg:rgba(255,255,255,.78); --hover:rgba(0,0,0,.04); --code-bg:#f4f4f5;
+  }
 }
 *{box-sizing:border-box}
 html{scroll-behavior:smooth}
