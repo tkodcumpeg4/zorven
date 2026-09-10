@@ -56,10 +56,15 @@ func marketingHandler() http.Handler {
 	// yapar ve bizim dizin->index eslemesiyle birlikte yonlendirme dongusu olur.
 	write := func(w http.ResponseWriter, name string, b []byte) {
 		w.Header().Set("Content-Type", contentType(name))
-		if strings.HasPrefix(name, "_") || path.Ext(name) != ".html" {
-			w.Header().Set("Cache-Control", "public, max-age=3600")
-		} else {
+		// HTML, CSS ve JS revalidate edilir ki icerik/stil guncellemeleri
+		// kullaniciya ANINDA yansisin. Diger statikler (svg, font, txt, xml)
+		// 1 saat cache'lenir. (Onceden css/js de 1 saat cache'leniyordu; bu,
+		// yeni ozelliklerin gec gorunmesine yol aciyordu.)
+		ext := strings.ToLower(path.Ext(name))
+		if !strings.HasPrefix(name, "_") && (ext == ".html" || ext == ".css" || ext == ".js") {
 			w.Header().Set("Cache-Control", "no-cache")
+		} else {
+			w.Header().Set("Cache-Control", "public, max-age=3600")
 		}
 		w.WriteHeader(http.StatusOK)
 		w.Write(b)

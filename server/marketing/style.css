@@ -4,9 +4,17 @@
   --line:rgba(255,255,255,.08); --line-2:rgba(255,255,255,.14);
   --fg:#F5F5F5; --fg-muted:#A3A3A3; --fg-subtle:#737373;
   --accent:#22C55E; --accent-bright:#4ADE80; --on-accent:#052E16;
+  --header-bg:rgba(10,10,10,.72); --hover:rgba(255,255,255,.03); --code-bg:#0d0d10;
   --radius:14px;
   --font:'IBM Plex Sans',ui-sans-serif,system-ui,sans-serif;
   --mono:'JetBrains Mono',ui-monospace,monospace;
+}
+:root[data-theme="light"]{
+  --bg:#ffffff; --surface:#ffffff; --surface-2:#f4f4f5;
+  --line:rgba(0,0,0,.09); --line-2:rgba(0,0,0,.15);
+  --fg:#0b0b0d; --fg-muted:#52525b; --fg-subtle:#8a8a93;
+  --accent:#16a34a; --accent-bright:#15803d; --on-accent:#ffffff;
+  --header-bg:rgba(255,255,255,.78); --hover:rgba(0,0,0,.04); --code-bg:#f4f4f5;
 }
 *{box-sizing:border-box}
 html{scroll-behavior:smooth}
@@ -23,7 +31,7 @@ img{max-width:100%}
 .bg-fx .grid{position:absolute;inset:0;background-image:linear-gradient(var(--line) 1px,transparent 1px),linear-gradient(90deg,var(--line) 1px,transparent 1px);background-size:56px 56px;mask-image:radial-gradient(ellipse 80% 50% at 50% 0%,#000 40%,transparent 100%);opacity:.4}
 .bg-fx .glow{position:absolute;left:50%;top:-260px;width:900px;height:520px;transform:translateX(-50%);background:radial-gradient(circle at 50% 50%,rgba(34,197,94,.16),transparent 60%);filter:blur(20px)}
 
-header{position:sticky;top:0;z-index:50;backdrop-filter:blur(12px);background:rgba(10,10,10,.72);border-bottom:1px solid var(--line)}
+header{position:sticky;top:0;z-index:50;backdrop-filter:blur(12px);background:var(--header-bg);border-bottom:1px solid var(--line)}
 .nav{display:flex;align-items:center;justify-content:space-between;height:62px}
 .brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:17px;letter-spacing:-.02em}
 .mark{width:30px;height:30px;object-fit:contain;display:block}
@@ -37,7 +45,7 @@ header{position:sticky;top:0;z-index:50;backdrop-filter:blur(12px);background:rg
 .btn-primary{background:var(--accent);color:var(--on-accent)}
 .btn-primary:hover{background:var(--accent-bright);box-shadow:0 8px 28px -8px rgba(34,197,94,.7)}
 .btn-ghost{background:transparent;color:var(--fg);border-color:var(--line-2)}
-.btn-ghost:hover{border-color:var(--fg-subtle);background:rgba(255,255,255,.03)}
+.btn-ghost:hover{border-color:var(--fg-subtle);background:var(--hover)}
 
 /* İç sayfa başlığı */
 .page-hero{padding:72px 0 40px;border-bottom:1px solid var(--line)}
@@ -55,7 +63,7 @@ header{position:sticky;top:0;z-index:50;backdrop-filter:blur(12px);background:rg
 .prose li{margin:6px 0}
 .prose a{color:var(--accent-bright);text-decoration:underline;text-underline-offset:2px}
 .prose strong{color:var(--fg);font-weight:600}
-.prose code{font-family:var(--mono);font-size:.9em;background:#0d0d10;border:1px solid var(--line);border-radius:6px;padding:2px 6px;color:var(--accent-bright)}
+.prose code{font-family:var(--mono);font-size:.9em;background:var(--code-bg);border:1px solid var(--line);border-radius:6px;padding:2px 6px;color:var(--accent-bright)}
 .prose .toc{border:1px solid var(--line);border-radius:12px;background:var(--surface);padding:18px 22px;margin:0 0 34px}
 .prose .toc h4{font-size:12px;text-transform:uppercase;letter-spacing:.1em;color:var(--fg-subtle);margin-bottom:10px}
 .prose .toc a{display:block;color:var(--fg-muted);text-decoration:none;padding:4px 0;font-size:14px}
@@ -72,7 +80,7 @@ header{position:sticky;top:0;z-index:50;backdrop-filter:blur(12px);background:rg
 .card p{font-size:14px;color:var(--fg-muted)}
 .card .ic{width:38px;height:38px;border-radius:10px;background:rgba(34,197,94,.12);color:var(--accent-bright);display:grid;place-items:center;margin-bottom:16px}
 .card .ic svg{width:20px;height:20px}
-.code-block{font-family:var(--mono);font-size:13px;background:#0d0d10;border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:10px 0;color:var(--accent-bright);overflow-x:auto}
+.code-block{font-family:var(--mono);font-size:13px;background:var(--code-bg);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:10px 0;color:var(--accent-bright);overflow-x:auto}
 
 /* Footer */
 footer{border-top:1px solid var(--line);padding:56px 0 40px}
