@@ -89,6 +89,13 @@ function selectMailbox(v: string) {
   mailboxOpen.value = false
 }
 
+// Compose "Kimden" ozel acilir menusu (native select yerine estetik).
+const fromOpen = ref(false)
+function selectFrom(addr: string) {
+  compose.from = addr
+  fromOpen.value = false
+}
+
 onMounted(load)
 
 async function load() {
@@ -444,12 +451,40 @@ async function copyAddress() {
         <form class="mt-4 space-y-3" @submit.prevent="send">
           <div v-if="fromOptions.length > 1">
             <label class="mb-1 block text-xs font-medium text-fg-muted">{{ t('mail.from') }}</label>
-            <select
-              v-model="compose.from"
-              class="w-full rounded-md border border-line bg-bg px-3 py-2 text-sm text-fg focus:border-accent focus:outline-none"
-            >
-              <option v-for="addr in fromOptions" :key="addr" :value="addr">{{ addr }}</option>
-            </select>
+            <div class="relative">
+              <button
+                type="button"
+                class="flex w-full cursor-pointer items-center justify-between gap-2 rounded-md border border-line bg-bg px-3 py-2 text-sm text-fg transition-colors duration-150 hover:border-accent focus:border-accent focus:outline-none"
+                @click="fromOpen = !fromOpen"
+              >
+                <span class="inline-flex min-w-0 items-center gap-2">
+                  <Icon name="lucide:at-sign" class="size-4 shrink-0 text-fg-muted" />
+                  <span class="truncate font-mono">{{ compose.from }}</span>
+                </span>
+                <Icon
+                  name="lucide:chevron-down"
+                  class="size-4 shrink-0 text-fg-subtle transition-transform duration-150"
+                  :class="fromOpen ? 'rotate-180' : ''"
+                />
+              </button>
+              <template v-if="fromOpen">
+                <div class="fixed inset-0 z-30" @click="fromOpen = false" />
+                <div class="absolute left-0 right-0 top-full z-40 mt-1.5 max-h-60 overflow-auto rounded-lg border border-line bg-surface shadow-xl">
+                  <button
+                    v-for="addr in fromOptions"
+                    :key="addr"
+                    type="button"
+                    class="flex w-full cursor-pointer items-center gap-2 px-3 py-2 text-left font-mono text-sm transition-colors duration-150 hover:bg-surface-2"
+                    :class="compose.from === addr ? 'bg-accent/10 text-accent' : 'text-fg'"
+                    @click="selectFrom(addr)"
+                  >
+                    <Icon name="lucide:at-sign" class="size-3.5 shrink-0 text-fg-muted" />
+                    <span class="flex-1 truncate">{{ addr }}</span>
+                    <Icon v-if="compose.from === addr" name="lucide:check" class="size-4 shrink-0 text-accent" />
+                  </button>
+                </div>
+              </template>
+            </div>
           </div>
           <div>
             <label class="mb-1 block text-xs font-medium text-fg-muted">{{ t('mail.to') }}</label>
