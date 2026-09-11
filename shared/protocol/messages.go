@@ -18,8 +18,9 @@ const Version = "0.1.0"
 // Amac: tek bir istek sunucu bellegini tuketemesin.
 const MaxBodyBytes = 32 << 20 // 32 MB
 
-// BodyChunkSize, govde akitilirken kullanilan parca boyutu.
-const BodyChunkSize = 32 << 10 // 32 KB
+// BodyChunkSize, govde akitilirken kullanilan parca boyutu. Yuksek hizli
+// planlarda (100-500 Mbps) cerceve basi ek yuku azaltmak icin 64 KB.
+const BodyChunkSize = 64 << 10 // 64 KB
 
 // WSReadLimit, tek bir WebSocket mesajinin ust siniri.
 //
@@ -394,10 +395,13 @@ const FeatureFlowControl = "flow_control"
 // InitialWindowBytes, her istek icin istemcinin IZINSIZ gonderebilecegi
 // baslangic bayt miktari.
 //
-// Neden 256 KB: BodyChunkSize'in (32 KB) 8 kati. Tipik bir yanit (sayfa, JSON,
-// kucuk resim) tamamen tamponlanabilsin ve hic beklemesin diye yeterince buyuk;
-// istek basina bellek sinirli kalsin diye yeterince kucuk.
-const InitialWindowBytes = 256 << 10
+// Neden 2 MB: BodyChunkSize'in (64 KB) 32 kati. Sustained tunel throughput'u
+// kabaca pencere/RTT ile sinirlidir; 256 KB pencere 50 ms RTT'de ~41 Mbps'e
+// takiliyordu ve Pro (100) / Team (500) planlarini WAN'da veremiyorduk. 2 MB
+// pencere 50 ms'de ~335 Mbps'e izin verir (istek basina ~2 MB bellek maliyeti).
+// window_update byte-tabanli oldugu icin buyutmek geriye donuk uyumludur:
+// eski istemciler kendi 256 KB'lik penceresini kullanmaya devam eder.
+const InitialWindowBytes = 2 << 20
 
 // WindowUpdate, sunucudan istemciye: "bu istek icin N bayt daha gonderebilirsin".
 //
