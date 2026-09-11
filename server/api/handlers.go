@@ -120,6 +120,8 @@ func (s *Server) Routes() *http.ServeMux {
 
 	mux.HandleFunc("GET /api/v1/health", s.health)
 	mux.HandleFunc("GET /api/v1/me", s.me)
+	mux.HandleFunc("GET /api/v1/openapi.yaml", s.openapiSpec)
+	mux.HandleFunc("GET /api/v1/openapi.en.yaml", s.openapiSpecEN)
 
 	// Tek komutla otomatik kurulum scriptleri ve ikili dagitimi (public)
 	mux.HandleFunc("GET /install.sh", s.serveInstallSh)
@@ -441,6 +443,9 @@ func (s *Server) enrich(c store.Client) store.Client {
 }
 
 func (s *Server) listClients(w http.ResponseWriter, r *http.Request) {
+	if !requireScope(w, r, ScopeClientsRead) {
+		return
+	}
 	tenantID, ok := s.tenantFor(r)
 	if !ok {
 		writeJSONError(w, http.StatusInternalServerError, "no_tenant",
@@ -458,10 +463,19 @@ func (s *Server) listClients(w http.ResponseWriter, r *http.Request) {
 	for i := range list {
 		list[i] = s.enrich(list[i])
 	}
+	if limit, cursor, ok := parsePage(r); ok {
+		page, next, more := paginate(list, func(c store.Client) string { return c.ID }, limit, cursor)
+		setPageHeaders(w, r, next, more)
+		writeJSON(w, http.StatusOK, page)
+		return
+	}
 	writeJSON(w, http.StatusOK, list)
 }
 
 func (s *Server) createClient(w http.ResponseWriter, r *http.Request) {
+	if !requireScope(w, r, ScopeClientsWrite) {
+		return
+	}
 	var body struct {
 		Name string `json:"name"`
 	}
@@ -504,6 +518,9 @@ func (s *Server) createClient(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getClient(w http.ResponseWriter, r *http.Request) {
+	if !requireScope(w, r, ScopeClientsRead) {
+		return
+	}
 	tenantID, ok := s.tenantFor(r)
 	if !ok {
 		writeJSONError(w, http.StatusInternalServerError, "no_tenant",
@@ -519,6 +536,9 @@ func (s *Server) getClient(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deleteClient(w http.ResponseWriter, r *http.Request) {
+	if !requireScope(w, r, ScopeClientsWrite) {
+		return
+	}
 	id := r.PathValue("id")
 	tenantID, ok := s.tenantFor(r)
 	if !ok {
@@ -541,6 +561,9 @@ func (s *Server) deleteClient(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) rotateToken(w http.ResponseWriter, r *http.Request) {
+	if !requireScope(w, r, ScopeClientsWrite) {
+		return
+	}
 	id := r.PathValue("id")
 	full, tokenID, hash, err := auth.GenerateClient()
 	if err != nil {
@@ -567,6 +590,9 @@ func (s *Server) rotateToken(w http.ResponseWriter, r *http.Request) {
 // --- tunnels ---------------------------------------------------------------
 
 func (s *Server) listTunnels(w http.ResponseWriter, r *http.Request) {
+	if !requireScope(w, r, ScopeTunnelsRead) {
+		return
+	}
 	tenantID, ok := s.tenantFor(r)
 	if !ok {
 		writeJSONError(w, http.StatusInternalServerError, "no_tenant",
@@ -586,10 +612,19 @@ func (s *Server) listTunnels(w http.ResponseWriter, r *http.Request) {
 	if list == nil {
 		list = []store.Tunnel{}
 	}
+	if limit, cursor, ok := parsePage(r); ok {
+		page, next, more := paginate(list, func(t store.Tunnel) string { return t.ID }, limit, cursor)
+		setPageHeaders(w, r, next, more)
+		writeJSON(w, http.StatusOK, page)
+		return
+	}
 	writeJSON(w, http.StatusOK, list)
 }
 
 func (s *Server) createTunnel(w http.ResponseWriter, r *http.Request) {
+	if !requireScope(w, r, ScopeTunnelsWrite) {
+		return
+	}
 	var body struct {
 		// Name, tunelin kisa adi (tek DNS etiketi). Tam hostname DEGIL:
 		// sunucu bunu platform domainiyle birlestirir.
@@ -672,6 +707,9 @@ func (s *Server) createTunnel(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getTunnel(w http.ResponseWriter, r *http.Request) {
+	if !requireScope(w, r, ScopeTunnelsRead) {
+		return
+	}
 	tenantID, ok := s.tenantFor(r)
 	if !ok {
 		writeJSONError(w, http.StatusInternalServerError, "no_tenant",
@@ -691,6 +729,9 @@ func (s *Server) getTunnel(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) updateTunnel(w http.ResponseWriter, r *http.Request) {
+	if !requireScope(w, r, ScopeTunnelsWrite) {
+		return
+	}
 	var body struct {
 		Target  *string `json:"target"`
 		Enabled *bool   `json:"enabled"`
@@ -724,6 +765,9 @@ func (s *Server) updateTunnel(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deleteTunnel(w http.ResponseWriter, r *http.Request) {
+	if !requireScope(w, r, ScopeTunnelsWrite) {
+		return
+	}
 	id := r.PathValue("id")
 	tenantID, ok := s.tenantFor(r)
 	if !ok {
@@ -750,6 +794,9 @@ func (s *Server) deleteTunnel(w http.ResponseWriter, r *http.Request) {
 // --- requests / events -----------------------------------------------------
 
 func (s *Server) listRequests(w http.ResponseWriter, r *http.Request) {
+	if !requireScope(w, r, ScopeAnalyticsRead) {
+		return
+	}
 	q := r.URL.Query()
 	limit := 200
 	if v := q.Get("limit"); v != "" {
@@ -830,6 +877,9 @@ func (s *Server) listRequests(w http.ResponseWriter, r *http.Request) {
 
 // stream, GET /api/v1/events — SSE canli olay akisi.
 func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
+	if !requireScope(w, r, ScopeAnalyticsRead) {
+		return
+	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeJSONError(w, http.StatusInternalServerError, "streaming_unsupported",

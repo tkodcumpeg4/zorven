@@ -44,6 +44,9 @@ func scopedFQDN(tunnelName, tenantSlug, platform string) string {
 // --- hostnames -------------------------------------------------------------
 
 func (s *Server) listHostnames(w http.ResponseWriter, r *http.Request) {
+	if !requireScope(w, r, ScopeHostnamesRead) {
+		return
+	}
 	tenantID, ok := s.tenantFor(r)
 	if !ok {
 		writeJSONError(w, http.StatusInternalServerError, "no_tenant",
@@ -58,10 +61,19 @@ func (s *Server) listHostnames(w http.ResponseWriter, r *http.Request) {
 	if list == nil {
 		list = []store.Hostname{}
 	}
+	if limit, cursor, ok := parsePage(r); ok {
+		page, next, more := paginate(list, func(h store.Hostname) string { return h.ID }, limit, cursor)
+		setPageHeaders(w, r, next, more)
+		writeJSON(w, http.StatusOK, page)
+		return
+	}
 	writeJSON(w, http.StatusOK, list)
 }
 
 func (s *Server) createHostname(w http.ResponseWriter, r *http.Request) {
+	if !requireScope(w, r, ScopeHostnamesWrite) {
+		return
+	}
 	var body struct {
 		TunnelID string `json:"tunnel_id"`
 		Name     string `json:"name"`
@@ -141,6 +153,9 @@ type customHostnameResponse struct {
 }
 
 func (s *Server) createCustomHostname(w http.ResponseWriter, r *http.Request) {
+	if !requireScope(w, r, ScopeHostnamesWrite) {
+		return
+	}
 	var body customHostnameRequest
 	if !decode(w, r, &body) {
 		return
@@ -203,6 +218,9 @@ type patchHostnameRequest struct {
 }
 
 func (s *Server) patchHostname(w http.ResponseWriter, r *http.Request) {
+	if !requireScope(w, r, ScopeHostnamesWrite) {
+		return
+	}
 	var body patchHostnameRequest
 	if !decode(w, r, &body) {
 		return
@@ -246,6 +264,9 @@ func (s *Server) patchHostname(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) verifyHostname(w http.ResponseWriter, r *http.Request) {
+	if !requireScope(w, r, ScopeHostnamesWrite) {
+		return
+	}
 	tenantID, ok := s.tenantFor(r)
 	if !ok {
 		writeJSONError(w, http.StatusInternalServerError, "no_tenant",
@@ -296,6 +317,9 @@ func (s *Server) verifyHostname(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deleteHostname(w http.ResponseWriter, r *http.Request) {
+	if !requireScope(w, r, ScopeHostnamesWrite) {
+		return
+	}
 	tenantID, ok := s.tenantFor(r)
 	if !ok {
 		writeJSONError(w, http.StatusInternalServerError, "no_tenant",

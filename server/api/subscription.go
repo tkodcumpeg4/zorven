@@ -12,6 +12,9 @@ import (
 // getSubscription, GET /api/v1/subscription
 // Kiracinin mevcut abonelik planini, kaynak limitlerini ve anlik kullanimini doner.
 func (s *Server) getSubscription(w http.ResponseWriter, r *http.Request) {
+	if !requireScope(w, r, ScopeAnalyticsRead) {
+		return
+	}
 	tenantID, ok := s.tenantFor(r)
 	if !ok {
 		writeJSONError(w, http.StatusInternalServerError, "no_tenant", "istek kiraci kapsami olmadan ulasti")

@@ -275,9 +275,14 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 
 			// /api/v1/* admin anahtariyla korunur; /health ve auth uclari public kalir.
 			// GitHub oturum cerezi ve zrv_api_ tokenlari da kabul edilir.
+			// apiLimiter, programatik API token'lari icin kiraci basina comert bir
+			// hiz siniri (30 rps, burst 60).
+			apiLimiter := ratelimit.New(30, 60)
+
 			guarded := &api.Middleware{
 				Key:          key,
 				Limiter:      adminLimiter,
+				APILimiter:   apiLimiter,
 				Log:          log,
 				Next:         control,
 				Store:        st,
@@ -286,6 +291,8 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				BetterAuth:   betterAuthVerifier,
 				PublicPaths: map[string]bool{
 					"/api/v1/health":               true,
+					"/api/v1/openapi.yaml":         true,
+					"/api/v1/openapi.en.yaml":      true,
 					"/api/v1/auth/config":          true,
 					"/api/v1/auth/github/login":    true,
 					"/api/v1/auth/github/callback": true,

@@ -63,6 +63,28 @@ func TestTenantRuntimeState_ThrottlesOnLimit(t *testing.T) {
 	}
 }
 
+func TestTenantRuntimeState_SelfHostUnlimited(t *testing.T) {
+	// Open-core / self-host: acik hiz siniri yok (normalMbps=0) ve enterprise =>
+	// SINIRSIZ, limiter nil olmali (throttle uygulanmaz).
+	for _, tc := range []struct {
+		name     string
+		plan     string
+		normal   int64
+	}{
+		{"self-host default (mbps=0)", "free", 0},
+		{"enterprise", bandwidth.PlanEnterprise, 1000},
+	} {
+		state := bandwidth.NewTenantRuntimeState("ten_"+tc.name, tc.plan, 1000, 0, tc.normal, 0)
+		if state.GetLimiter() != nil {
+			t.Errorf("%s: limiter nil olmali (sinirsiz)", tc.name)
+		}
+		state.Record(900, 900) // kotayi assa bile
+		if state.IsThrottled() {
+			t.Errorf("%s: asla throttled olmamali", tc.name)
+		}
+	}
+}
+
 func TestLocalUsageRecorder_RecordAndFlush(t *testing.T) {
 	ctx := context.Background()
 	st, err := pgstore.Open(ctx, "postgres://rpshell:rpshell@localhost:5432/rpshell_test")

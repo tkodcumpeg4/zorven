@@ -1,0 +1,694 @@
+openapi: 3.1.0
+info:
+  title: Zorven REST API
+  version: "1.0.0"
+  description: |
+    Zorven's programmatic REST API. Manage your tunnels, clients, hostnames and
+    IP rules; read request logs and your subscription/usage data.
+
+    ## Authentication
+    Create a token from the **API Keys** section in the dashboard and send it in
+    the `Authorization` header on every request:
+
+    ```
+    Authorization: Bearer zrv_api_xxxxxxxx...
+    ```
+
+    API access is available on **Pro and above** plans.
+
+    ## Scopes
+    Each token carries a set of scopes (`resource:action`):
+    `clients:read`, `clients:write`, `tunnels:read`, `tunnels:write`,
+    `hostnames:read`, `hostnames:write`, `ip_allowlist:read`,
+    `ip_allowlist:write`, `analytics:read`. A `write` scope also implies the
+    `read` of the same resource. Insufficient scope → `403 insufficient_scope`.
+
+    ## Pagination
+    List endpoints accept `?limit=` (default 50, max 200) and `?cursor=`. The
+    response body is a plain array; continuation is returned in headers:
+    `X-Next-Cursor`, `X-Has-More` and the RFC5988 `Link: <...>; rel="next"`.
+    If neither limit nor cursor is given, the full list is returned.
+
+    ## Errors
+    All errors share one shape:
+    ```json
+    { "error": { "code": "insufficient_scope", "message": "..." } }
+    ```
+
+    ## Rate limiting
+    Programmatic requests are limited to ~30 requests/sec (burst 60) per tenant.
+    Responses carry `X-RateLimit-Limit` and `X-RateLimit-Remaining`; on exceed,
+    `429 rate_limited` + `Retry-After`.
+  contact:
+    name: Zorven
+    url: https://zorven.app
+    email: sales@zorven.app
+
+servers:
+  - url: https://zorven.app/api/v1
+    description: Production
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Meta
+    description: Health, identity and plan info
+  - name: Clients
+    description: Agent machines that open tunnels
+  - name: Tunnels
+    description: hostname → client → local target mappings
+  - name: Hostnames
+    description: Names a tunnel is published under
+  - name: IP Allowlist
+    description: CIDR-based access rules
+  - name: Analytics
+    description: Request logs, subscription and usage
+
+paths:
+  /health:
+    get:
+      tags: [Meta]
+      summary: Service health
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+                  version: { type: string }
+                  connected_clients: { type: integer }
+
+  /me:
+    get:
+      tags: [Meta]
+      summary: Current identity and tenant
+      responses:
+        "200":
+          description: OK
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /plans:
+    get:
+      tags: [Meta]
+      summary: Available plans
+      security: []
+      responses:
+        "200":
+          description: Plan list
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Plan" }
+
+  /clients:
+    get:
+      tags: [Clients]
+      summary: List clients
+      description: "Scope: `clients:read`"
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: Client list
+          headers:
+            X-Next-Cursor: { $ref: "#/components/headers/XNextCursor" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Client" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Clients]
+      summary: Create client
+      description: "Scope: `clients:write`. The response returns a token shown only once."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, example: "home-pc" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  client: { $ref: "#/components/schemas/Client" }
+                  token:
+                    type: string
+                    description: Client token — shown ONLY here, store it.
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /clients/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Clients]
+      summary: Get client
+      description: "Scope: `clients:read`"
+      responses:
+        "200":
+          description: Client
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Client" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Clients]
+      summary: Delete client
+      description: "Scope: `clients:write`. The live connection is dropped and its tunnels are removed."
+      responses:
+        "204": { description: Deleted }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /clients/{id}/token:
+    post:
+      tags: [Clients]
+      summary: Rotate client token
+      description: "Scope: `clients:write`. The old token is invalidated."
+      parameters:
+        - $ref: "#/components/parameters/PathID"
+      responses:
+        "200":
+          description: New token
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { type: string }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /tunnels:
+    get:
+      tags: [Tunnels]
+      summary: List tunnels
+      description: "Scope: `tunnels:read`"
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: Tunnel list
+          headers:
+            X-Next-Cursor: { $ref: "#/components/headers/XNextCursor" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Tunnel" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Tunnels]
+      summary: Create tunnel
+      description: "Scope: `tunnels:write`"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, client_id, target]
+              properties:
+                name: { type: string, description: "Short name (single DNS label)", example: "api" }
+                client_id: { type: string, example: "cli_a1b2c3" }
+                target: { type: string, example: "http://localhost:8000" }
+                hostname_id: { type: string, description: "Optionally bind to an existing hostname" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Tunnel" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /tunnels/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Tunnels]
+      summary: Get tunnel
+      description: "Scope: `tunnels:read`"
+      responses:
+        "200":
+          description: Tunnel
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Tunnel" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Tunnels]
+      summary: Update tunnel
+      description: "Scope: `tunnels:write`"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                target: { type: string, example: "http://localhost:9000" }
+                enabled: { type: boolean }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Tunnel" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    delete:
+      tags: [Tunnels]
+      summary: Delete tunnel
+      description: "Scope: `tunnels:write`"
+      responses:
+        "204": { description: Deleted }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /hostnames:
+    get:
+      tags: [Hostnames]
+      summary: List hostnames
+      description: "Scope: `hostnames:read`"
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: Hostname list
+          headers:
+            X-Next-Cursor: { $ref: "#/components/headers/XNextCursor" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Hostname" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Hostnames]
+      summary: Create platform hostname
+      description: "Scope: `hostnames:write`. A short name under the platform domain."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, example: "api" }
+                tunnel_id: { type: string }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Hostname" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /hostnames/custom:
+    post:
+      tags: [Hostnames]
+      summary: Attach a custom (customer) domain
+      description: "Scope: `hostnames:write`. Returns DNS verification instructions."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [fqdn]
+              properties:
+                fqdn: { type: string, example: "api.customer.com" }
+                tunnel_id: { type: string }
+      responses:
+        "201":
+          description: Created (pending verification)
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Hostname"
+                  - type: object
+                    properties:
+                      instructions:
+                        type: object
+                        description: DNS verification instructions
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /hostnames/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    patch:
+      tags: [Hostnames]
+      summary: Update hostname (bind/unbind tunnel)
+      description: "Scope: `hostnames:write`"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                tunnel_id: { type: [string, "null"] }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Hostname" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Hostnames]
+      summary: Delete hostname
+      description: "Scope: `hostnames:write`"
+      responses:
+        "204": { description: Deleted }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /hostnames/{id}/verify:
+    post:
+      tags: [Hostnames]
+      summary: Trigger custom domain DNS verification
+      description: "Scope: `hostnames:write`"
+      parameters:
+        - $ref: "#/components/parameters/PathID"
+      responses:
+        "200":
+          description: Verification result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Hostname" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /ip-allowlist:
+    get:
+      tags: [IP Allowlist]
+      summary: List IP rules
+      description: "Scope: `ip_allowlist:read`"
+      responses:
+        "200":
+          description: Rule list
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/IPRule" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [IP Allowlist]
+      summary: Create IP rule
+      description: "Scope: `ip_allowlist:write`"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [cidr]
+              properties:
+                cidr: { type: string, example: "203.0.113.0/24" }
+                tunnel_id: { type: [string, "null"] }
+                description: { type: string }
+                enabled: { type: boolean, default: true }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IPRule" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /ip-allowlist/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    patch:
+      tags: [IP Allowlist]
+      summary: Update IP rule
+      description: "Scope: `ip_allowlist:write`"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                cidr: { type: string }
+                description: { type: string }
+                enabled: { type: boolean }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IPRule" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [IP Allowlist]
+      summary: Delete IP rule
+      description: "Scope: `ip_allowlist:write`"
+      responses:
+        "204": { description: Deleted }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /requests:
+    get:
+      tags: [Analytics]
+      summary: Query request logs
+      description: "Scope: `analytics:read`"
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, default: 200, maximum: 1000 } }
+        - { name: offset, in: query, schema: { type: integer } }
+        - { name: tunnel_id, in: query, schema: { type: string } }
+        - { name: hostname, in: query, schema: { type: string } }
+        - { name: method, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { type: string }, description: "'404' or a '2xx' class" }
+        - { name: since, in: query, schema: { type: string, format: date-time } }
+        - { name: until, in: query, schema: { type: string, format: date-time } }
+        - { name: q, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: Log list
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/RequestLog" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /subscription:
+    get:
+      tags: [Analytics]
+      summary: Subscription and usage
+      description: "Scope: `analytics:read`"
+      responses:
+        "200":
+          description: Subscription
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Subscription" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /events:
+    get:
+      tags: [Analytics]
+      summary: Live event stream (SSE)
+      description: "Scope: `analytics:read`. Returns `text/event-stream`."
+      responses:
+        "200":
+          description: Event stream
+          content:
+            text/event-stream:
+              schema: { type: string }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: zrv_api_...
+      description: "API token created in the dashboard. `Authorization: Bearer zrv_api_...`"
+
+  parameters:
+    PathID:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema: { type: integer, default: 50, maximum: 200 }
+      description: Page size (opt-in pagination)
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      schema: { type: string }
+      description: The X-Next-Cursor value from the previous response
+
+  headers:
+    XNextCursor:
+      description: Next page cursor (if any)
+      schema: { type: string }
+    XHasMore:
+      description: Whether more records exist
+      schema: { type: boolean }
+
+  responses:
+    Unauthorized:
+      description: Authentication required or invalid
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: Insufficient scope, plan limit or no access
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: Conflict (e.g. hostname already taken)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    ValidationError:
+      description: Invalid input
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string, example: insufficient_scope }
+            message: { type: string }
+      required: [error]
+
+    Client:
+      type: object
+      properties:
+        id: { type: string, example: "cli_a1b2c3" }
+        name: { type: string, example: "home-pc" }
+        status: { type: string, enum: [online, offline] }
+        version: { type: string }
+        remote_addr: { type: string }
+        is_service: { type: boolean }
+        created_at: { type: string, format: date-time }
+        last_seen_at: { type: [string, "null"], format: date-time }
+
+    Tunnel:
+      type: object
+      properties:
+        id: { type: string, example: "tun_x9y8z7" }
+        client_id: { type: string, example: "cli_a1b2c3" }
+        target: { type: string, example: "http://localhost:8000" }
+        enabled: { type: boolean }
+        created_at: { type: string, format: date-time }
+        hostnames:
+          type: array
+          items: { $ref: "#/components/schemas/Hostname" }
+
+    Hostname:
+      type: object
+      properties:
+        id: { type: string, example: "hn_abc123" }
+        tunnel_id: { type: string }
+        fqdn: { type: string, example: "api.zorven.app" }
+        type: { type: string, enum: [global, scoped, legacy, custom] }
+        verified: { type: boolean }
+        created_at: { type: string, format: date-time }
+
+    IPRule:
+      type: object
+      properties:
+        id: { type: string }
+        tenant_id: { type: string }
+        tunnel_id: { type: [string, "null"] }
+        cidr: { type: string, example: "203.0.113.0/24" }
+        description: { type: string }
+        enabled: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    RequestLog:
+      type: object
+      properties:
+        id: { type: string, example: "req_00f1" }
+        tunnel_id: { type: string }
+        ts: { type: string, format: date-time }
+        method: { type: string }
+        path: { type: string }
+        status: { type: integer }
+        duration_ms: { type: integer }
+
+    Plan:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        price_monthly: { type: integer, description: "USD cents" }
+        max_clients: { type: [integer, "null"], description: "null = unlimited" }
+        max_tunnels: { type: [integer, "null"] }
+        max_custom_domains: { type: [integer, "null"] }
+        bandwidth_limit_bytes: { type: [integer, "null"] }
+        bandwidth_normal_mbps: { type: integer }
+        bandwidth_throttled_mbps: { type: integer }
+        max_members: { type: [integer, "null"] }
+        has_api_access: { type: boolean }
+        has_ip_allowlist: { type: boolean }
+
+    Subscription:
+      type: object
+      properties:
+        tenant_id: { type: string }
+        plan: { type: string, example: "pro" }
+        status: { type: string, example: "active" }
+        current_period_end: { type: [string, "null"], format: date-time }
+        bandwidth_limit_bytes: { type: integer }
+        trial_used: { type: boolean }
+        created_at: { type: string, format: date-time }
+        plan_details: { $ref: "#/components/schemas/Plan" }

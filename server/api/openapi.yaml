@@ -1,0 +1,695 @@
+openapi: 3.1.0
+info:
+  title: Zorven REST API
+  version: "1.0.0"
+  description: |
+    Zorven'in programatik REST API'si. Tünellerinizi, istemcilerinizi,
+    hostname'lerinizi ve IP kurallarınızı yönetmenizi; istek loglarını ve
+    abonelik/kullanım verinizi okumanızı sağlar.
+
+    ## Kimlik doğrulama
+    Panelde **API Anahtarları** bölümünden bir token oluşturun ve her istekte
+    `Authorization` başlığında gönderin:
+
+    ```
+    Authorization: Bearer zrv_api_xxxxxxxx...
+    ```
+
+    API erişimi **Pro ve üzeri** planlarda kullanılabilir.
+
+    ## Kapsamlar (scopes)
+    Her token bir dizi kapsam taşır (`kaynak:aksiyon`):
+    `clients:read`, `clients:write`, `tunnels:read`, `tunnels:write`,
+    `hostnames:read`, `hostnames:write`, `ip_allowlist:read`,
+    `ip_allowlist:write`, `analytics:read`. `write`, aynı kaynağın `read`'ini
+    de kapsar. Yetersiz kapsam → `403 insufficient_scope`.
+
+    ## Sayfalama
+    Liste uçları `?limit=` (varsayılan 50, maks 200) ve `?cursor=` kabul eder.
+    Yanıt gövdesi düz bir dizidir; devam bilgisi başlıklarda döner:
+    `X-Next-Cursor`, `X-Has-More` ve RFC5988 `Link: <...>; rel="next"`.
+    limit/cursor verilmezse tüm liste döner.
+
+    ## Hatalar
+    Tüm hatalar ortak biçimdedir:
+    ```json
+    { "error": { "code": "insufficient_scope", "message": "..." } }
+    ```
+
+    ## Hız sınırı
+    Programatik istekler kiracı başına ~30 istek/sn (burst 60) ile sınırlıdır.
+    Yanıtlarda `X-RateLimit-Limit` ve `X-RateLimit-Remaining` döner; aşımda
+    `429 rate_limited` + `Retry-After`.
+  contact:
+    name: Zorven
+    url: https://zorven.app
+    email: sales@zorven.app
+
+servers:
+  - url: https://zorven.app/api/v1
+    description: Üretim
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Meta
+    description: Sağlık, kimlik ve plan bilgisi
+  - name: Clients
+    description: Tünel açan ajan makineler
+  - name: Tunnels
+    description: hostname → istemci → yerel hedef eşleştirmeleri
+  - name: Hostnames
+    description: Bir tünelin yayınlandığı adlar
+  - name: IP Allowlist
+    description: CIDR bazlı erişim kuralları
+  - name: Analytics
+    description: İstek logları, abonelik ve kullanım
+
+paths:
+  /health:
+    get:
+      tags: [Meta]
+      summary: Servis sağlığı
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+                  version: { type: string }
+                  connected_clients: { type: integer }
+
+  /me:
+    get:
+      tags: [Meta]
+      summary: Geçerli kimlik ve kiracı
+      responses:
+        "200":
+          description: OK
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /plans:
+    get:
+      tags: [Meta]
+      summary: Kullanılabilir planlar
+      security: []
+      responses:
+        "200":
+          description: Plan listesi
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Plan" }
+
+  /clients:
+    get:
+      tags: [Clients]
+      summary: İstemcileri listele
+      description: "Kapsam: `clients:read`"
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: İstemci listesi
+          headers:
+            X-Next-Cursor: { $ref: "#/components/headers/XNextCursor" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Client" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Clients]
+      summary: İstemci oluştur
+      description: "Kapsam: `clients:write`. Yanıtta bir kez gösterilen token döner."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, example: "ev-pc" }
+      responses:
+        "201":
+          description: Oluşturuldu
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  client: { $ref: "#/components/schemas/Client" }
+                  token:
+                    type: string
+                    description: İstemci token'ı — SADECE burada gösterilir, saklayın.
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /clients/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Clients]
+      summary: İstemci getir
+      description: "Kapsam: `clients:read`"
+      responses:
+        "200":
+          description: İstemci
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Client" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Clients]
+      summary: İstemci sil
+      description: "Kapsam: `clients:write`. Canlı bağlantı koparılır, tünelleri silinir."
+      responses:
+        "204": { description: Silindi }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /clients/{id}/token:
+    post:
+      tags: [Clients]
+      summary: İstemci token'ını yenile
+      description: "Kapsam: `clients:write`. Eski token geçersiz olur."
+      parameters:
+        - $ref: "#/components/parameters/PathID"
+      responses:
+        "200":
+          description: Yeni token
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { type: string }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /tunnels:
+    get:
+      tags: [Tunnels]
+      summary: Tünelleri listele
+      description: "Kapsam: `tunnels:read`"
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: Tünel listesi
+          headers:
+            X-Next-Cursor: { $ref: "#/components/headers/XNextCursor" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Tunnel" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Tunnels]
+      summary: Tünel oluştur
+      description: "Kapsam: `tunnels:write`"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, client_id, target]
+              properties:
+                name: { type: string, description: "Kısa ad (tek DNS etiketi)", example: "api" }
+                client_id: { type: string, example: "cli_a1b2c3" }
+                target: { type: string, example: "http://localhost:8000" }
+                hostname_id: { type: string, description: "Opsiyonel mevcut hostname'e bağla" }
+      responses:
+        "201":
+          description: Oluşturuldu
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Tunnel" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /tunnels/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Tunnels]
+      summary: Tünel getir
+      description: "Kapsam: `tunnels:read`"
+      responses:
+        "200":
+          description: Tünel
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Tunnel" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Tunnels]
+      summary: Tünel güncelle
+      description: "Kapsam: `tunnels:write`"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                target: { type: string, example: "http://localhost:9000" }
+                enabled: { type: boolean }
+      responses:
+        "200":
+          description: Güncellendi
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Tunnel" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    delete:
+      tags: [Tunnels]
+      summary: Tünel sil
+      description: "Kapsam: `tunnels:write`"
+      responses:
+        "204": { description: Silindi }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /hostnames:
+    get:
+      tags: [Hostnames]
+      summary: Hostname'leri listele
+      description: "Kapsam: `hostnames:read`"
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: Hostname listesi
+          headers:
+            X-Next-Cursor: { $ref: "#/components/headers/XNextCursor" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Hostname" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Hostnames]
+      summary: Platform hostname'i oluştur
+      description: "Kapsam: `hostnames:write`. Platform domaini altında kısa ad."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, example: "api" }
+                tunnel_id: { type: string }
+      responses:
+        "201":
+          description: Oluşturuldu
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Hostname" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /hostnames/custom:
+    post:
+      tags: [Hostnames]
+      summary: Özel (müşteri) domain bağla
+      description: "Kapsam: `hostnames:write`. DNS doğrulama talimatları döner."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [fqdn]
+              properties:
+                fqdn: { type: string, example: "api.musteri.com" }
+                tunnel_id: { type: string }
+      responses:
+        "201":
+          description: Oluşturuldu (doğrulama bekliyor)
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Hostname"
+                  - type: object
+                    properties:
+                      instructions:
+                        type: object
+                        description: DNS doğrulama talimatları
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /hostnames/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    patch:
+      tags: [Hostnames]
+      summary: Hostname güncelle (tünel bağla/çöz)
+      description: "Kapsam: `hostnames:write`"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                tunnel_id: { type: [string, "null"] }
+      responses:
+        "200":
+          description: Güncellendi
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Hostname" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Hostnames]
+      summary: Hostname sil
+      description: "Kapsam: `hostnames:write`"
+      responses:
+        "204": { description: Silindi }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /hostnames/{id}/verify:
+    post:
+      tags: [Hostnames]
+      summary: Özel domain DNS doğrulamasını tetikle
+      description: "Kapsam: `hostnames:write`"
+      parameters:
+        - $ref: "#/components/parameters/PathID"
+      responses:
+        "200":
+          description: Doğrulama sonucu
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Hostname" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /ip-allowlist:
+    get:
+      tags: [IP Allowlist]
+      summary: IP kurallarını listele
+      description: "Kapsam: `ip_allowlist:read`"
+      responses:
+        "200":
+          description: Kural listesi
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/IPRule" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [IP Allowlist]
+      summary: IP kuralı oluştur
+      description: "Kapsam: `ip_allowlist:write`"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [cidr]
+              properties:
+                cidr: { type: string, example: "203.0.113.0/24" }
+                tunnel_id: { type: [string, "null"] }
+                description: { type: string }
+                enabled: { type: boolean, default: true }
+      responses:
+        "201":
+          description: Oluşturuldu
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IPRule" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /ip-allowlist/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    patch:
+      tags: [IP Allowlist]
+      summary: IP kuralı güncelle
+      description: "Kapsam: `ip_allowlist:write`"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                cidr: { type: string }
+                description: { type: string }
+                enabled: { type: boolean }
+      responses:
+        "200":
+          description: Güncellendi
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IPRule" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [IP Allowlist]
+      summary: IP kuralı sil
+      description: "Kapsam: `ip_allowlist:write`"
+      responses:
+        "204": { description: Silindi }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /requests:
+    get:
+      tags: [Analytics]
+      summary: İstek loglarını sorgula
+      description: "Kapsam: `analytics:read`"
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, default: 200, maximum: 1000 } }
+        - { name: offset, in: query, schema: { type: integer } }
+        - { name: tunnel_id, in: query, schema: { type: string } }
+        - { name: hostname, in: query, schema: { type: string } }
+        - { name: method, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { type: string }, description: "'404' veya '2xx' sınıfı" }
+        - { name: since, in: query, schema: { type: string, format: date-time } }
+        - { name: until, in: query, schema: { type: string, format: date-time } }
+        - { name: q, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: Log listesi
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/RequestLog" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /subscription:
+    get:
+      tags: [Analytics]
+      summary: Abonelik ve kullanım
+      description: "Kapsam: `analytics:read`"
+      responses:
+        "200":
+          description: Abonelik
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Subscription" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /events:
+    get:
+      tags: [Analytics]
+      summary: Canlı olay akışı (SSE)
+      description: "Kapsam: `analytics:read`. `text/event-stream` döner."
+      responses:
+        "200":
+          description: Olay akışı
+          content:
+            text/event-stream:
+              schema: { type: string }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: zrv_api_...
+      description: "Panelde oluşturulan API token'ı. `Authorization: Bearer zrv_api_...`"
+
+  parameters:
+    PathID:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema: { type: integer, default: 50, maximum: 200 }
+      description: Sayfa boyutu (opt-in sayfalama)
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      schema: { type: string }
+      description: Önceki yanıtın X-Next-Cursor değeri
+
+  headers:
+    XNextCursor:
+      description: Sonraki sayfa cursor'ı (varsa)
+      schema: { type: string }
+    XHasMore:
+      description: Daha fazla kayıt var mı
+      schema: { type: boolean }
+
+  responses:
+    Unauthorized:
+      description: Kimlik doğrulama gerekli veya geçersiz
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: Yetersiz kapsam, plan kısıtı veya erişim yok
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Kaynak bulunamadı
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: Çakışma (ör. hostname zaten alınmış)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    ValidationError:
+      description: Geçersiz girdi
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string, example: insufficient_scope }
+            message: { type: string }
+      required: [error]
+
+    Client:
+      type: object
+      properties:
+        id: { type: string, example: "cli_a1b2c3" }
+        name: { type: string, example: "ev-pc" }
+        status: { type: string, enum: [online, offline] }
+        version: { type: string }
+        remote_addr: { type: string }
+        is_service: { type: boolean }
+        created_at: { type: string, format: date-time }
+        last_seen_at: { type: [string, "null"], format: date-time }
+
+    Tunnel:
+      type: object
+      properties:
+        id: { type: string, example: "tun_x9y8z7" }
+        client_id: { type: string, example: "cli_a1b2c3" }
+        target: { type: string, example: "http://localhost:8000" }
+        enabled: { type: boolean }
+        created_at: { type: string, format: date-time }
+        hostnames:
+          type: array
+          items: { $ref: "#/components/schemas/Hostname" }
+
+    Hostname:
+      type: object
+      properties:
+        id: { type: string, example: "hn_abc123" }
+        tunnel_id: { type: string }
+        fqdn: { type: string, example: "api.zorven.app" }
+        type: { type: string, enum: [global, scoped, legacy, custom] }
+        verified: { type: boolean }
+        created_at: { type: string, format: date-time }
+
+    IPRule:
+      type: object
+      properties:
+        id: { type: string }
+        tenant_id: { type: string }
+        tunnel_id: { type: [string, "null"] }
+        cidr: { type: string, example: "203.0.113.0/24" }
+        description: { type: string }
+        enabled: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    RequestLog:
+      type: object
+      properties:
+        id: { type: string, example: "req_00f1" }
+        tunnel_id: { type: string }
+        ts: { type: string, format: date-time }
+        method: { type: string }
+        path: { type: string }
+        status: { type: integer }
+        duration_ms: { type: integer }
+
+    Plan:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        price_monthly: { type: integer, description: "USD cent" }
+        max_clients: { type: [integer, "null"], description: "null = sınırsız" }
+        max_tunnels: { type: [integer, "null"] }
+        max_custom_domains: { type: [integer, "null"] }
+        bandwidth_limit_bytes: { type: [integer, "null"] }
+        bandwidth_normal_mbps: { type: integer }
+        bandwidth_throttled_mbps: { type: integer }
+        max_members: { type: [integer, "null"] }
+        has_api_access: { type: boolean }
+        has_ip_allowlist: { type: boolean }
+
+    Subscription:
+      type: object
+      properties:
+        tenant_id: { type: string }
+        plan: { type: string, example: "pro" }
+        status: { type: string, example: "active" }
+        current_period_end: { type: [string, "null"], format: date-time }
+        bandwidth_limit_bytes: { type: integer }
+        trial_used: { type: boolean }
+        created_at: { type: string, format: date-time }
+        plan_details: { $ref: "#/components/schemas/Plan" }

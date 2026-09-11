@@ -10,6 +10,9 @@ import (
 
 // listIPRules, kiraciya ait IP izin listesi kurallarini listeler.
 func (s *Server) listIPRules(w http.ResponseWriter, r *http.Request) {
+	if !requireScope(w, r, ScopeIPAllowRead) {
+		return
+	}
 	tenantID, ok := s.tenantFor(r)
 	if !ok {
 		writeJSONError(w, http.StatusInternalServerError, "no_tenant", "istek kiraci kapsami olmadan ulasti")
@@ -35,6 +38,9 @@ func (s *Server) listIPRules(w http.ResponseWriter, r *http.Request) {
 
 // createIPRule, yeni bir IP / CIDR izin kurali tanimlar.
 func (s *Server) createIPRule(w http.ResponseWriter, r *http.Request) {
+	if !requireScope(w, r, ScopeIPAllowWrite) {
+		return
+	}
 	tenantID, ok := s.tenantFor(r)
 	if !ok {
 		writeJSONError(w, http.StatusInternalServerError, "no_tenant", "istek kiraci kapsami olmadan ulasti")
@@ -99,6 +105,9 @@ func (s *Server) createIPRule(w http.ResponseWriter, r *http.Request) {
 
 // updateIPRule, IP izin kuralini aktif/pasif yapar veya aciklamasini gunceller.
 func (s *Server) updateIPRule(w http.ResponseWriter, r *http.Request) {
+	if !requireScope(w, r, ScopeIPAllowWrite) {
+		return
+	}
 	tenantID, ok := s.tenantFor(r)
 	if !ok {
 		writeJSONError(w, http.StatusInternalServerError, "no_tenant", "istek kiraci kapsami olmadan ulasti")
@@ -134,6 +143,9 @@ func (s *Server) updateIPRule(w http.ResponseWriter, r *http.Request) {
 
 // deleteIPRule, IP izin kuralini siler.
 func (s *Server) deleteIPRule(w http.ResponseWriter, r *http.Request) {
+	if !requireScope(w, r, ScopeIPAllowWrite) {
+		return
+	}
 	tenantID, ok := s.tenantFor(r)
 	if !ok {
 		writeJSONError(w, http.StatusInternalServerError, "no_tenant", "istek kiraci kapsami olmadan ulasti")

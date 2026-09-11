@@ -60,8 +60,12 @@ func (r *LocalUsageRecorder) GetOrCreateState(ctx context.Context, tenantID stri
 	bytesIn, bytesOut, _ := r.st.GetBandwidthUsage(ctx, tenantID, currentPeriod)
 	usedSoFar := bytesIn + bytesOut
 
-	normalMbps := int64(10)
-	throttledMbps := int64(1)
+	// Open-core / self-host varsayilani SINIRSIZ: acik bir plan (PlanDetails)
+	// tanimli degilse 0 gecilir -> NewTenantRuntimeState throttle uygulamaz.
+	// Boylece plan tablosu seed edilmemis bir self-host kurulumu sessizce
+	// yavaslatilmaz. Yalnizca gercek bir plan hiz siniri tanimlarsa throttle olur.
+	normalMbps := int64(0)
+	throttledMbps := int64(0)
 
 	if sub.PlanDetails != nil {
 		normalMbps = int64(sub.PlanDetails.BandwidthNormalMbps)

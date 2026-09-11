@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -113,6 +114,10 @@ type Middleware struct {
 	Store        store.Store
 	Entitlements entitlements.EntitlementService
 
+	// APILimiter, programatik API token'lari icin kiraci basina hiz siniri.
+	// nil ise API rate limit uygulanmaz (yalnizca X-RateLimit basligi yazilmaz).
+	APILimiter *ratelimit.Limiter
+
 	// Sessions, GitHub ile giren tarayicilarin oturum cerezini dogrular.
 	// nil ise yalnizca admin anahtari kabul edilir.
 	Sessions *session.Manager
@@ -128,6 +133,13 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+
+	// Istek kimligi: yoksa uret, yankila (gozlemlenebilirlik + destek).
+	rid := r.Header.Get("X-Request-Id")
+	if rid == "" {
+		rid = newRequestID()
+	}
+	w.Header().Set("X-Request-Id", rid)
 
 	if m.PublicPaths[r.URL.Path] {
 		// Public uclar da (health, auth/config, github login/callback, logout)
@@ -255,6 +267,27 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			go func(tokID string) {
 				_ = m.Store.TouchAPITokenLastUsed(context.Background(), tokID)
 			}(tok.ID)
+
+			// Yuzey kisiti: token'lar YALNIZCA public kaynaklara erisebilir
+			// (mail/team/admin/terminal panel-icidir). Allowlist disi -> 403.
+			if !tokenMayAccess(r.Method, r.URL.Path) {
+				writeJSONError(w, http.StatusForbidden, "endpoint_not_available_for_token",
+					"bu uc programatik API token'lari icin kullanilamaz; panelden erisin")
+				return
+			}
+
+			// Kiraci basina API hiz siniri + X-RateLimit basliklari.
+			if m.APILimiter != nil {
+				w.Header().Set("X-RateLimit-Limit", strconv.Itoa(m.APILimiter.Burst()))
+				if !m.APILimiter.Allow(tok.TenantID) {
+					w.Header().Set("X-RateLimit-Remaining", "0")
+					w.Header().Set("Retry-After", strconv.Itoa(int(m.APILimiter.RetryAfter().Seconds())))
+					writeJSONError(w, http.StatusTooManyRequests, "rate_limited",
+						"API hiz sinirina ulasildi, lutfen biraz sonra tekrar deneyin")
+					return
+				}
+				w.Header().Set("X-RateLimit-Remaining", strconv.Itoa(m.APILimiter.Remaining(tok.TenantID)))
+			}
 
 			ctx := withTenant(r.Context(), tok.TenantID)
 			ctx = withAPIScopes(ctx, tok.Scopes)

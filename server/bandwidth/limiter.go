@@ -26,15 +26,32 @@ type TenantRuntimeState struct {
 	mu          sync.RWMutex
 }
 
+// PlanEnterprise, sinirsiz (throttle uygulanmayan) plan kimligi.
+const PlanEnterprise = "enterprise"
+
 // NewTenantRuntimeState, kiraci icin bellek ici calisma durumu olusturur.
 func NewTenantRuntimeState(tenantID, planID string, monthlyLimit, usedSoFar, normalMbps, throttledMbps int64) *TenantRuntimeState {
+	// SINIRSIZ durumlar (throttle uygulanmaz, limiter nil kalir -> GetLimiter()
+	// nil -> ingress ThrottledWriter'i atlar, passthrough):
+	//   1) planID == enterprise (ozel teklif).
+	//   2) normalMbps <= 0: acik bir hiz siniri tanimlanmamis. Open-core /
+	//      self-host varsayilani budur -> kimseyi sessizce yavaslatmayiz.
+	// Bu, kapali surumdeki "eksik veri -> 10 Mbps'e kis" davranisindan bilerek
+	// ayrilir: open-core'da varsayilan SINIRSIZ olmalidir. Aylik kota da bu
+	// durumda sinirsizdir, MonthlyLimitBytes 0 birakilir.
+	if planID == PlanEnterprise || normalMbps <= 0 {
+		s := &TenantRuntimeState{
+			TenantID: tenantID,
+			PlanID:   planID,
+		}
+		s.BytesUsedThisMonth.Store(usedSoFar)
+		return s
+	}
+
 	// Mbps -> bytes/sec donusumu (1 Mbps = 1,000,000 / 8 = 125,000 byte/s)
 	normalBytesSec := normalMbps * 125000
 	throttledBytesSec := throttledMbps * 125000
 
-	if normalBytesSec <= 0 {
-		normalBytesSec = 10 * 125000 // min 10 Mbps
-	}
 	if throttledBytesSec <= 0 {
 		throttledBytesSec = 1 * 125000 // min 1 Mbps
 	}
@@ -78,7 +95,9 @@ func (s *TenantRuntimeState) Record(bytesIn, bytesOut int64) {
 		if !s.isThrottled.Load() {
 			s.isThrottled.Store(true)
 			s.mu.Lock()
-			s.limiter.SetLimit(rate.Limit(s.ThrottledRateBytesSec))
+			if s.limiter != nil { // enterprise'da limiter nil (sinirsiz)
+				s.limiter.SetLimit(rate.Limit(s.ThrottledRateBytesSec))
+			}
 			s.mu.Unlock()
 		}
 	}

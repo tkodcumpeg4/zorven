@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Zorven REST API — Dokümantasyon</title>
+  <meta name="description" content="Zorven programatik REST API referansı: tünel, istemci, hostname yönetimi ve analitik. Token oluşturun, curl ile başlayın.">
+  <link rel="icon" type="image/svg+xml" href="/logo.svg">
+  <style>
+    :root { color-scheme: light dark; }
+    body { margin: 0; }
+    .zbar {
+      display: flex; align-items: center; gap: 12px;
+      padding: 10px 18px; border-bottom: 1px solid rgba(128,128,128,.25);
+      font: 600 15px/1.2 system-ui, -apple-system, "Segoe UI", sans-serif;
+      background: #0b0d10; color: #e8edf2;
+    }
+    .zbar a { color: inherit; text-decoration: none; opacity: .85; }
+    .zbar a:hover { opacity: 1; }
+    .zbar .spacer { flex: 1; }
+    .zbar .muted { font-weight: 400; opacity: .6; font-size: 13px; }
+    @media (prefers-color-scheme: light) {
+      .zbar { background: #fff; color: #0b0d10; }
+    }
+  </style>
+</head>
+<body>
+  <div class="zbar">
+    <a href="/">Zorven</a>
+    <span class="muted">REST API v1</span>
+    <span class="spacer"></span>
+    <a href="/en/docs/api">EN</a>
+    <a href="/docs">Dokümanlar</a>
+    <a href="https://panel.zorven.app">Panel</a>
+  </div>
+
+  <!-- Scalar API Reference: gomulu OpenAPI 3.1 spec'ini render eder -->
+  <script
+    id="api-reference"
+    data-url="/api/v1/openapi.yaml"
+    data-configuration='{"theme":"default","layout":"modern","hideDownloadButton":false}'></script>
+  <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference"></script>
+</body>
+</html>

@@ -78,6 +78,25 @@ func (l *Limiter) RetryAfter() time.Duration {
 	return d
 }
 
+// Burst, kova kapasitesi (X-RateLimit-Limit basligi icin).
+func (l *Limiter) Burst() int { return l.burst }
+
+// Remaining, anahtarin su an kalan yaklasik jeton sayisi (X-RateLimit-Remaining).
+// Anahtar hic gorulmediyse burst (dolu kova) doner. Jeton harcamaz.
+func (l *Limiter) Remaining(key string) int {
+	l.mu.Lock()
+	b, ok := l.buckets[key]
+	l.mu.Unlock()
+	if !ok {
+		return l.burst
+	}
+	n := int(b.lim.Tokens())
+	if n < 0 {
+		return 0
+	}
+	return n
+}
+
 // Len, izlenen anahtar sayisi (teshis/test icin).
 func (l *Limiter) Len() int {
 	l.mu.Lock()
