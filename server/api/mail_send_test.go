@@ -164,7 +164,7 @@ func TestSendMail_ExternalAllowedUsesEnvelopeAddress(t *testing.T) {
 	for to, want := range map[string]string{
 		"victim@example.org":                   "<victim@example.org>",
 		`"x@mail.zorven.app" <victim@example.org>`: "<victim@example.org>",
-		"Victim@GMAIL.com":                     "<Victim@gmail.com>",
+		"Victim@EXAMPLE.net":                     "<Victim@example.net>",
 	} {
 		rec := send(map[string]any{"to": to, "subject": "s", "body": "b"})
 		if rec.Code != http.StatusCreated {
