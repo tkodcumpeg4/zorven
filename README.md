@@ -3,7 +3,7 @@
 **Self-hosted, open-source reverse proxy and secure tunneling platform — a Cloudflare Tunnel / ngrok alternative you fully control.**
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
-[![Go](https://img.shields.io/badge/Go-1.23+-00ADD8.svg)](https://go.dev)
+[![Go](https://img.shields.io/badge/Go-1.25+-00ADD8.svg)](https://go.dev)
 
 Zorven exposes a local service (`localhost:8000`) on a stable public domain
 (`https://api.yourdomain.com`) without port forwarding, a static IP, or opening
@@ -20,19 +20,49 @@ outbound HTTPS connection is allowed.
 - **You own the whole stack.** Run the server on your own VPS; no third party sees your traffic.
 - **Outbound-only client.** No inbound ports, no NAT/firewall changes on the client side.
 - **Stable public URLs.** Automatic per-tunnel hostnames plus your own custom domains.
-- **More than HTTP.** Live request logs, remote terminal (PTY), and screen sharing over the same tunnel.
-- **Batteries included.** Multi-tenant dashboard, team members, self-hosted webmail (SPF/DKIM/DMARC), API tokens, IP allow-lists.
+- **More than HTTP.** Raw TCP, UDP, SNI passthrough, live request logs, remote terminal (PTY), and screen sharing over the same tunnel.
+- **Edge gateway built in.** Policy engine, WAF, webhook signature verification, mTLS, and load balancing in the tunnel server itself.
+- **Batteries included.** Multi-tenant dashboard, projects, team invitations, self-hosted webmail (SPF/DKIM/DMARC), API tokens, IP allow-lists.
 - **One-command client.** `zorven 8080` — ngrok-style.
 
 ## Features
 
-- HTTP and WebSocket tunneling with streaming request/response bodies
+**Tunneling**
+
+- HTTP, WebSocket, and SSE tunneling with streaming request/response bodies
+- Raw TCP and UDP tunnels (reserved public ports, including advanced UDP options), SNI-based TLS passthrough on :443
 - Automatic scoped hostnames (`myapp--tenant.yourdomain.com`) and custom domains with ACME TLS
-- Web dashboard (Vue/Nuxt) with live traffic, tunnels, clients, domains, tokens, and team management
-- CLI client and cross-platform desktop app (Windows/macOS/Linux)
+- Path-based routing: send different URL prefixes of one hostname to different tunnels
+- Ephemeral tunnels with an automatic time-to-live (`zorven ephemeral 8080`)
+- Mutual TLS (client-certificate) per tunnel, per-tunnel IP allow-lists, visitor access control (Basic auth / Google & GitHub OAuth)
+
+**Edge gateway**
+
+- Policy engine: `deny`, `redirect`, `set_header`, `rate_limit`, `require_mtls` rules with match conditions (path, method, geo/IP-list conditions)
+- Built-in WAF (OWASP-lite ruleset, bring-your-own patterns)
+- Webhook signature verification (GitHub, Stripe, GitLab, Shopify, Slack) so forged callbacks never reach your service
+- Secret Vault: AES-256-GCM encrypted secrets referenced from policies and webhook configs
+- Load balancing across replicas (round-robin, weighted, least-connections, latency) with active health checks and automatic failover
+
+**Private network**
+
+- Zorven Network: publish private resources (`db.internal:5432`, whole subnets) without exposing them to the internet
+- `zorven connect` (local SOCKS5 gateway, optional site-to-site gateway mode) and `zorven forward` (port-forward to a private or reserved-port tunnel)
+
+**Observability**
+
+- Live request log, request inspector with replay and replay diff, per-tunnel metrics
+- Alerts on error-rate thresholds with e-mail notification, abuse reporting for visitors
+
+**Platform**
+
+- Web dashboard (Vue/Nuxt, English + Turkish) with tunnels, clients, devices, domains, policies, secrets, tokens, projects, and team management
+- Multi-tenant data model: organizations, projects, members, e-mail invitations, API tokens (scoped, rotatable)
+- REST API with OpenAPI spec; SDKs for Go, Node.js, and Python
+- CLI client, background service install (`zorven service ...`), self-updating binaries, and a cross-platform desktop app (Windows/macOS/Linux)
 - Remote terminal and screen sharing (off by default; opt-in per client for security)
 - Self-hosted webmail: inbound receiver + outbound sender with DKIM signing
-- Multi-tenant data model, GitHub OAuth / email auth, API tokens, per-tunnel IP allow-lists
+- Configurable log retention (`ZORVEN_LOG_RETENTION_DAYS`, default 30)
 - Postgres-backed; ships with a Docker Compose stack for one-command self-hosting
 
 ## Architecture
@@ -108,11 +138,11 @@ docker compose up -d
 
 The server obtains TLS certificates via ACME automatically and serves the
 dashboard, API, and tunnel endpoint on the same origin. See `deploy/` for the
-full Compose stack (server, Postgres, mail relay).
+full Compose stack (server, Postgres, dashboard auth service, mail relay).
 
 ## Build from source
 
-Zorven is a Go workspace (`go.work`) with four modules plus a Nuxt dashboard.
+Zorven is a Go workspace (`go.work`) with four modules plus a Nuxt dashboard, and SDKs under `sdk/`.
 
 ```bash
 # Server + client + shared
@@ -124,31 +154,45 @@ cd web && npm install && npm run build
 bash scripts/build-dashboard.sh    # copies build output into server/webdist
 ```
 
-Go 1.23+ and Node 20+ are required.
+Go 1.25+ and Node 20+ are required.
 
 ## Project structure
 
 | Path | What |
 |------|------|
-| `server/` | Tunnel server, ingress proxy, HTTP API, webmail, Postgres store |
+| `server/` | Tunnel server, ingress proxy, policy/WAF engine, HTTP API, webmail, Postgres store |
 | `client/` | CLI tunnel agent (`zorven`) |
 | `desktop/` | Cross-platform desktop app (Wails) |
 | `shared/` | Wire protocol shared by client and server |
+| `sdk/` | Node.js and Python SDKs (the Go SDK lives in `client/sdk`) |
 | `web/` | Nuxt dashboard (embedded into the server via `go:embed`) |
 | `deploy/` | Docker Compose self-hosting stack |
 
 ## Open core
 
 Zorven is **open core**. This repository contains the complete tunneling
-product under the **AGPL-3.0** license: server, clients, dashboard, webmail,
+product under the **AGPL-3.0** license: server, clients, SDKs, dashboard, webmail,
 remote access — fully functional and unlimited for self-hosting, with no feature
-gates or quotas.
+gates or quotas. See [docs/OPEN-CORE.md](docs/OPEN-CORE.md) for the exact split.
 
-Commercial extensions for running Zorven as a paid, multi-tenant service —
-plan-based quota enforcement, billing, SSO/SAML, audit logging, and multi-node
-high availability — are distributed separately under a commercial license and
-are **not** part of this repository. The core defines the integration seams as
-interfaces; without the commercial layer everything runs unlimited.
+## Enterprise
+
+Running Zorven as a paid, multi-tenant service needs a few extras that are
+distributed separately under a commercial license and are **not** part of this
+repository:
+
+- Billing, plan and subscription enforcement (including trials and add-on requests)
+- Multi-node high availability (clustering)
+- OIDC single sign-on (SSO)
+- Audit log
+- Log export to external systems (SIEM sinks)
+- Zero-trust access conditions (2FA and source-network conditions)
+- Service accounts (machine identities)
+- Plan-based log retention
+- Hosted marketing site and billing screens
+
+The core defines the integration seams as interfaces; without the commercial
+layer everything runs unlimited on a single node.
 
 ## Contributing
 
