@@ -57,8 +57,9 @@ const (
 	TypeHTTPResponse MessageType = "http_response"
 	TypeHTTPError    MessageType = "http_error"
 	TypeCancel       MessageType = "cancel"
-	TypeConfigUpdate MessageType = "config_update"
-	TypeBye          MessageType = "bye"
+	TypeConfigUpdate    MessageType = "config_update"
+	TypeUpdateAvailable MessageType = "update_available"
+	TypeBye             MessageType = "bye"
 
 	// WebSocket passthrough (yukseltilmis baglantilar)
 	TypeWSOpen   MessageType = "ws_open"   // sunucu -> ajan: yerel WS'e baglan
@@ -198,6 +199,15 @@ type Cancel struct {
 type ConfigUpdate struct {
 	Type    MessageType  `json:"type"`
 	Tunnels []TunnelSpec `json:"tunnels"`
+}
+
+// UpdateAvailable, sunucudan ajana: "yeni bir istemci surumu yayinlandi, simdi
+// manifest'i kontrol et ve gerekirse kendini guncelle" sinyali. Version bos
+// gecilebilir; ajan kararini /bin/manifest.json'a bakarak verir (tek dogruluk
+// kaynagi orasi). Boylece sunucunun istemcinin tam surumunu bilmesi gerekmez.
+type UpdateAvailable struct {
+	Type    MessageType `json:"type"`
+	Version string      `json:"version,omitempty"`
 }
 
 // --- WebSocket passthrough -------------------------------------------------

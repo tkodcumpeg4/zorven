@@ -53,6 +53,7 @@ func (p *serviceProgram) run(ctx context.Context) {
 		CACertPath: cfg.CACertPath,
 		Log:        logger,
 		IsService:  true,
+		Version:    version,
 		// Servis modunda varsayilan guvenlik: uzaktan shell ve ekran kapali
 		NoTerminal: true,
 		NoScreen:   true,
@@ -76,6 +77,16 @@ func getService() (service.Service, error) {
 		DisplayName: "Zorven Tunnel Service",
 		Description: "Zorven ters proxy ve guvenli tunel arka plan servisi.",
 		Arguments:   []string{"service", "run"},
+		// Oto-update sonrasi/beklenmedik cikista servis yoneticisi ajani
+		// yeniden baslatsin: systemd (Restart), launchd (KeepAlive), Windows SCM
+		// (OnFailure recovery). Yeni kurulumlarda gecerli olur.
+		Option: service.KeyValue{
+			"Restart":                "always",
+			"KeepAlive":              true,
+			"OnFailure":              "restart",
+			"OnFailureDelayDuration": "5s",
+			"OnFailureResetPeriod":   10,
+		},
 	}
 	prog := &serviceProgram{}
 	return service.New(prog, svcConfig)

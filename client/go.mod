@@ -7,6 +7,7 @@ require (
 	github.com/coder/websocket v1.8.15
 	github.com/kardianos/service v1.3.0
 	github.com/kbinani/screenshot v0.0.0-20250624051815-089614a94018
+	github.com/minio/selfupdate v0.6.0
 	github.com/spf13/cobra v1.10.2
 	github.com/tkodcumpeg4/zorven/shared v0.0.0
 	golang.org/x/image v0.45.0
@@ -14,6 +15,7 @@ require (
 )
 
 require (
+	aead.dev/minisign v0.2.0 // indirect
 	github.com/creack/pty v1.1.24 // indirect
 	github.com/gen2brain/shm v0.1.0 // indirect
 	github.com/godbus/dbus/v5 v5.1.0 // indirect

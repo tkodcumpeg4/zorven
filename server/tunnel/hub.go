@@ -1,9 +1,12 @@
 package tunnel
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"time"
+
+	"github.com/tkodcumpeg4/zorven/shared/protocol"
 )
 
 // ErrAlreadyConnected, ayni istemci ikinci kez baglanmaya calistiginda doner.
@@ -80,6 +83,27 @@ func (h *Hub) Statuses() map[string]Status {
 		}
 	}
 	return out
+}
+
+// BroadcastUpdateAvailable, tum bagli istemcilere "yeni surum yayinlandi,
+// manifest'i kontrol et" sinyali gonderir. Kilidi tutmadan gonderir (Send
+// bloklayabilir); ulasilan istemci sayisini doner.
+func (h *Hub) BroadcastUpdateAvailable(ctx context.Context, version string) int {
+	h.mu.RLock()
+	snapshot := make([]*Session, 0, len(h.sessions))
+	for _, s := range h.sessions {
+		snapshot = append(snapshot, s)
+	}
+	h.mu.RUnlock()
+
+	msg := protocol.UpdateAvailable{Type: protocol.TypeUpdateAvailable, Version: version}
+	sent := 0
+	for _, s := range snapshot {
+		if err := s.Send(ctx, msg, protocol.TypeUpdateAvailable); err == nil {
+			sent++
+		}
+	}
+	return sent
 }
 
 // Count, bagli istemci sayisi.

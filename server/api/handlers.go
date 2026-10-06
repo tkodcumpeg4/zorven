@@ -167,6 +167,7 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("DELETE /api/v1/hostnames/{id}", s.deleteHostname)
 
 	// Platform yonetimi: YALNIZCA admin anahtariyla (kiraci oturumu yetmez).
+	mux.HandleFunc("POST /api/v1/admin/clients/notify-update", s.adminNotifyUpdate)
 	mux.HandleFunc("GET /api/v1/admin/stats", s.adminGetStats)
 	mux.HandleFunc("GET /api/v1/admin/tenants", s.adminListTenants)
 	mux.HandleFunc("GET /api/v1/admin/clients", s.adminListClients)
@@ -266,6 +267,23 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 }
 
 // --- platform admin --------------------------------------------------------
+
+// adminNotifyUpdate, POST /api/v1/admin/clients/notify-update — tum bagli
+// istemcilere "yeni surum var, guncelle" sinyali yayinlar (yeni ikili deploy
+// edildikten sonra elle veya betikle tetiklenir). Yalnizca platform admin.
+func (s *Server) adminNotifyUpdate(w http.ResponseWriter, r *http.Request) {
+	if !isPlatformAdmin(r.Context()) {
+		writeJSONError(w, http.StatusForbidden, "forbidden",
+			"bu uc yalnizca admin anahtariyla kullanilabilir")
+		return
+	}
+	if s.Hub == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "no_hub", "hub mevcut degil")
+		return
+	}
+	n := s.Hub.BroadcastUpdateAvailable(r.Context(), "")
+	writeJSON(w, http.StatusOK, map[string]any{"notified": n})
+}
 
 func (s *Server) adminGetStats(w http.ResponseWriter, r *http.Request) {
 	if !isPlatformAdmin(r.Context()) {

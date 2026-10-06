@@ -52,6 +52,30 @@ echo "Kontrol toplamlari yaziliyor..."
 # SHA256SUMS kendini listelemesin
 (cd "$OUT" && grep -v 'SHA256SUMS' SHA256SUMS > .tmp && mv .tmp SHA256SUMS)
 
+# Oto-update manifest'i: istemcinin /bin/manifest.json'dan okudugu surum + her
+# hedefin sunucuda SERVIS EDILEN adi (zorven-*), sha256 ve boyutu. Bytes ayni
+# oldugu icin sha256, rpshell-client-* dosyasindan hesaplanir.
+echo
+echo "manifest.json yaziliyor..."
+sha_of() { sha256sum "$1" 2>/dev/null | awk '{print $1}' || shasum -a 256 "$1" | awk '{print $1}'; }
+{
+  printf '{\n  "version": "%s",\n  "files": {\n' "$VERSION"
+  first=1
+  for target in "${TARGETS[@]}"; do
+    IFS='/' read -r goos goarch ext label <<< "$target"
+    src="$OUT/rpshell-client-${goos}-${goarch}${ext}"
+    served="zorven-${goos}-${goarch}${ext}"
+    sha=$(sha_of "$src")
+    sz=$(wc -c < "$src" | tr -d ' ')
+    [ $first -eq 1 ] || printf ',\n'
+    first=0
+    printf '    "%s/%s": {"name": "%s", "sha256": "%s", "size": %s}' \
+      "$goos" "$goarch" "$served" "$sha" "$sz"
+  done
+  printf '\n  }\n}\n'
+} > "$OUT/manifest.json"
+echo "  -> $OUT/manifest.json (surum $VERSION)"
+
 echo
 echo "Tamamlandi -> $OUT"
 ls -1 "$OUT"

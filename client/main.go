@@ -34,6 +34,7 @@ func main() {
 		enableScreen   bool
 		noTerminal     bool
 		noScreen       bool
+		noAutoUpdate   bool
 	)
 
 	runTunnel := func(cmd *cobra.Command, args []string) error {
@@ -136,6 +137,8 @@ func main() {
 			Log:             log,
 			NoTerminal:      finalNoTerminal,
 			NoScreen:        finalNoScreen,
+			Version:         version,
+			NoAutoUpdate:    noAutoUpdate,
 		}
 
 		// Canli HTTP isteklerini terminale bas
@@ -194,6 +197,7 @@ func main() {
 	f.BoolVar(&enableScreen, "enable-screen", false, "uzaktan ekran paylasimina izin ver (guvenlik nedeniyle varsayilan kapali)")
 	f.BoolVar(&noTerminal, "no-terminal", false, "uzaktan terminal erisimini kapat")
 	f.BoolVar(&noScreen, "no-screen", false, "uzaktan ekran paylasimini kapat")
+	f.BoolVar(&noAutoUpdate, "no-auto-update", false, "otomatik guncellemeyi kapat")
 
 	// --- Alt Komutlar ---
 
@@ -310,6 +314,38 @@ func main() {
 
 	configCmd.AddCommand(configShowCmd, configSetServerCmd, configSetTokenCmd)
 	root.AddCommand(configCmd)
+	updateCmd := &cobra.Command{
+		Use:   "update",
+		Short: "Guncellemeleri kontrol et ve varsa uygula (yeniden baslatir)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, _ := config.Load()
+			srv := strings.TrimSpace(server)
+			if srv == "" {
+				srv = strings.TrimSpace(cfg.ServerAddr)
+			}
+			if srv == "" || srv == "localhost:8443" {
+				srv = "zorven.app:443"
+			}
+			ag := &agent.Agent{
+				ServerAddr: srv,
+				Insecure:   insecure || cfg.Insecure,
+				CACertPath: caCert,
+				Log:        slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})),
+				Version:    version,
+			}
+			if ag.CACertPath == "" {
+				ag.CACertPath = cfg.CACertPath
+			}
+			fmt.Printf("Guncelleme kontrol ediliyor (mevcut surum: %s, sunucu: %s)...\n", version, srv)
+			if err := ag.CheckUpdateNow(cmd.Context()); err != nil {
+				return err
+			}
+			fmt.Println("Guncel. (yeni surum yoktu veya guncelleme uygulanip yeniden baslatildi)")
+			return nil
+		},
+	}
+	root.AddCommand(updateCmd)
+
 	root.AddCommand(newServiceCmd())
 
 	// Ust-seviye "zorven status": istemci ayarlarini ve arka plan servisinin

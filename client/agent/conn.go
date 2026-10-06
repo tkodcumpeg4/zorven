@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -37,6 +38,14 @@ type Agent struct {
 	NoTerminal bool // true ise uzak kabuk (PTY) erisimi tamamen reddedilir
 	NoScreen   bool // true ise uzak ekran paylasimi tamamen reddedilir
 	IsService  bool // true ise arka plan sistem servisi olarak calisir
+
+	// Version, bu ikilinin surumu (ldflags -X main.version ile gomulur).
+	// Oto-update, manifest.version bundan FARKLI ise guncelleme yapar.
+	Version string
+	// NoAutoUpdate true ise otomatik guncelleme tamamen kapalidir.
+	NoAutoUpdate bool
+	// updating, es zamanli guncelleme tetiklerini serilestiren bayrak.
+	updating atomic.Bool
 
 	// RequestedTarget, tek komutla acilacak port/hedef (or. "http://localhost:8080").
 	RequestedTarget string
@@ -99,6 +108,10 @@ func (a *Agent) Run(ctx context.Context) error {
 		return &FatalError{err.Error()}
 	}
 	a.emit(Status{State: StateConnecting, Message: "sunucuya baglaniliyor"})
+
+	// Oto-update: acilis + periyodik kontrol (baglanti dongusune paralel).
+	go a.runUpdater(ctx)
+
 	backoff := backoffMin
 
 	for {
@@ -393,6 +406,12 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) error {
 		}
 
 		switch mt {
+		case protocol.TypeUpdateAvailable:
+			// Sunucu yeni surum yayinladi: manifest'i kontrol et (arka planda,
+			// okuma dongusunu bloklamadan). maybeUpdate kendi icinde serilesir.
+			a.Log.Info("sunucu guncelleme sinyali gonderdi")
+			go a.maybeUpdate(ctx, "sunucu-push")
+
 		case protocol.TypePing:
 			m := metrics.Collect()
 			if err := cs.sendControl(ctx, protocol.Pong{
