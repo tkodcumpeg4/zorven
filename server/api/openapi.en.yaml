@@ -690,5 +690,9 @@ components:
         current_period_end: { type: [string, "null"], format: date-time }
         bandwidth_limit_bytes: { type: integer }
         trial_used: { type: boolean }
+        extra_devices: { type: integer, description: "Team extra devices (effective on Team only)" }
+        extra_gb: { type: integer, description: "Team extra monthly GB" }
+        effective_max_clients: { type: [integer, "null"], description: "Client limit including extra devices; null = unlimited" }
+        effective_bandwidth_limit_bytes: { type: [integer, "null"], description: "Monthly traffic limit including extra GB; null = unlimited" }
         created_at: { type: string, format: date-time }
         plan_details: { $ref: "#/components/schemas/Plan" }

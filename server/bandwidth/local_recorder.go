@@ -14,51 +14,102 @@ type LocalUsageRecorder struct {
 	st store.Store
 
 	statesMu sync.RWMutex
-	states   map[string]*TenantRuntimeState
+	states   map[string]*cachedState
 
 	deltasMu sync.Mutex
-	deltas   map[string][2]int64 // tenantID -> [bytesIn, bytesOut]
+	// deltas: donem ("2006-01") -> tenantID -> [bytesIn, bytesOut]. Donem
+	// anahtari, ay sonunda biriken trafigin yeni aya yazilmasini onler.
+	deltas map[string]map[string][2]int64
 
 	stopChan chan struct{}
 	once     sync.Once
+
+	// refreshEvery, onbellekteki kiraci durumunun DB'den (plan, kota, kullanim)
+	// yeniden yuklenme araligi. Plan/kota degisimi ve deneme bitisi en gec bu
+	// sure sonra uygulanir; ay donumu ise aninda (donem anahtari degisince).
+	refreshEvery time.Duration
+	// now, testlerde saati sabitlemek icin.
+	now func() time.Time
+}
+
+// stateRefreshInterval, varsayilan periyodik tazeleme araligi.
+const stateRefreshInterval = time.Minute
+
+// cachedState, kiracinin canli durumu + ne zaman/hangi donem icin yuklendigi.
+type cachedState struct {
+	state    *TenantRuntimeState
+	period   string // "2006-01"
+	loadedAt time.Time
 }
 
 func NewLocalRecorder(st store.Store) *LocalUsageRecorder {
 	r := &LocalUsageRecorder{
 		st:       st,
-		states:   make(map[string]*TenantRuntimeState),
-		deltas:   make(map[string][2]int64),
+		states:   make(map[string]*cachedState),
+		deltas:   make(map[string]map[string][2]int64),
 		stopChan: make(chan struct{}),
+
+		refreshEvery: stateRefreshInterval,
+		now:          time.Now,
 	}
 	go r.flushLoop()
 	return r
 }
 
-// GetOrCreateState, kiracinin bellek ici durumunu doner; yoksa DB'den yukler (warm-up).
+// fresh, onbellek kaydinin hala gecerli olup olmadigini soyler.
+func (r *LocalUsageRecorder) fresh(c *cachedState, period string, now time.Time) bool {
+	return c != nil && c.period == period && now.Sub(c.loadedAt) < r.refreshEvery
+}
+
+// Invalidate, kiracinin onbellekteki durumunu atar; bir sonraki istek planı,
+// kotayi ve kullanimi DB'den yeniden yukler (plan degisimi sonrasi aninda etki).
+func (r *LocalUsageRecorder) Invalidate(tenantID string) {
+	r.statesMu.Lock()
+	delete(r.states, tenantID)
+	r.statesMu.Unlock()
+}
+
+// GetOrCreateState, kiracinin bellek ici durumunu doner; yoksa ya da bayatsa
+// (refreshEvery doldu / ay dondu) DB'den yeniden yukler.
 func (r *LocalUsageRecorder) GetOrCreateState(ctx context.Context, tenantID string) (*TenantRuntimeState, error) {
+	now := r.now().UTC()
+	period := now.Format("2006-01")
+
 	r.statesMu.RLock()
-	s, ok := r.states[tenantID]
+	c := r.states[tenantID]
 	r.statesMu.RUnlock()
-	if ok {
-		return s, nil
+	if r.fresh(c, period, now) {
+		return c.state, nil
 	}
 
 	r.statesMu.Lock()
 	defer r.statesMu.Unlock()
 
 	// Double-check lock
-	if s, ok := r.states[tenantID]; ok {
-		return s, nil
+	c = r.states[tenantID]
+	if r.fresh(c, period, now) {
+		return c.state, nil
 	}
 
 	sub, err := r.st.GetSubscription(ctx, tenantID)
 	if err != nil {
+		// DB gecici olarak erisilemezse ayni donem icindeki eski durumu koru
+		// (fail-stale); bir sonraki denemeyi refreshEvery kadar ertele.
+		if c != nil && c.period == period {
+			c.loadedAt = now
+			return c.state, nil
+		}
 		return nil, err
 	}
 
-	currentPeriod := time.Now().UTC().Format("2006-01")
-	bytesIn, bytesOut, _ := r.st.GetBandwidthUsage(ctx, tenantID, currentPeriod)
+	bytesIn, bytesOut, _ := r.st.GetBandwidthUsage(ctx, tenantID, period)
 	usedSoFar := bytesIn + bytesOut
+	// Henuz DB'ye aktarilmamis (10 sn tamponu) tuketim de sayilir; yoksa
+	// tazeleme kullanimi geriye sarar ve kota gec uygulanir.
+	r.deltasMu.Lock()
+	pending := r.deltas[period][tenantID]
+	r.deltasMu.Unlock()
+	usedSoFar += pending[0] + pending[1]
 
 	// Open-core / self-host varsayilani SINIRSIZ: acik bir plan (PlanDetails)
 	// tanimli degilse 0 gecilir -> NewTenantRuntimeState throttle uygulamaz.
@@ -72,8 +123,8 @@ func (r *LocalUsageRecorder) GetOrCreateState(ctx context.Context, tenantID stri
 		throttledMbps = int64(sub.PlanDetails.BandwidthThrottledMbps)
 	}
 
-	s = NewTenantRuntimeState(tenantID, sub.Plan, sub.BandwidthLimitBytes, usedSoFar, normalMbps, throttledMbps)
-	r.states[tenantID] = s
+	s := NewTenantRuntimeState(tenantID, sub.Plan, 0 /* acik surum: aylik trafik limiti yok */, usedSoFar, normalMbps, throttledMbps)
+	r.states[tenantID] = &cachedState{state: s, period: period, loadedAt: now}
 	return s, nil
 }
 
@@ -92,11 +143,17 @@ func (r *LocalUsageRecorder) Record(ctx context.Context, event UsageEvent) error
 	state.Record(event.BytesIn, event.BytesOut)
 
 	// 2. 10 saniyelik DB flush tamponuna ekle
+	period := r.now().UTC().Format("2006-01")
 	r.deltasMu.Lock()
-	cur := r.deltas[event.TenantID]
+	byTenant := r.deltas[period]
+	if byTenant == nil {
+		byTenant = make(map[string][2]int64)
+		r.deltas[period] = byTenant
+	}
+	cur := byTenant[event.TenantID]
 	cur[0] += event.BytesIn
 	cur[1] += event.BytesOut
-	r.deltas[event.TenantID] = cur
+	byTenant[event.TenantID] = cur
 	r.deltasMu.Unlock()
 
 	return nil
@@ -110,11 +167,16 @@ func (r *LocalUsageRecorder) Flush(ctx context.Context) error {
 		return nil
 	}
 	batchCopy := r.deltas
-	r.deltas = make(map[string][2]int64)
+	r.deltas = make(map[string]map[string][2]int64)
 	r.deltasMu.Unlock()
 
-	currentPeriod := time.Now().UTC().Format("2006-01")
-	return r.st.FlushBandwidthDeltas(ctx, currentPeriod, batchCopy)
+	var firstErr error
+	for period, byTenant := range batchCopy {
+		if err := r.st.FlushBandwidthDeltas(ctx, period, byTenant); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 func (r *LocalUsageRecorder) flushLoop() {

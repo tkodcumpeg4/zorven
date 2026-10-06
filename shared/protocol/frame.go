@@ -28,6 +28,15 @@ const (
 	// yon gonderen tarafca bilinir. Akis kontrolu YOK (WS interaktiftir).
 	FrameWSData uint8 = 3
 
+	// FrameStreamData, ham TCP tunelinin (FAZ 3 / D2) baytlarini tasir. Cift
+	// yonludur (ziyaretci<->yerel); yon gonderen tarafca bilinir. WS gibi akis
+	// kontrolu YOK — ham TCP zaten kendi akis kontroluna sahiptir. ReqID = stream id.
+	FrameStreamData uint8 = 4
+
+	// FrameDatagram, tek bir UDP datagramini tasir (FAZ 3 / D2). Her cerceve TAM
+	// bir datagramdir; sinir korunur, siralama/teslim garantisi yoktur. ReqID = flow id.
+	FrameDatagram uint8 = 5
+
 	FlagEOF uint8 = 1 << 0
 )
 
@@ -67,7 +76,8 @@ func DecodeBodyFrame(data []byte) (BodyFrame, error) {
 		return BodyFrame{}, fmt.Errorf("%w: %d bayt", ErrShortFrame, len(data))
 	}
 	ft := data[0]
-	if ft != FrameRequestBody && ft != FrameResponseBody && ft != FrameWSData {
+	if ft != FrameRequestBody && ft != FrameResponseBody && ft != FrameWSData &&
+		ft != FrameStreamData && ft != FrameDatagram {
 		return BodyFrame{}, fmt.Errorf("%w: %d", ErrUnknownFrame, ft)
 	}
 	return BodyFrame{

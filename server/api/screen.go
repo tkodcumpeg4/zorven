@@ -36,6 +36,15 @@ func (s *Server) issueScreenTicket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// İstemci belirtilmişse, istek sahibinin kiracısına ait olduğunu doğrula (IDOR önlemi)
+	// F16: politikaya tabi cagiran cihaz ADI VERMEDEN bilet alamaz — adsiz
+	// bilet kiracinin herhangi bir cihazina acilabilirdi.
+	if body.ClientID == "" {
+		if !s.requirePrivileged(w, r, tenantID) {
+			return
+		}
+	} else if !s.requireDeviceAccess(w, r, tenantID, body.ClientID) {
+		return
+	}
 	if body.ClientID != "" {
 		if _, err := s.Store.GetClient(r.Context(), tenantID, body.ClientID); err != nil {
 			writeJSONError(w, http.StatusNotFound, "client_not_found", "istemci bulunamadi")
@@ -143,7 +152,10 @@ func (s *Server) screenHandler(w http.ResponseWriter, r *http.Request) {
 	s.logger().Info("ekran ws oturumu baslatildi",
 		"client_id", clientID, "session_id", sessionID, "mode", mode, "max_width", maxWidth)
 
-	frames := make(chan protocol.ScreenFrame, 8)
+	// Kare kuyrugu: H.264'te parcalar DUSURULEMEZ (fMP4 sureklidir), o yuzden
+	// kisa ag dalgalanmalarini yutacak kadar derin tutuyoruz. 8 kare 5 fps'te
+	// yalnizca 1.6 saniyeydi ve normal bir gecikmede bile tasiyordu.
+	frames := make(chan protocol.ScreenFrame, 64)
 	errs := make(chan protocol.ScreenError, 1)
 
 	if err := sess.OpenScreen(ctx, sessionID, fps, quality, maxWidth, mode, frames, errs); err != nil {
@@ -195,6 +207,10 @@ func (s *Server) screenHandler(w http.ResponseWriter, r *http.Request) {
 					// seceneklerini buna gore uretir.
 					"screen_w": f.ScreenW,
 					"screen_h": f.ScreenH,
+					// Metrik paneli: darbogazin yakalama mi, kodlama mi,
+					// yoksa ag mi oldugunu dashboard ancak boyle ayirir.
+					"capture_ms": f.CaptureMS,
+					"encode_ms":  f.EncodeMS,
 				})
 				if err := conn.Write(ctx, websocket.MessageText, msg); err != nil {
 					cancel()

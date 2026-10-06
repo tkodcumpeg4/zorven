@@ -13,6 +13,7 @@ const (
 	ctxKeyPlatformAdmin
 	ctxKeyUser
 	ctxKeyAPIScopes
+	ctxKeyProject
 )
 
 // AuthUser, giris yapmis Better Auth kullanicisinin temel bilgileri.
@@ -56,6 +57,17 @@ func withTenant(ctx context.Context, tenantID string) context.Context {
 // ok=false ise istek kapsamsiz gelmis demektir — bu bir programlama hatasidir.
 func tenantFromContext(ctx context.Context) (string, bool) {
 	v, ok := ctx.Value(ctxKeyTenant).(string)
+	return v, ok && v != ""
+}
+
+// withProject, istegin bagli oldugu projeyi context'e koyar (FAZ 0 / F00).
+func withProject(ctx context.Context, projectID string) context.Context {
+	return context.WithValue(ctx, ctxKeyProject, projectID)
+}
+
+// projectFromContext, context'teki aktif proje ID'sini okur.
+func projectFromContext(ctx context.Context) (string, bool) {
+	v, ok := ctx.Value(ctxKeyProject).(string)
 	return v, ok && v != ""
 }
 

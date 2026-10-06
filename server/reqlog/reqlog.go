@@ -5,9 +5,10 @@
 package reqlog
 
 import (
+	crand "crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -27,6 +28,18 @@ type Entry struct {
 	Path       string    `json:"path"`
 	Status     int       `json:"status"`
 	DurationMS int64     `json:"duration_ms"`
+	BytesIn    int64     `json:"bytes_in"`
+	BytesOut   int64     `json:"bytes_out"`
+}
+
+// MetricBucket, bir zaman dilimindeki (bucket) toplu istek metrikleri (FAZ 6.3).
+// Panel per-tunel metrik grafiklerini bununla cizer.
+type MetricBucket struct {
+	Bucket     time.Time `json:"bucket"`      // dilim baslangici (UTC)
+	Count      int64     `json:"count"`       // toplam istek
+	ErrorCount int64     `json:"error_count"` // status >= 500
+	AvgMs      float64   `json:"avg_ms"`      // ortalama sure
+	MaxMs      int64     `json:"max_ms"`      // en yuksek sure
 	BytesIn    int64     `json:"bytes_in"`
 	BytesOut   int64     `json:"bytes_out"`
 }
@@ -59,7 +72,6 @@ type Ring struct {
 	next int  // bir sonraki yazma konumu
 	full bool // tampon en az bir kez tamamen doldu mu
 
-	seq atomic.Uint64
 }
 
 func New(capacity int) *Ring {
@@ -72,7 +84,7 @@ func New(capacity int) *Ring {
 // Add, kaydi ekler ve uretilen ID'yi doner. En eski kayit sessizce dusurulur.
 func (r *Ring) Add(e Entry) Entry {
 	if e.ID == "" {
-		e.ID = fmt.Sprintf("req_%08x", r.seq.Add(1))
+		e.ID = NewID()
 	}
 	if e.TS.IsZero() {
 		e.TS = time.Now().UTC()
@@ -124,4 +136,16 @@ func (r *Ring) Len() int {
 		return len(r.buf)
 	}
 	return r.next
+}
+
+// NewID, surecler arasi benzersiz bir istek kimligi uretir. Eskiden surec ici
+// sirali sayac kullaniliyordu (req_00000001...); sunucu her yeniden basladiginda
+// sayac sifirlandigi icin yeni kayitlar Postgres'teki eski kimliklerle cakisip
+// (ON CONFLICT DO NOTHING) sessizce kayboluyordu.
+func NewID() string {
+	var b [8]byte
+	if _, err := crand.Read(b[:]); err != nil {
+		return fmt.Sprintf("req_t%x", time.Now().UnixNano())
+	}
+	return "req_" + hex.EncodeToString(b[:])
 }

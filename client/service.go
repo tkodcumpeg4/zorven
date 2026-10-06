@@ -36,10 +36,9 @@ func (p *serviceProgram) run(ctx context.Context) {
 		serverAddr = "zorven.app:443"
 	}
 
-	localURL := cfg.LocalURL
-	if localURL == "" {
-		localURL = "http://localhost:8003"
-	}
+	// Servis HICBIR yerel hedef varsaymaz: yalnizca sunucuda tanimli
+	// tunelleri (hello_ack / config_update) isler. RequestedTarget de bos
+	// kalir; boylece sunucu bu istemci icin kendiliginden tunel acmaz.
 
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
@@ -48,7 +47,6 @@ func (p *serviceProgram) run(ctx context.Context) {
 	ag := &agent.Agent{
 		ServerAddr: serverAddr,
 		Token:      cfg.Token,
-		LocalURL:   localURL,
 		Insecure:   cfg.Insecure,
 		CACertPath: cfg.CACertPath,
 		Log:        logger,

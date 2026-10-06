@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/tkodcumpeg4/zorven/server/abuse"
 	"github.com/tkodcumpeg4/zorven/server/auth"
 	"github.com/tkodcumpeg4/zorven/server/entitlements"
 	"github.com/tkodcumpeg4/zorven/server/ratelimit"
@@ -46,7 +47,7 @@ type Handler struct {
 	// OnTunnelChange, yeni bir tunel olustugunda Ingress yonlendiricisini (Reload) uyarir.
 	OnTunnelChange func()
 
-	// OnClientConnected ve OnClientDisconnected, kume oturum kaydini guncellemek icin kancalardir.
+	// OnClientConnected ve OnClientDisconnected, baglanti yasam dongusu icin istege bagli kancalardir.
 	OnClientConnected    func(ctx context.Context, clientID string)
 	OnClientDisconnected func(ctx context.Context, clientID string)
 }
@@ -119,6 +120,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() {
 		h.Hub.Unregister(sess)
+		// Kopus aninda "en son gorulme"yi damgala: cihaz offline oldugunda
+		// panelde ne zamandir kayip oldugu gorunsun. Istegin ctx'i iptal olmus
+		// olabilecegi icin arka plan ctx kullaniliyor.
+		dctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := h.Store.TouchDeviceSeen(dctx, client.ID); err != nil {
+			h.Log.Warn("son gorulme damgalanamadi", "client", client.ID, "hata", err)
+		}
+		cancel()
 		if h.OnClientDisconnected != nil {
 			h.OnClientDisconnected(context.Background(), client.ID)
 		}
@@ -207,6 +216,20 @@ func (h *Handler) handshake(ctx context.Context, s *Session) error {
 		s.SetMetrics(hello.Metrics)
 	}
 
+	// Cihaz bilgisini kalicilastir (FAZ 3 / F14). Basarisiz olursa el sikismasi
+	// DURMAZ: cihaz envanteri guzel bir sey ama tunelin calismasinin sarti degil.
+	goos, goarch := splitPlatform(hello.Platform)
+	if err := h.Store.UpdateDeviceInfo(ctx, s.ClientID, store.DeviceInfo{
+		Hostname:     hello.Hostname,
+		OS:           goos,
+		Arch:         goarch,
+		IPs:          hello.IPs,
+		AgentVersion: hello.ClientVersion,
+		Metrics:      hello.Metrics,
+	}); err != nil {
+		h.Log.Warn("cihaz bilgisi kaydedilemedi", "client", s.ClientID, "hata", err)
+	}
+
 	// Yetenek pazarligi: istemci akis kontrolunu destekliyorsa etkinlestir.
 	// Eski istemciler Features gondermez -> flowControl false kalir ve davranis
 	// eski surumlerdeki gibi surer (geriye donuk uyumluluk).
@@ -234,12 +257,24 @@ func (h *Handler) handshake(ctx context.Context, s *Session) error {
 
 	reqTarget := normalizeTarget(hello.RequestedTarget)
 	if reqTarget != "" && s.TenantID != "" {
+		// Gecici tunel istegi (FAZ 2 / F07). Sinirlar SUNUCUDA uygulanir;
+		// istemcinin gonderdigi degere oldugu gibi guvenilmez.
+		ttl := clampTunnelTTL(hello.RequestedTTLSec)
+
 		var found bool
 		for _, t := range tunnels {
-			if strings.TrimRight(t.Target, "/") == reqTarget && t.Enabled {
-				found = true
-				break
+			if strings.TrimRight(t.Target, "/") != reqTarget || !t.Enabled {
+				continue
 			}
+			// TTL istenmisse yalnizca GECICI bir tunel yeniden kullanilir.
+			// Kalici bir tuneli "gecici" diye devralmak, kullanicinin kalici
+			// yayinini sessizce silinebilir yapardi. Tersi de gecerli: TTL
+			// istenmemisse gecici bir tunel kalici gibi kullanilmaz.
+			if (ttl > 0) != t.Ephemeral {
+				continue
+			}
+			found = true
+			break
 		}
 		if !found {
 			canCreate := true
@@ -250,7 +285,14 @@ func (h *Handler) handshake(ctx context.Context, s *Session) error {
 				}
 			}
 			if canCreate {
-				newTun, err := h.Store.CreateTunnel(ctx, s.TenantID, s.ClientID, reqTarget)
+				var newTun store.Tunnel
+				var err error
+				if ttl > 0 {
+					expires := time.Now().UTC().Add(time.Duration(ttl) * time.Second)
+					newTun, err = h.Store.CreateEphemeralTunnel(ctx, s.TenantID, s.ClientID, reqTarget, "", expires)
+				} else {
+					newTun, err = h.Store.CreateTunnel(ctx, s.TenantID, s.ClientID, reqTarget)
+				}
 				if err != nil {
 					h.Log.Warn("otomatik tunel acilamadi", "hata", err)
 				} else {
@@ -281,6 +323,15 @@ func (h *Handler) handshake(ctx context.Context, s *Session) error {
 					}
 					if hname.FQDN != "" {
 						names = append(names, hname)
+						// Otomatik tarama: istemci-adı türevli ad phishing örüntüsüne
+						// uyuyorsa admin incelemesi için işaretle (NON-BLOCKING).
+						if res := abuse.ScanFQDN(hname.FQDN, plat); res.Suspicious {
+							h.Log.Warn("otomatik tarama supheli otomatik-ad isaretledi",
+								"fqdn", hname.FQDN, "score", res.Score, "reason", res.Reason)
+							if _, cerr := h.Store.CreateAbuseReport(ctx, hname.FQDN, res.Reason, "auto-scan"); cerr != nil {
+								h.Log.Error("otomatik tarama raporu olusturulamadi", "fqdn", hname.FQDN, "err", cerr)
+							}
+						}
 					}
 					if h.OnTunnelChange != nil {
 						h.OnTunnelChange()
@@ -306,6 +357,14 @@ func (h *Handler) handshake(ctx context.Context, s *Session) error {
 		}
 	}
 
+	// Kayitli uzak ayarlar (FAZ 3 / F15). Okunamazsa ajan kendi
+	// varsayilanlariyla calisir: ayar okunamamasi baglantiyi engellememeli.
+	settings, err := h.Store.GetDeviceConfigByClient(ctx, s.ClientID)
+	if err != nil {
+		h.Log.Warn("cihaz ayarlari okunamadi, varsayilanlarla devam", "client", s.ClientID, "hata", err)
+		settings = nil
+	}
+
 	return s.Send(ctx, protocol.HelloAck{
 		Type:               protocol.TypeHelloAck,
 		ClientID:           s.ClientID,
@@ -313,6 +372,7 @@ func (h *Handler) handshake(ctx context.Context, s *Session) error {
 		HeartbeatIntervalS: int(HeartbeatInterval / time.Second),
 		Tunnels:            specs,
 		Features:           enabled,
+		Settings:           settings,
 	}, protocol.TypeHelloAck)
 }
 
@@ -363,6 +423,42 @@ func normalizeTarget(raw string) string {
 		return "http://" + raw
 	}
 	return strings.TrimRight(raw, "/")
+}
+
+// Gecici tunel TTL sinirlari (FAZ 2 / F07). REST ucundaki sinirlarla ayni
+// olmalidir; iki giris yolu ayni sozlesmeyi uygular.
+const (
+	minTunnelTTLSec = 60
+	maxTunnelTTLSec = 24 * 60 * 60
+)
+
+// splitPlatform, "windows/amd64" bicimini isletim sistemi ve mimariye ayirir.
+// Bicim beklenmedikse ikisi de bos doner — yanlis bir deger kaydetmektense
+// hic kaydetmemek yeglenir (bos alanlar mevcut kaydi ezmez).
+func splitPlatform(p string) (goos, goarch string) {
+	p = strings.TrimSpace(p)
+	os, arch, ok := strings.Cut(p, "/")
+	if !ok {
+		return "", ""
+	}
+	return strings.TrimSpace(os), strings.TrimSpace(arch)
+}
+
+// clampTunnelTTL, istemciden gelen TTL'i gecerli araliga sikistirir.
+// 0 veya negatif => kalici tunel. Araligin disindaki degerler REDDEDILMEZ,
+// siniga cekilir: el sikismasi sirasinda hata dondurmek yerine calisir bir
+// tunel vermek, tek komutluk akis icin daha iyi bir davranis.
+func clampTunnelTTL(sec int) int {
+	if sec <= 0 {
+		return 0
+	}
+	if sec < minTunnelTTLSec {
+		return minTunnelTTLSec
+	}
+	if sec > maxTunnelTTLSec {
+		return maxTunnelTTLSec
+	}
+	return sec
 }
 
 func sanitizeTunnelName(s string) string {

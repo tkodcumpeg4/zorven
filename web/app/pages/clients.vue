@@ -8,6 +8,49 @@ const { relativeTime } = useFormat()
 const { openUpgrade, loadBillingData } = useBilling()
 
 const clients = ref<Client[]>([])
+
+// --- F16: cihaz etiketleri (yalnızca owner/admin düzenler; sunucu da zorlar) ---
+const { user, platformAdmin } = useAuth()
+const canEditTags = computed(() => {
+  if (platformAdmin.value) return true
+  const r = (user.value?.role || '').toLowerCase()
+  return r === 'owner' || r === 'admin'
+})
+const tagClient = ref<Client | null>(null)
+const tagText = ref('')
+const tagSaving = ref(false)
+
+async function openTags(c: Client) {
+  tagClient.value = c
+  tagText.value = ''
+  try {
+    const tags = await api.getDeviceTags(c.id)
+    tagText.value = Object.entries(tags).map(([k, v]) => `${k}=${v}`).join('\n')
+  } catch (e: any) {
+    toast.error(e?.data?.error?.message || e?.data?.error || t('clients.tagsError'))
+  }
+}
+
+async function saveTags() {
+  if (!tagClient.value) return
+  const tags: Record<string, string> = {}
+  for (const raw of tagText.value.split(/[\n,]/)) {
+    const i = raw.indexOf('=')
+    if (i <= 0) continue
+    const k = raw.slice(0, i).trim().toLowerCase()
+    if (k) tags[k] = raw.slice(i + 1).trim()
+  }
+  tagSaving.value = true
+  try {
+    await api.setDeviceTags(tagClient.value.id, tags)
+    tagClient.value = null
+    toast.success(t('clients.tagsSaved'))
+  } catch (e: any) {
+    toast.error(e?.data?.error?.message || e?.data?.error || t('clients.tagsError'))
+  } finally {
+    tagSaving.value = false
+  }
+}
 const pending = ref(true)
 const saving = ref(false)
 const newName = ref('')
@@ -24,11 +67,19 @@ const origin = computed(() => {
   return 'https://zorven.app'
 })
 
+// Temizlik setup'ta senkron kaydedilir (await sonrasi kayit calismaz).
+let interval: ReturnType<typeof setInterval> | undefined
+let unmounted = false
+onUnmounted(() => {
+  unmounted = true
+  if (interval) clearInterval(interval)
+})
+
 onMounted(async () => {
   await fetchClients()
+  if (unmounted) return
   // Her 10 saniyede bir metrikleri tazelemek icin polling
-  const interval = setInterval(fetchClients, 10000)
-  onUnmounted(() => clearInterval(interval))
+  interval = setInterval(fetchClients, 10000)
 })
 
 async function fetchClients() {
@@ -53,8 +104,10 @@ async function create() {
     toast.success(t('clients.created'))
     loadBillingData()
   } catch (err: any) {
-    const code = err?.data?.error?.code
-    const msg = err?.data?.error?.message || err?.message || t('clients.createFailed')
+    // Entitlement hatasi {code, error:"metin"} bicimindedir; digerleri {error:{code,message}}.
+    const data = err?.data
+    const code = data?.error?.code ?? data?.code
+    const msg = data?.error?.message || (typeof data?.error === 'string' ? data.error : '') || t('clients.createFailed')
     if (code === 'plan_limit_reached') {
       openUpgrade(msg, 'clients')
     } else {
@@ -253,6 +306,16 @@ const currentCmd = computed(() => {
               <td class="px-4 py-3">
                 <div class="font-medium text-fg">{{ c.name }}</div>
                 <div class="font-mono text-xs text-fg-subtle">{{ c.id }}</div>
+                <!-- F14: cihaz kimligi — baglanti kopsa da kalicidir -->
+                <div v-if="c.hostname || c.os" class="mt-0.5 flex flex-wrap items-center gap-1.5 text-[10px] text-fg-subtle">
+                  <span v-if="c.hostname" class="inline-flex items-center gap-1">
+                    <Icon name="lucide:monitor" class="size-3" />{{ c.hostname }}
+                  </span>
+                  <span v-if="c.os" class="font-mono">{{ c.os }}<span v-if="c.arch">/{{ c.arch }}</span></span>
+                </div>
+                <div v-if="c.ips?.length" class="mt-0.5 font-mono text-[10px] text-fg-subtle" :title="c.ips.join(', ')">
+                  {{ c.ips.slice(0, 2).join(', ') }}<span v-if="c.ips.length > 2"> +{{ c.ips.length - 2 }}</span>
+                </div>
               </td>
               <td class="px-4 py-3">
                 <div class="flex flex-col gap-1 items-start">
@@ -315,16 +378,36 @@ const currentCmd = computed(() => {
                   <div v-if="c.metrics.disk_percent" class="text-[10px] text-fg-subtle">{{ t('clients.diskUsage', { p: c.metrics.disk_percent.toFixed(0) }) }}</div>
                 </div>
                 <span v-else-if="c.status === 'online'" class="text-xs text-fg-subtle">{{ t('clients.waitingMetrics') }}</span>
+                <!-- Offline: son BILINEN metrikler, "canli" gibi sunulmaz -->
+                <div v-else-if="c.last_metrics" class="text-[10px] leading-relaxed text-fg-subtle">
+                  <div>{{ t('clients.lastKnownMetrics') }}</div>
+                  <div class="font-mono">
+                    CPU %{{ c.last_metrics.cpu_percent.toFixed(0) }} ·
+                    RAM %{{ c.last_metrics.memory_percent.toFixed(0) }}
+                  </div>
+                </div>
                 <span v-else class="text-xs text-fg-muted">—</span>
               </td>
 
               <td class="px-4 py-3">
-                <div class="font-mono text-xs text-fg-muted">{{ c.version ?? '—' }}</div>
+                <div class="font-mono text-xs text-fg-muted">
+                  {{ c.version ?? c.agent_version ?? '—' }}
+                  <!-- Offline iken gosterilen surum CANLI degil, son bilinendir. -->
+                  <span v-if="!c.version && c.agent_version" class="text-[10px] text-fg-subtle">({{ t('clients.lastKnown') }})</span>
+                </div>
                 <div class="font-mono text-xs text-fg-subtle">{{ c.remote_addr ?? '—' }}</div>
               </td>
               <td class="px-4 py-3 text-xs text-fg-muted">{{ relativeTime(c.last_seen_at) }}</td>
               <td class="px-4 py-3">
                 <div class="flex justify-end gap-1">
+                  <button
+                    v-if="canEditTags"
+                    class="rounded-md px-2 py-1 text-xs text-fg-muted hover:text-fg"
+                    :title="t('clients.editTags')"
+                    @click="openTags(c)"
+                  >
+                    <Icon name="lucide:tags" class="size-3.5" />
+                  </button>
                   <NuxtLink
                     v-if="c.status === 'online'"
                     :to="`/terminal/${c.id}`"
@@ -357,5 +440,21 @@ const currentCmd = computed(() => {
         </table>
       </div>
     </PanelFrame>
+
+    <!-- F16: cihaz etiketleri -->
+    <div v-if="tagClient" class="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4" @click.self="tagClient = null">
+      <div class="w-full max-w-md rounded-xl border border-line bg-surface p-5 shadow-lg">
+        <h2 class="text-lg font-semibold text-fg">{{ t('clients.editTags') }} — {{ tagClient.name }}</h2>
+        <textarea v-model="tagText" rows="5" :placeholder="t('clients.tagsPh')" class="mt-3 w-full rounded-lg border border-line bg-bg px-3 py-2 font-mono text-xs text-fg outline-none focus:border-accent" />
+        <p class="mt-1 text-[11px] leading-relaxed text-fg-subtle">{{ t('clients.tagsHint') }}</p>
+        <div class="mt-4 flex justify-end gap-2">
+          <button class="rounded-lg border border-line px-3 py-2 text-sm text-fg-muted hover:text-fg" @click="tagClient = null">{{ t('common.cancel') }}</button>
+          <button class="inline-flex items-center gap-1.5 rounded-lg bg-accent px-3 py-2 text-sm font-medium text-white disabled:opacity-50" :disabled="tagSaving" @click="saveTags">
+            <Icon v-if="tagSaving" name="lucide:loader-circle" class="size-4 animate-spin" />
+            {{ t('common.save') }}
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>

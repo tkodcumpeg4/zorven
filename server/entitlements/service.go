@@ -18,9 +18,15 @@ import (
 type Feature string
 
 const (
-	FeatureAPIAccess    Feature = "api_access"
-	FeatureIPAllowlist  Feature = "ip_allowlist"
-	FeatureCustomDomain Feature = "custom_domain"
+	FeatureAPIAccess     Feature = "api_access"
+	FeatureIPAllowlist   Feature = "ip_allowlist"
+	FeatureCustomDomain  Feature = "custom_domain"
+	FeaturePolicyEngine  Feature = "policy_engine"  // Policy motoru + WAF + webhook dogrulama
+	FeatureSecretVault   Feature = "secret_vault"   // Secret Vault
+	FeatureAgentConfig   Feature = "agent_config"   // uzaktan ajan yapilandirmasi
+	FeatureZorvenNetwork Feature = "zorven_network" // ozel ag (zorven connect/forward)
+	FeatureAdvancedLB    Feature = "advanced_lb"    // gelismis yuk dengeleme
+	FeatureUDPAdvanced   Feature = "udp_advanced"   // gelismis UDP
 )
 
 // ScreenStreamSpec, ekran yayini parametreleri. Cekirdekte sinirsiz/1080p.
@@ -59,6 +65,8 @@ type EntitlementService interface {
 	CanCreateTunnel(ctx context.Context, tenantID string) error
 	CanAddCustomDomain(ctx context.Context, tenantID string) error
 	CanAddMember(ctx context.Context, tenantID string) error
+	CanAcceptMember(ctx context.Context, tenantID string) error
+	CanCreateProject(ctx context.Context, tenantID string) error
 	AcquireScreenSlot(ctx context.Context, tenantID string) (release func(), spec ScreenStreamSpec, err error)
 	CheckFeature(ctx context.Context, tenantID string, feature Feature) error
 	GetTenantEntitlements(ctx context.Context, tenantID string) (TenantEntitlements, error)
@@ -81,6 +89,8 @@ func (s *Service) CanCreateClient(context.Context, string) error       { return 
 func (s *Service) CanCreateTunnel(context.Context, string) error       { return nil }
 func (s *Service) CanAddCustomDomain(context.Context, string) error    { return nil }
 func (s *Service) CanAddMember(context.Context, string) error          { return nil }
+func (s *Service) CanAcceptMember(context.Context, string) error       { return nil }
+func (s *Service) CanCreateProject(context.Context, string) error      { return nil }
 func (s *Service) CheckFeature(context.Context, string, Feature) error { return nil }
 
 // AcquireScreenSlot, limitsiz slot verir; yalnizca anlik sayimi tutar.

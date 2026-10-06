@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/tkodcumpeg4/zorven/server/bandwidth"
+	"github.com/tkodcumpeg4/zorven/server/internal/testdb"
 	"github.com/tkodcumpeg4/zorven/server/store/pgstore"
 	"golang.org/x/time/rate"
 )
@@ -87,9 +88,9 @@ func TestTenantRuntimeState_SelfHostUnlimited(t *testing.T) {
 
 func TestLocalUsageRecorder_RecordAndFlush(t *testing.T) {
 	ctx := context.Background()
-	st, err := pgstore.Open(ctx, "postgres://rpshell:rpshell@localhost:5432/rpshell_test")
+	st, err := pgstore.Open(ctx, testdb.DSN(t))
 	if err != nil {
-		t.Skip("Postgres test DB baglanamadi, atlaniyor")
+		t.Fatalf("test veritabani acilamadi: %v", err)
 	}
 	defer st.Close()
 

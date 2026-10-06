@@ -12,6 +12,9 @@ import "github.com/tkodcumpeg4/zorven/shared/protocol"
 // (CGEvent) sonraki bir asamada build tag'iyle eklenebilir.
 //
 // Bu platformlarda ekran GORUNTULEME calisir, KONTROL sessizce yok sayilir.
-func applyInput(_ protocol.ScreenInput) {}
 
-func keyToRune(_ string) rune { return 0 }
+// displayRect, yakalanan monitorun sinirlari. Windows disinda kullanilmaz ama
+// applyInput imzasi platformlar arasi ayni kalsin diye tanimli.
+type displayRect struct{ x, y, w, h int }
+
+func applyInput(_ protocol.ScreenInput, _ displayRect) {}

@@ -22,6 +22,18 @@ func (f *fakeStore) ListHostRoutes(context.Context) ([]store.HostRoute, error) {
 	return f.routes, nil
 }
 
+func (f *fakeStore) ListPathRouteEntries(context.Context) ([]store.HostRoute, error) {
+	return nil, nil
+}
+
+func (f *fakeStore) ListPolicyRoutes(context.Context) ([]store.PolicyRoute, error) {
+	return nil, nil
+}
+
+func (f *fakeStore) ListTunnelLBs(context.Context) ([]store.TunnelLB, error) {
+	return nil, nil
+}
+
 func newTestRouter(t *testing.T, hostnames ...string) *Router {
 	t.Helper()
 

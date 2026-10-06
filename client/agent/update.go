@@ -58,7 +58,8 @@ func (a *Agent) updateHTTPClient() *http.Client {
 // runUpdater, acilis + periyodik guncelleme kontrolunu yurutur. ctx bitince
 // durur. WSS "update_available" sinyali ayrica readLoop'tan maybeUpdate'i tetikler.
 func (a *Agent) runUpdater(ctx context.Context) {
-	if a.NoAutoUpdate {
+	// Etkin ayar: yerel bayrak VEYA uzak ayar kapattiysa guncelleme yapilmaz.
+	if a.NoAutoUpdate || !a.settings.autoUpdateEnabled() {
 		return
 	}
 	// Once baglanti otursun; sonra ilk kontrol.
@@ -88,7 +89,7 @@ func (a *Agent) runUpdater(ctx context.Context) {
 // basarisiz olursa mevcut surumle calismaya devam eder (asla brick etmez).
 func (a *Agent) maybeUpdate(ctx context.Context, reason string) {
 	// Gelistirme ikilisi (surum yok/"dev") veya kapaliysa hicbir sey yapma.
-	if a.NoAutoUpdate || a.Version == "" || a.Version == "dev" {
+	if a.NoAutoUpdate || !a.settings.autoUpdateEnabled() || a.Version == "" || a.Version == "dev" {
 		return
 	}
 	// Es zamanli tetikleri (acilis/periyodik/WSS) serilestir.

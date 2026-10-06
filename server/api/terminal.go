@@ -35,6 +35,15 @@ func (s *Server) issueTerminalTicket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// İstemci belirtilmişse, istek sahibinin kiracısına ait olduğunu doğrula (IDOR önlemi)
+	// F16: politikaya tabi cagiran cihaz ADI VERMEDEN bilet alamaz — adsiz
+	// bilet kiracinin herhangi bir cihazina acilabilirdi.
+	if body.ClientID == "" {
+		if !s.requirePrivileged(w, r, tenantID) {
+			return
+		}
+	} else if !s.requireDeviceAccess(w, r, tenantID, body.ClientID) {
+		return
+	}
 	if body.ClientID != "" {
 		if _, err := s.Store.GetClient(r.Context(), tenantID, body.ClientID); err != nil {
 			writeJSONError(w, http.StatusNotFound, "client_not_found", "istemci bulunamadi")

@@ -1,10 +1,12 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/tkodcumpeg4/zorven/server/domain"
 	"github.com/tkodcumpeg4/zorven/server/store"
@@ -53,7 +55,14 @@ func (s *Server) listHostnames(w http.ResponseWriter, r *http.Request) {
 			"istek kiraci kapsami olmadan ulasti")
 		return
 	}
-	list, err := s.Store.ListHostnames(r.Context(), tenantID)
+	projID, _ := s.projectFor(r)
+	var list []store.Hostname
+	var err error
+	if projID != "" {
+		list, err = s.Store.ListHostnamesByProject(r.Context(), tenantID, projID)
+	} else {
+		list, err = s.Store.ListHostnames(r.Context(), tenantID)
+	}
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -112,6 +121,12 @@ func (s *Server) createHostname(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	fqdn := name + "." + s.PlatformDomain
+	// K1: reserved_names tablosu eksik kalsa bile platformun calisma zamanindaki
+	// kendi hostlari (--control-host, analytics, ziyaretci callback'i) alinamaz.
+	if !reserved && s.ReservedHost != nil && s.ReservedHost(fqdn) {
+		reserved = true
+	}
 	if reserved {
 		writeJSONError(w, http.StatusConflict, "name_reserved",
 			"bu ad platform icin ayrilmis")
@@ -127,8 +142,8 @@ func (s *Server) createHostname(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	fqdn := name + "." + s.PlatformDomain
-	h, err := s.Store.AddHostname(r.Context(), tenantID, body.TunnelID, fqdn, store.HostTypeGlobal)
+	projID, _ := s.projectFor(r)
+	h, err := s.Store.AddHostnameWithProject(r.Context(), tenantID, body.TunnelID, fqdn, store.HostTypeGlobal, projID)
 	if errors.Is(err, store.ErrHostnameTaken) {
 		writeJSONError(w, http.StatusConflict, "hostname_taken", fqdn+" zaten alinmis")
 		return
@@ -139,6 +154,7 @@ func (s *Server) createHostname(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.tunnelsChanged()
+	s.autoScanHostname(r.Context(), fqdn)
 	writeJSON(w, http.StatusCreated, h)
 }
 
@@ -150,6 +166,80 @@ type customHostnameRequest struct {
 type customHostnameResponse struct {
 	store.Hostname
 	Instructions domain.VerificationInstructions `json:"instructions"`
+	// AutoVerified, yeni FQDN'in ust zone'u ( or. example.net) bu kiracida zaten
+	// dogrulanmis oldugu icin DNS dogrulamasi olmadan hemen verified edildiyse true.
+	AutoVerified bool `json:"auto_verified,omitempty"`
+	// ParentZone, AutoVerified true ise dogrulamayi devreden ust zone FQDN'i.
+	ParentZone string `json:"parent_zone,omitempty"`
+	// DNSPointed, AutoVerified iken adin zaten platforma yonlendirilip
+	// yonlendirilmedigi. Sahiplik dogrulanmis olsa da CNAME kaydi yoksa trafik
+	// gelmez; panel bu durumda yalnizca CNAME adimini gosterir.
+	DNSPointed *bool `json:"dns_pointed,omitempty"`
+}
+
+// pushTunnelClient, bir hostname degisikliginden etkilenen tunelin istemcisine
+// (ve replikalarina) guncel tunel+ad listesini iter. Tunel yoksa sessiz gecer.
+func (s *Server) pushTunnelClient(ctx context.Context, tenantID, tunnelID string) {
+	if tunnelID == "" {
+		return
+	}
+	t, err := s.Store.GetTunnel(ctx, tenantID, tunnelID)
+	if err != nil {
+		return
+	}
+	s.pushClientConfig(t.ClientID)
+	if reps, err := s.Store.ListTunnelReplicas(ctx, tenantID, tunnelID); err == nil {
+		for _, c := range reps {
+			s.pushClientConfig(c)
+		}
+	}
+}
+
+// dnsCheckHostname, POST /api/v1/hostnames/{id}/dns-check — adin platforma
+// yonlendirilip yonlendirilmedigini canli DNS ile denetler.
+func (s *Server) dnsCheckHostname(w http.ResponseWriter, r *http.Request) {
+	if !requireScope(w, r, ScopeHostnamesRead) {
+		return
+	}
+	tenantID, ok := s.tenantFor(r)
+	if !ok {
+		writeJSONError(w, http.StatusInternalServerError, "no_tenant", "istek kiraci kapsami olmadan ulasti")
+		return
+	}
+	h, err := s.Store.GetHostnameByID(r.Context(), tenantID, r.PathValue("id"))
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	inst := domain.GetInstructions(h.FQDN, h.VerifyToken, s.PlatformDomain)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"fqdn":         h.FQDN,
+		"pointed":      domain.PointsToPlatform(ctx, nil, h.FQDN, s.PlatformDomain),
+		"cname_target": inst.CNAMETarget,
+	})
+}
+
+// verifiedParentZone, fqdn'in ust zone'u (or. api.example.net icin example.net) kiracida
+// zaten dogrulanmis bir custom hostname mi diye bakar. Birden fazla ata varsa EN
+// UZUN (en yakin) eslesmeyi doner. Eslesme yoksa "" doner.
+func verifiedParentZone(hosts []store.Hostname, fqdn string) string {
+	fqdn = strings.ToLower(strings.TrimSuffix(fqdn, "."))
+	best := ""
+	for _, h := range hosts {
+		if h.Type != store.HostTypeCustom || !h.Verified {
+			continue
+		}
+		zone := strings.ToLower(strings.TrimSuffix(h.FQDN, "."))
+		if zone == "" || zone == fqdn {
+			continue
+		}
+		if strings.HasSuffix(fqdn, "."+zone) && len(zone) > len(best) {
+			best = zone
+		}
+	}
+	return best
 }
 
 func (s *Server) createCustomHostname(w http.ResponseWriter, r *http.Request) {
@@ -195,6 +285,14 @@ func (s *Server) createCustomHostname(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Ust zone otomatik dogrulama: kullanici example.net'yi bir kez dogruladiysa,
+	// api.example.net gibi alt alan adlarini DNS dogrulamasi olmadan hemen aktif et.
+	// Ust zone'un TXT/CNAME denetimi zaten alan adi sahipligini kanitliyor.
+	parentZone := ""
+	if existing, lerr := s.Store.ListHostnames(r.Context(), tenantID); lerr == nil {
+		parentZone = verifiedParentZone(existing, fqdn)
+	}
+
 	verifyToken := "rpsh-verify-" + randomHex(8)
 	h, err := s.Store.AddCustomHostname(r.Context(), tenantID, body.TunnelID, fqdn, verifyToken)
 	if errors.Is(err, store.ErrHostnameTaken) {
@@ -204,6 +302,29 @@ func (s *Server) createCustomHostname(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.fail(w, err)
 		return
+	}
+
+	s.autoScanHostname(r.Context(), fqdn)
+
+	if parentZone != "" {
+		if vh, verr := s.Store.VerifyHostname(r.Context(), tenantID, h.ID); verr == nil {
+			h = vh
+			s.tunnelsChanged() // yeni verified route'u anlik snapshot'a al
+			s.pushTunnelClient(r.Context(), tenantID, h.TunnelID)
+			dctx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
+			pointed := domain.PointsToPlatform(dctx, nil, h.FQDN, s.PlatformDomain)
+			cancel()
+			resp := customHostnameResponse{
+				Hostname:     h,
+				Instructions: domain.GetInstructions(h.FQDN, h.VerifyToken, s.PlatformDomain),
+				AutoVerified: true,
+				ParentZone:   parentZone,
+				DNSPointed:   &pointed,
+			}
+			writeJSON(w, http.StatusCreated, resp)
+			return
+		}
+		// Otomatik dogrulama basarisiz olursa normal DNS akisina dus.
 	}
 
 	resp := customHostnameResponse{
@@ -236,6 +357,11 @@ func (s *Server) patchHostname(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var oldTunnelID string
+	if prev, perr := s.Store.GetHostnameByID(r.Context(), tenantID, id); perr == nil {
+		oldTunnelID = prev.TunnelID
+	}
+
 	if body.TunnelID == nil || *body.TunnelID == "" {
 		// Detach
 		if err := s.Store.DetachHostname(r.Context(), tenantID, id); err != nil {
@@ -259,6 +385,10 @@ func (s *Server) patchHostname(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.fail(w, err)
 		return
+	}
+	s.pushTunnelClient(r.Context(), tenantID, h.TunnelID)
+	if oldTunnelID != h.TunnelID {
+		s.pushTunnelClient(r.Context(), tenantID, oldTunnelID)
 	}
 	writeJSON(w, http.StatusOK, h)
 }
@@ -313,6 +443,7 @@ func (s *Server) verifyHostname(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.tunnelsChanged()
+	s.pushTunnelClient(r.Context(), tenantID, verifiedH.TunnelID)
 	writeJSON(w, http.StatusOK, verifiedH)
 }
 
@@ -326,11 +457,16 @@ func (s *Server) deleteHostname(w http.ResponseWriter, r *http.Request) {
 			"istek kiraci kapsami olmadan ulasti")
 		return
 	}
+	var tunnelID string
+	if prev, perr := s.Store.GetHostnameByID(r.Context(), tenantID, r.PathValue("id")); perr == nil {
+		tunnelID = prev.TunnelID
+	}
 	if err := s.Store.DeleteHostname(r.Context(), tenantID, r.PathValue("id")); err != nil {
 		s.fail(w, err)
 		return
 	}
 	s.tunnelsChanged()
+	s.pushTunnelClient(r.Context(), tenantID, tunnelID)
 	w.WriteHeader(http.StatusNoContent)
 }
 

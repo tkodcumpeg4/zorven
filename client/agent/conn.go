@@ -44,11 +44,23 @@ type Agent struct {
 	Version string
 	// NoAutoUpdate true ise otomatik guncelleme tamamen kapalidir.
 	NoAutoUpdate bool
+	// LogLevel (opsiyonel), Log'un kuruldugu seviye degiskeni. Doluysa
+	// panelden gelen log_level ayari canli uygulanir (F15).
+	LogLevel *slog.LevelVar
 	// updating, es zamanli guncelleme tetiklerini serilestiren bayrak.
 	updating atomic.Bool
 
 	// RequestedTarget, tek komutla acilacak port/hedef (or. "http://localhost:8080").
 	RequestedTarget string
+
+	// RequestedTTLSec (FAZ 2 / F07), acilacak tunelin GECICI olmasini ister.
+	// Sure dolunca sunucu tuneli kaldirir. 0 = kalici tunel.
+	RequestedTTLSec int
+
+	// settings (FAZ 3 / F15), uzaktan gelen ayarlarin yerel bayraklarla
+	// SINIRLANMIS hali. Yerelde kapatilan izin uzaktan ACILAMAZ; bkz.
+	// settings.go. Run() basinda kurulur.
+	settings *settingsState
 
 	// OnRequest, gelen HTTP istekleri islendiginde tetiklenir (CLI anlik loglama).
 	OnRequest func(method, path string, status int, duration time.Duration)
@@ -63,6 +75,10 @@ type Agent struct {
 	// flowControl, sunucunun hello_ack'te akis kontrolunu etkinlestirip
 	// etkinlestirmedigi. readLoop bunu clientSession'a aktarir.
 	flowControl bool
+
+	// heartbeatS, sunucunun hello_ack'te bildirdigi ping araligi (sn). Sessiz
+	// (yari olu) baglantiyi tespit eden bosta zaman asimi buradan turetilir.
+	heartbeatS int
 
 	httpClient *http.Client // CA havuzu ayarlandiysa dolu
 
@@ -103,6 +119,13 @@ func (a *Agent) setupTLS() error {
 // Run, baglanti kopsa da surekli yeniden dener; yalnizca ctx iptal edilince
 // veya token kalici olarak gecersizse (401/409/426) durur.
 func (a *Agent) Run(ctx context.Context) error {
+	// Yerel bayraklar TAVANDIR: sunucu bunlarin uzerine cikamaz (F15).
+	a.settings = newSettingsState(localCaps{
+		terminal: !a.NoTerminal,
+		screen:   !a.NoScreen,
+	}, !a.NoAutoUpdate)
+	a.settings.levelVar = a.LogLevel
+
 	if err := a.setupTLS(); err != nil {
 		a.emit(Status{State: StateFatal, Message: err.Error()})
 		return &FatalError{err.Error()}
@@ -115,7 +138,15 @@ func (a *Agent) Run(ctx context.Context) error {
 	backoff := backoffMin
 
 	for {
+		started := time.Now()
 		err := a.connectOnce(ctx)
+
+		// Yeterince uzun suren (saglikli) bir baglanti koptuysa bekleme suresini
+		// sifirla; aksi halde birkac kopmadan sonra her yeniden baglanma 60 sn'ye
+		// takilirdi (backoff hic dusmuyordu).
+		if backoffShouldReset(time.Since(started)) {
+			backoff = backoffMin
+		}
 
 		if ctx.Err() != nil {
 			a.emit(Status{State: StateStopped, Message: "durduruldu"})
@@ -155,11 +186,13 @@ func (a *Agent) Run(ctx context.Context) error {
 		case <-time.After(wait):
 		}
 
-		if backoff < backoffMax {
+		// Tavan panelden ayarlanabilir (reconnect_max_backoff_sec, F15).
+		maxB := a.settings.maxBackoffOr(backoffMax)
+		if backoff < maxB {
 			backoff *= 2
-			if backoff > backoffMax {
-				backoff = backoffMax
-			}
+		}
+		if backoff > maxB {
+			backoff = maxB
 		}
 	}
 }
@@ -264,7 +297,10 @@ func (a *Agent) handshake(ctx context.Context, conn *websocket.Conn) error {
 		// hello_ack'te geri onaylamaz ve eski davranis surer.
 		Features:        []string{protocol.FeatureFlowControl},
 		RequestedTarget: a.RequestedTarget,
+		RequestedTTLSec: a.RequestedTTLSec,
 		IsService:       a.IsService,
+		Hostname:        deviceHostname(),
+		IPs:             localIPs(),
 		Metrics:         metrics.Collect(),
 	}, protocol.TypeHello)
 	if err != nil {
@@ -301,6 +337,11 @@ func (a *Agent) handshake(ctx context.Context, conn *websocket.Conn) error {
 		}
 	}
 
+	// Uzak ayarlar (F15). Yerel tavanla sinirlanarak uygulanir; yerelde
+	// kapali bir izni sunucu ACAMAZ (bkz. settings.go).
+	a.settings.apply(ack.Settings, a.Log)
+
+	a.heartbeatS = ack.HeartbeatIntervalS
 	a.tunnels = ack.Tunnels
 	tunnels := make([]Tunnel, 0, len(ack.Tunnels))
 	for _, tn := range ack.Tunnels {
@@ -363,9 +404,20 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) error {
 		refreshSessions()
 	}()
 
+	idle := idleTimeout(a.heartbeatS)
 	for {
-		typ, data, err := conn.Read(ctx)
+		// Sunucu duzenli ping yollar; uzun sure HICBIR sey gelmiyorsa baglanti
+		// yari olu (NAT/ag kopmasi) demektir. Bu kontrol olmadan Read, isletim
+		// sisteminin TCP zaman asimina (dakikalar-saatler) kadar bloklanir ve
+		// istemci "bagli" gorunup tunel calismazdi.
+		rctx, rcancel := context.WithTimeout(ctx, idle)
+		typ, data, err := conn.Read(rctx)
+		idleHit := rctx.Err() == context.DeadlineExceeded && ctx.Err() == nil
+		rcancel()
 		if err != nil {
+			if idleHit {
+				return fmt.Errorf("sunucudan %s boyunca veri gelmedi (baglanti yari olu)", idle)
+			}
 			// Upgrade + handshake ile Hub.Register arasindaki yaris: iki instance
 			// ayni anda baglanirsa ikisi de upgrade'i gecer, sonra biri
 			// Hub.Register'da kaybeder ve sunucu onu "already connected"
@@ -395,6 +447,10 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) error {
 				cs.routeWSData(frame.ReqID, frame.Payload)
 				continue
 			}
+			if frame.FrameType == protocol.FrameStreamData || frame.FrameType == protocol.FrameDatagram {
+				cs.routeStreamData(frame.FrameType, frame.ReqID, frame.Payload)
+				continue
+			}
 			cs.routeBody(frame)
 			continue
 		}
@@ -413,7 +469,8 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) error {
 			go a.maybeUpdate(ctx, "sunucu-push")
 
 		case protocol.TypePing:
-			m := metrics.Collect()
+			// metrics_interval_sec (F15): aralik dolmadan yeniden toplanmaz.
+			m := cachedMetrics(a.settings, time.Now(), metrics.Collect)
 			if err := cs.sendControl(ctx, protocol.Pong{
 				Type:    protocol.TypePong,
 				TS:      time.Now().UTC(),
@@ -448,14 +505,31 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) error {
 			}
 			cs.handleWSClose(m.ReqID)
 
+		case protocol.TypeStreamOpen:
+			var m protocol.StreamOpen
+			if err := json.Unmarshal(data, &m); err != nil {
+				a.Log.Warn("stream_open cozulemedi", "hata", err)
+				continue
+			}
+			go cs.handleStreamOpen(m)
+
+		case protocol.TypeStreamClose:
+			var m protocol.StreamClose
+			if err := json.Unmarshal(data, &m); err != nil {
+				continue
+			}
+			cs.handleStreamClose(m.ReqID)
+
 		case protocol.TypeTerminalOpen:
 			var m protocol.TerminalOpen
 			if err := json.Unmarshal(data, &m); err != nil {
 				continue
 			}
-			if a.NoTerminal {
-				a.Log.Warn("terminal acma istegi reddedildi (--no-terminal aktif)", "session", m.SessionID)
-				tm.sendExit(ctx, m.SessionID, 1, "terminal erisimi bu istemcide kapatilmistir (--no-terminal)")
+			// Etkin izin = yerel tavan VE uzak ayar (F15). Yerelde kapali
+			// olan izni sunucu acamaz.
+			if !a.settings.terminalAllowed() {
+				a.Log.Warn("terminal acma istegi reddedildi (izin kapali)", "session", m.SessionID)
+				tm.sendExit(ctx, m.SessionID, 1, "terminal erisimi bu istemcide kapatilmistir")
 				continue
 			}
 			a.Log.Info("uzak terminal acildi", "session", m.SessionID)
@@ -467,7 +541,7 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) error {
 			if err := json.Unmarshal(data, &m); err != nil {
 				continue
 			}
-			if a.NoTerminal {
+			if !a.settings.terminalAllowed() {
 				continue
 			}
 			tm.input(m)
@@ -477,7 +551,7 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) error {
 			if err := json.Unmarshal(data, &m); err != nil {
 				continue
 			}
-			if a.NoTerminal {
+			if !a.settings.terminalAllowed() {
 				continue
 			}
 			tm.resize(m)
@@ -495,9 +569,10 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) error {
 			if err := json.Unmarshal(data, &m); err != nil {
 				continue
 			}
-			if a.NoScreen {
-				a.Log.Warn("ekran paylasim istegi reddedildi (--no-screen aktif)", "session", m.SessionID)
-				sm.sendError(ctx, m.SessionID, "ekran paylasimi bu istemcide kapatilmistir (--no-screen)")
+			// Etkin izin = yerel tavan VE uzak ayar (F15).
+			if !a.settings.screenAllowed() {
+				a.Log.Warn("ekran paylasim istegi reddedildi (izin kapali)", "session", m.SessionID)
+				sm.sendError(ctx, m.SessionID, "ekran paylasimi bu istemcide kapatilmistir")
 				continue
 			}
 			a.Log.Info("uzak ekran acildi", "session", m.SessionID)
@@ -509,7 +584,7 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) error {
 			if err := json.Unmarshal(data, &m); err != nil {
 				continue
 			}
-			if a.NoScreen {
+			if !a.settings.screenAllowed() {
 				continue
 			}
 			sm.input(m)
@@ -543,6 +618,8 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) error {
 				a.Log.Warn("config_update cozulemedi", "hata", err)
 				continue
 			}
+			// Ayar degisikligi de ayni mesajla gelir (F15).
+			a.settings.apply(cu.Settings, a.Log)
 			cs.SetTargets(cu.Tunnels)
 			// Guncel tunel listesini arayuze YENIDEN YAY: masaustu app panelde
 			// tunel eklenince/silinince listeyi anlik tazelesin (aksi halde
@@ -575,6 +652,25 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) error {
 			a.Log.Warn("beklenmeyen mesaj tipi", "tip", mt)
 		}
 	}
+}
+
+// backoffShouldReset, bir baglantinin "saglikli" sayilip backoff'un
+// sifirlanacagi esigi (30 sn) uygular.
+func backoffShouldReset(connected time.Duration) bool {
+	return connected >= 30*time.Second
+}
+
+// idleTimeout, bosta zaman asimini hesaplar: 3 ping araligi (sunucunun kendi
+// heartbeat esigiyle ayni), alt sinir 90 sn. Aralik bilinmiyorsa 30 sn varsayilir.
+func idleTimeout(heartbeatS int) time.Duration {
+	if heartbeatS <= 0 {
+		heartbeatS = 30
+	}
+	d := time.Duration(heartbeatS) * 3 * time.Second
+	if d < 90*time.Second {
+		d = 90 * time.Second
+	}
+	return d
 }
 
 // CloseSessions, tüm aktif uzak terminal ve ekran oturumlarını anında sonlandırır.

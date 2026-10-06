@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { ScreenHandle } from '~/composables/useScreen'
+import type { ScreenHandle, ScreenStats } from '~/composables/useScreen'
 
 const route = useRoute()
 const clientID = route.params.id as string
@@ -17,6 +17,25 @@ const errorMsg = ref('')
 const codec = ref('')
 const control = ref(true) // fare/klavye kontrolu acik mi
 
+// --- Akis metrikleri --------------------------------------------------------
+const stats = ref<ScreenStats | null>(null)
+const showStats = ref(false)
+
+/**
+ * Akis saglikli mi?
+ *
+ * "Saglikli" tanimini tek bir esige indirgemiyoruz: kare kaybi VEYA hedefin
+ * cok altinda bir kare araligi, kullanicinin gordugu takilmanin iki ayri
+ * sebebidir. Rozet rengi bunu ozetler, panel ayrintiyi verir.
+ */
+const statsTone = computed(() => {
+  const s = stats.value
+  if (!s || !s.fps) return 'text-fg-subtle'
+  if (s.dropped > 0 || s.maxIntervalMs > 1000) return 'text-danger'
+  if (s.maxIntervalMs > 500) return 'text-warn'
+  return 'text-accent'
+})
+
 let handle: ScreenHandle | null = null
 
 // --- Cozunurluk secimi ------------------------------------------------------
@@ -31,6 +50,8 @@ const nativeH = ref(0)
 const frameW = ref(0) // su an gelen karenin boyutu
 const frameH = ref(0)
 const selectedWidth = ref(0) // 0 => tam cozunurluk
+const selectedFps = ref(15) // hedef kare hizi (sunucu 30'da sinirlar)
+const FPS_OPTIONS = [5, 10, 15, 20, 30]
 
 // Yaygin en-boy oranlari icin standart yukseklik merdivenleri.
 const RATIO_LADDERS = [
@@ -124,29 +145,130 @@ function normPoint(e: MouseEvent): { x: number, y: number } | null {
   return { x, y }
 }
 
-function onMouse(kind: string, e: MouseEvent) {
+/** Olaydaki modifier durumu — her olayda gonderilir (bkz. protocol.ScreenInput). */
+function mods(e: MouseEvent | KeyboardEvent | WheelEvent) {
+  return { ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey, meta: e.metaKey }
+}
+
+/**
+ * Bekleyen fare hareketi.
+ *
+ * NEDEN: tarayici saniyede 60-125 pointermove uretir ve her biri ayri bir JSON
+ * mesaji olarak WS'e gidiyordu. Bu hem bagi doldurup kontrolu takiyordu hem de
+ * uzak tarafta ayni sayida syscall demekti. Artik kareye BIR hareket gonderilir;
+ * ara konumlar zaten goze gorunmez.
+ */
+let pendingMove: { x: number, y: number, button: number, ctrl: boolean, shift: boolean, alt: boolean, meta: boolean } | null = null
+let moveRAF = 0
+
+/**
+ * Goruntu icindeki SON gecerli konum.
+ *
+ * Surukleyip sahne disinda birakildiginda pointerup'in normalize konumu
+ * hesaplanamaz; mouseup'i dusurmek fareyi uzak makinede basili birakir, (0,0)
+ * gondermek de imleci sol ust koseye firlatir. Ikisi de yanlis — son bilinen
+ * konumu kullanmak dogrusu.
+ */
+let lastPoint = { x: 0, y: 0 }
+
+function flushMove() {
+  moveRAF = 0
+  if (!pendingMove || !handle) return
+  sendInput(handle.ws, { kind: 'mousemove', ...pendingMove })
+  pendingMove = null
+}
+
+function onPointerMove(e: PointerEvent) {
   if (!control.value || !handle) return
   const p = normPoint(e)
   if (!p) return
   e.preventDefault()
-  sendInput(handle.ws, { kind, x: p.x, y: p.y, button: e.button })
+  lastPoint = p
+  pendingMove = { x: p.x, y: p.y, button: 0, ...mods(e) }
+  if (!moveRAF) moveRAF = requestAnimationFrame(flushMove)
+}
+
+function onPointerDown(e: PointerEvent) {
+  if (!control.value || !handle) return
+  const p = normPoint(e)
+  if (!p) return
+  e.preventDefault()
+  // Pointer capture: fare sahne DISINA ciksa da olaylar gelmeye devam eder.
+  // Olmadan surukleme (pencere tasima, metin secme) yarida kopuyordu.
+  try { (e.currentTarget as Element).setPointerCapture(e.pointerId) } catch { /* destegi yoksa yok say */ }
+  lastPoint = p
+  // Bekleyen hareketi once bosalt: tiklama dogru konumda olmali.
+  flushMove()
+  sendInput(handle.ws, { kind: 'mousedown', x: p.x, y: p.y, button: e.button, ...mods(e) })
+}
+
+function onPointerUp(e: PointerEvent) {
+  if (!control.value || !handle) return
+  const p = normPoint(e)
+  e.preventDefault()
+  try { (e.currentTarget as Element).releasePointerCapture(e.pointerId) } catch { /* yok say */ }
+  if (p) lastPoint = p
+  flushMove()
+  // Konum sahne disindaysa (surukleyip birakma) SON GECERLI konumu kullan:
+  // mouseup'i dusurmek fareyi uzak makinede basili birakir.
+  sendInput(handle.ws, {
+    kind: 'mouseup',
+    x: lastPoint.x,
+    y: lastPoint.y,
+    button: e.button,
+    ...mods(e),
+  })
 }
 
 function onWheel(e: WheelEvent) {
   if (!control.value || !handle) return
   e.preventDefault()
-  sendInput(handle.ws, { kind: 'wheel', delta_y: e.deltaY })
+  // delta_mode olmadan istemci birimi bilemez: deltaMode=1'de deltaY=3 gelir
+  // ve ham gonderildiginde neredeyse hic kaydirma olmuyordu.
+  sendInput(handle.ws, {
+    kind: 'wheel',
+    delta_x: e.deltaX,
+    delta_y: e.deltaY,
+    delta_mode: e.deltaMode,
+    ...mods(e),
+  })
 }
 
 function onKey(kind: string, e: KeyboardEvent) {
   if (!control.value || !handle) return
+  // Sayfanin kendi form elemanlarinda (cozunurluk secimi) yazarken tuslari
+  // uzak makineye gondermeyelim.
+  const el = e.target as HTMLElement | null
+  if (el && /^(INPUT|SELECT|TEXTAREA)$/.test(el.tagName)) return
+
   // Tarayici kisayollarini (F5, Ctrl+W...) uzak makineye gecirmek icin engelle.
   e.preventDefault()
-  sendInput(handle.ws, { kind, key: e.key })
+  sendInput(handle.ws, {
+    kind,
+    key: e.key,
+    // code FIZIKSEL tustur: ozel tuslar ve kisayollar bununla eslenir.
+    code: e.code,
+    repeat: e.repeat,
+    ...mods(e),
+  })
 }
 
 function onKeyDown(e: KeyboardEvent) { if (control.value) onKey('keydown', e) }
 function onKeyUp(e: KeyboardEvent) { if (control.value) onKey('keyup', e) }
+
+/**
+ * Odak kaybinda basili modifier'lari birak.
+ *
+ * NEDEN: Alt+Tab ile baska pencereye gecince keyup olayi BU sayfaya hic
+ * gelmez; uzak makinede Alt sonsuza dek basili kalir ve sonraki her tus
+ * Alt+<tus> olur. Sekmeden ciktigimizda hepsini acikca birakiyoruz.
+ */
+function releaseModifiers() {
+  if (!handle) return
+  for (const [key, code] of [['Control', 'ControlLeft'], ['Shift', 'ShiftLeft'], ['Alt', 'AltLeft'], ['Meta', 'MetaLeft']] as const) {
+    sendInput(handle.ws, { kind: 'keyup', key, code, ctrl: false, shift: false, alt: false, meta: false })
+  }
+}
 
 /**
  * Akisi (yeniden) acar. Cozunurluk degistiginde ScreenOpen yeniden gonderilmeli,
@@ -158,6 +280,7 @@ async function open(maxWidth: number) {
   state.value = 'connecting'
   codec.value = ''
   errorMsg.value = ''
+  stats.value = null // yeni oturum: eski sayaclar yaniltmasin
   await nextTick()
 
   if (!img.value || !video.value) {
@@ -170,6 +293,7 @@ async function open(maxWidth: number) {
     handle = await connect(clientID, {
       img: img.value,
       video: video.value,
+      fps: selectedFps.value || undefined,
       maxWidth: maxWidth || undefined,
       onCodec: (c) => { codec.value = c },
       onFrameSize: (w, h) => {
@@ -190,6 +314,7 @@ async function open(maxWidth: number) {
         nativeW.value = w
         nativeH.value = h
       },
+      onStats: (s) => { stats.value = s },
       onOpen: () => { state.value = 'open' },
       onError: (m) => { state.value = 'error'; errorMsg.value = m },
       onClose: (code, reason) => {
@@ -219,6 +344,8 @@ function onResolutionChange() {
 onMounted(async () => {
   window.addEventListener('keydown', onKeyDown, true)
   window.addEventListener('keyup', onKeyUp, true)
+  // Sekme/pencere odagi kaybolunca basili modifier'lari birak (Alt+Tab).
+  window.addEventListener('blur', releaseModifiers)
   await nextTick()
   // Ilk baglanti TAM cozunurlukte: native boyutu ancak boyle ogrenebiliriz.
   await open(0)
@@ -227,6 +354,8 @@ onMounted(async () => {
 onUnmounted(() => {
   window.removeEventListener('keydown', onKeyDown, true)
   window.removeEventListener('keyup', onKeyUp, true)
+  window.removeEventListener('blur', releaseModifiers)
+  if (moveRAF) cancelAnimationFrame(moveRAF)
   handle?.close()
 })
 </script>
@@ -281,6 +410,20 @@ onUnmounted(() => {
           </select>
         </label>
 
+        <!-- Kare hızı (FPS): akıcılık ↔ bant genişliği dengesi -->
+        <label class="flex items-center gap-1.5">
+          <span class="sr-only">{{ t('screen.fps') }}</span>
+          <Icon name="lucide:gauge" class="size-3.5 text-fg-subtle" aria-hidden="true" />
+          <select
+            v-model.number="selectedFps"
+            class="cursor-pointer rounded border border-line bg-bg px-2 py-1.5 font-mono text-[11px] text-fg-muted focus:border-accent"
+            :title="t('screen.fpsHint')"
+            @change="onResolutionChange"
+          >
+            <option v-for="f in FPS_OPTIONS" :key="f" :value="f">{{ f }} FPS</option>
+          </select>
+        </label>
+
         <span
           v-if="frameW"
           class="rounded border border-line px-2 py-0.5 font-mono text-[10px] text-fg-subtle"
@@ -288,6 +431,21 @@ onUnmounted(() => {
         >
           {{ frameW }}×{{ frameH }} · {{ ratioLabel }}
         </span>
+
+        <!-- Akis metrikleri: rozet ozet, tiklayinca ayrinti paneli -->
+        <button
+          v-if="stats"
+          type="button"
+          class="flex cursor-pointer items-center gap-1.5 rounded border border-line px-2.5 py-1.5 font-mono text-[11px] transition-colors duration-150 hover:bg-surface"
+          :class="statsTone"
+          :aria-expanded="showStats"
+          :title="t('screen.statsToggle')"
+          @click="showStats = !showStats"
+        >
+          <Icon name="lucide:activity" class="size-3.5" aria-hidden="true" />
+          {{ stats.fps }} fps · {{ stats.kbps }} kbps
+          <span v-if="stats.dropped" class="text-danger">· {{ stats.dropped }} ↓</span>
+        </button>
 
         <button
           class="flex cursor-pointer items-center gap-1.5 rounded border border-line px-2.5 py-1.5 font-mono text-[11px] transition-colors duration-150 hover:bg-surface"
@@ -314,6 +472,44 @@ onUnmounted(() => {
         </NuxtLink>
       </div>
     </header>
+
+    <!-- Metrik ayrinti paneli -->
+    <div
+      v-if="showStats && stats"
+      class="grid gap-x-6 gap-y-2 rounded-lg border border-line bg-surface/60 px-4 py-3 font-mono text-[11px] sm:grid-cols-3 lg:grid-cols-6"
+    >
+      <div>
+        <p class="text-fg-subtle">{{ t('screen.mFps') }}</p>
+        <p class="text-fg">{{ stats.fps }}</p>
+      </div>
+      <div>
+        <p class="text-fg-subtle">{{ t('screen.mBitrate') }}</p>
+        <p class="text-fg">{{ stats.kbps }} kbps</p>
+      </div>
+      <div :title="t('screen.mIntervalHelp')">
+        <p class="text-fg-subtle">{{ t('screen.mInterval') }}</p>
+        <p class="text-fg">
+          {{ stats.intervalMs }} ms
+          <span :class="stats.maxIntervalMs > 500 ? 'text-warn' : 'text-fg-subtle'">
+            / {{ stats.maxIntervalMs }}
+          </span>
+        </p>
+      </div>
+      <div :title="t('screen.mDroppedHelp')">
+        <p class="text-fg-subtle">{{ t('screen.mDropped') }}</p>
+        <p :class="stats.dropped ? 'text-danger' : 'text-fg'">
+          {{ stats.dropped }} / {{ stats.frames }}
+        </p>
+      </div>
+      <div :title="t('screen.mCaptureHelp')">
+        <p class="text-fg-subtle">{{ t('screen.mCapture') }}</p>
+        <p class="text-fg">{{ stats.captureMs ? stats.captureMs + ' ms' : '—' }}</p>
+      </div>
+      <div :title="t('screen.mEncodeHelp')">
+        <p class="text-fg-subtle">{{ t('screen.mEncode') }}</p>
+        <p class="text-fg">{{ stats.encodeMs ? stats.encodeMs + ' ms' : '—' }}</p>
+      </div>
+    </div>
 
     <div
       v-if="control"
@@ -344,9 +540,10 @@ onUnmounted(() => {
       class="relative grid min-h-[300px] place-items-center overflow-hidden rounded-xl border border-line bg-black"
       :class="control ? 'cursor-crosshair' : 'cursor-default'"
       tabindex="0"
-      @mousemove="onMouse('mousemove', $event)"
-      @mousedown="onMouse('mousedown', $event)"
-      @mouseup="onMouse('mouseup', $event)"
+      @pointermove="onPointerMove"
+      @pointerdown="onPointerDown"
+      @pointerup="onPointerUp"
+      @pointercancel="onPointerUp"
       @contextmenu.prevent
       @wheel="onWheel"
     >

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/tkodcumpeg4/zorven/server/auth"
 	"github.com/tkodcumpeg4/zorven/server/entitlements"
@@ -27,9 +28,20 @@ func (m *mockTokenStore) GetAPITokenByTokenID(_ context.Context, tokenID string)
 	return store.APIToken{}, errors.New("not found")
 }
 func (m *mockTokenStore) TouchAPITokenLastUsed(context.Context, string) error { return nil }
+func (m *mockTokenStore) GetDefaultProject(context.Context, string) (store.Project, error) {
+	return store.Project{ID: "prj_default", Name: "Default", Slug: "default"}, nil
+}
+func (m *mockTokenStore) GetProjectBySlug(context.Context, string, string) (store.Project, error) {
+	return store.Project{ID: "prj_default", Name: "Default", Slug: "default"}, nil
+}
+func (m *mockTokenStore) GetProjectByID(context.Context, string, string) (store.Project, error) {
+	return store.Project{ID: "prj_default", Name: "Default", Slug: "default"}, nil
+}
 
 // allowEntitlements, CheckFeature'i her zaman gecer (API erisimi acik).
-type allowEntitlements struct{ entitlements.EntitlementService }
+type allowEntitlements struct {
+	entitlements.EntitlementService
+}
 
 func (allowEntitlements) CheckFeature(context.Context, string, entitlements.Feature) error {
 	return nil
@@ -155,6 +167,82 @@ func TestIntegration_TokenScopeAndSurface(t *testing.T) {
 		mw.ServeHTTP(w, r)
 		if w.Code != http.StatusUnauthorized {
 			t.Fatalf("beklenen 401, alinan %d", w.Code)
+		}
+	})
+
+	// 6. Expired token -> 401 token_expired.
+	t.Run("expired token 401", func(t *testing.T) {
+		full, id, hash, err := auth.GenerateAPIKey()
+		if err != nil {
+			t.Fatalf("GenerateAPIKey: %v", err)
+		}
+		past := time.Now().UTC().Add(-1 * time.Hour)
+		mw := &Middleware{
+			Store: &mockTokenStore{tok: store.APIToken{
+				TokenID:   id,
+				TokenHash: hash,
+				TenantID:  "ten_x",
+				Scopes:    []string{"read", "write"},
+				ExpiresAt: &past,
+			}},
+			Entitlements: allowEntitlements{},
+			APILimiter:   ratelimit.New(1000, 1000),
+			Limiter:      ratelimit.New(1000, 1000),
+			Next: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			}),
+		}
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest("GET", "/api/v1/tunnels", nil)
+		r.Header.Set("Authorization", "Bearer "+full)
+		mw.ServeHTTP(w, r)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("beklenen 401, alinan %d (%s)", w.Code, w.Body.String())
+		}
+		if !contains(w.Body.String(), "token_expired") {
+			t.Errorf("token_expired beklenirdi, alinan %s", w.Body.String())
+		}
+	})
+
+	// 7. Token rotasyonu: eski token gecersiz, yeni token gecerli.
+	t.Run("rotate token invalidates old token", func(t *testing.T) {
+		fullOld, _, _, _ := auth.GenerateAPIKey()
+		fullNew, idNew, hashNew, _ := auth.GenerateAPIKey()
+
+		rotStore := &mockTokenStore{tok: store.APIToken{
+			ID:        "tok_1",
+			TokenID:   idNew,
+			TokenHash: hashNew,
+			TenantID:  "ten_x",
+			Scopes:    []string{"read", "write"},
+		}}
+
+		mw := &Middleware{
+			Store:        rotStore,
+			Entitlements: allowEntitlements{},
+			APILimiter:   ratelimit.New(1000, 1000),
+			Limiter:      ratelimit.New(1000, 1000),
+			Next: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			}),
+		}
+
+		// Eski token ile istek -> 401 invalid_token
+		wOld := httptest.NewRecorder()
+		rOld := httptest.NewRequest("GET", "/api/v1/tunnels", nil)
+		rOld.Header.Set("Authorization", "Bearer "+fullOld)
+		mw.ServeHTTP(wOld, rOld)
+		if wOld.Code != http.StatusUnauthorized {
+			t.Fatalf("eski token reddedilmeliydi, alinan %d", wOld.Code)
+		}
+
+		// Yeni token ile istek -> 200 OK
+		wNew := httptest.NewRecorder()
+		rNew := httptest.NewRequest("GET", "/api/v1/tunnels", nil)
+		rNew.Header.Set("Authorization", "Bearer "+fullNew)
+		mw.ServeHTTP(wNew, rNew)
+		if wNew.Code != http.StatusOK {
+			t.Fatalf("yeni token calismaliydi, alinan %d (%s)", wNew.Code, wNew.Body.String())
 		}
 	})
 }

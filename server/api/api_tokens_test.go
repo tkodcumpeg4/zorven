@@ -134,6 +134,8 @@ func TestAPITokensAndIPAllowlist_Lifecycle(t *testing.T) {
 			req.Header.Set("Authorization", "Bearer "+bearerToken)
 		} else {
 			req.AddCookie(&http.Cookie{Name: "better-auth.session_token", Value: sessionToken})
+			// Cerezli yazma istekleri guvenilir Origin ister (csrf.go).
+			req.Header.Set("Origin", "https://"+req.Host)
 		}
 		w := httptest.NewRecorder()
 		guarded.ServeHTTP(w, req)

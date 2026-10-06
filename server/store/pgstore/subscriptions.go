@@ -40,7 +40,7 @@ func DefaultSubscriptionForPlan(tenantID, plan string) store.Subscription {
 		sub.MaxClients = 999999
 		sub.MaxCustomDomains = 999999
 		sub.MaxTunnels = 999999
-		sub.BandwidthLimitBytes = 10 * 1024 * 1024 * 1024 * 1024 // 10 TB
+		sub.BandwidthLimitBytes = 0 // 0 = SINIRSIZ trafik (Enterprise)
 	default: // Free
 		sub.Plan = store.PlanFree
 		sub.MaxClients = 2
@@ -306,11 +306,8 @@ func (s *Store) GetTenantUsage(ctx context.Context, tenantID string) (store.Tena
 	bytesIn, bytesOut, _ := s.GetBandwidthUsage(ctx, tenantID, currentPeriod)
 	totalBytes := bytesIn + bytesOut
 
-	sub, _ := s.GetSubscription(ctx, tenantID)
+	// Acik surumde aylik trafik limiti uygulanmaz (self-host: sinirsiz).
 	isThrottled := false
-	if sub.BandwidthLimitBytes > 0 && totalBytes >= sub.BandwidthLimitBytes {
-		isThrottled = true
-	}
 
 	usage.ClientsCount = clients
 	usage.CustomDomainsCount = customDomains

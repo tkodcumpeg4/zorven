@@ -27,6 +27,10 @@ func (m *nilListStore) ListHostnames(ctx context.Context, tenantID string) ([]st
 	return nil, nil
 }
 
+func (m *nilListStore) ListProjects(ctx context.Context, tenantID string) ([]store.Project, error) {
+	return nil, nil
+}
+
 func (m *nilListStore) ListTenants(ctx context.Context) ([]store.Tenant, error) {
 	return nil, nil
 }
@@ -54,6 +58,7 @@ func TestEmptyListsSerializeAsEmptyArray(t *testing.T) {
 		handler http.HandlerFunc
 		admin   bool
 	}{
+		{name: "listProjects", handler: srv.listProjects},
 		{name: "listClients", handler: srv.listClients},
 		{name: "listTunnels", handler: srv.listTunnels},
 		{name: "listHostnames", handler: srv.listHostnames},

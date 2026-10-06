@@ -48,16 +48,44 @@ func (s *Server) isAllowedOrigin(r *http.Request) bool {
 	if originHost == reqHost {
 		return true
 	}
-	// 2. Localhost geliştirme ortamı
-	if originHost == "localhost" || originHost == "127.0.0.1" || originHost == "::1" {
-		return true
-	}
-	// 3. Platform domaini veya platform alt alanı
-	if s.PlatformDomain != "" {
-		pDomain := strings.ToLower(strings.TrimSuffix(s.PlatformDomain, "."))
-		if originHost == pDomain || strings.HasSuffix(originHost, "."+pDomain) {
+	// 2. Panel hostlari. Platform domaininin HER alt alani KABUL EDILMEZ:
+	// kiraci tunelleri de *.PlatformDomain altindadir ve kotu niyetli bir tunel
+	// sayfasi panel oturumuyla terminal/ekran WS'i acmaya calisabilirdi.
+	for _, h := range s.panelOriginHosts() {
+		if originHost == h {
 			return true
 		}
 	}
 	return false
+}
+
+// panelOriginHosts, WS Origin'i olarak kabul edilen hostlar (port'suz, kucuk harf).
+func (s *Server) panelOriginHosts() []string {
+	var out []string
+	add := func(h string) {
+		h = strings.ToLower(strings.TrimSpace(strings.TrimSuffix(h, ".")))
+		if hh, _, err := net.SplitHostPort(h); err == nil {
+			h = hh
+		}
+		h = strings.TrimSuffix(strings.TrimPrefix(h, "["), "]")
+		if h != "" {
+			out = append(out, h)
+		}
+	}
+	if len(s.PanelHosts) > 0 {
+		for _, h := range s.PanelHosts {
+			add(h)
+		}
+		return out
+	}
+	// Yapilandirma yoksa: yerel gelistirme + platformun kendi panel hostlari.
+	for _, h := range []string{"localhost", "127.0.0.1", "::1"} {
+		add(h)
+	}
+	if p := strings.ToLower(strings.TrimSuffix(s.PlatformDomain, ".")); p != "" {
+		for _, pre := range []string{"", "www.", "panel.", "app."} {
+			add(pre + p)
+		}
+	}
+	return out
 }

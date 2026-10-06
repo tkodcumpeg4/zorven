@@ -30,13 +30,16 @@ import (
 	"github.com/tkodcumpeg4/zorven/server/ipfilter"
 	"github.com/tkodcumpeg4/zorven/server/mail"
 	"github.com/tkodcumpeg4/zorven/server/ratelimit"
+	"github.com/tkodcumpeg4/zorven/server/rawproxy"
 	"github.com/tkodcumpeg4/zorven/server/reqlog"
+	"github.com/tkodcumpeg4/zorven/server/retention"
 	"github.com/tkodcumpeg4/zorven/server/session"
 	"github.com/tkodcumpeg4/zorven/server/sqliteimport"
 	"github.com/tkodcumpeg4/zorven/server/store"
 	"github.com/tkodcumpeg4/zorven/server/store/pgstore"
 	"github.com/tkodcumpeg4/zorven/server/tlscert"
 	"github.com/tkodcumpeg4/zorven/server/tunnel"
+	"github.com/tkodcumpeg4/zorven/server/visitorauth"
 	"github.com/tkodcumpeg4/zorven/shared/protocol"
 )
 
@@ -142,11 +145,49 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 			defer publicLimiter.Close()
 
 			router := ingress.NewRouter(st)
+
+			// Geo/IP (FAZ 1 Part 2 / F03a). Zorven veritabani DAGITMAZ; yol
+			// isletmeciden gelir. Tanimsizsa ozellik kapali kalir ve Geo kosullari
+			// eslesmez — istek normal akisina devam eder.
+			if geoPath := strings.TrimSpace(os.Getenv("ZORVEN_GEOIP_DB")); geoPath != "" {
+				if err := router.SetGeoResolver(geoPath); err != nil {
+					log.Warn("geoip veritabani acilamadi, Geo kosullari devre disi",
+						"yol", geoPath, "hata", err)
+				} else {
+					log.Info("geoip veritabani yuklendi", "yol", geoPath)
+				}
+			}
+			// IP listeleri (F03b/c/d): tor_exit, hosting, reputation. Zorven liste
+			// DAGITMAZ; kaynaklar isletmeciden gelir. Tanimsizsa kosullar eslesmez.
+			ipCfg := ingress.IPIntelConfig{
+				Tor:        ingress.SplitSources(os.Getenv("ZORVEN_IPSET_TOR")),
+				Hosting:    ingress.SplitSources(os.Getenv("ZORVEN_IPSET_HOSTING")),
+				Reputation: ingress.ParseReputationSources(os.Getenv("ZORVEN_IPSET_REPUTATION")),
+				CacheDir:   strings.TrimSpace(os.Getenv("ZORVEN_IPSET_CACHE")),
+			}
+			if v := strings.TrimSpace(os.Getenv("ZORVEN_IPSET_REFRESH")); v != "" {
+				d, err := time.ParseDuration(v)
+				if err != nil || d <= 0 {
+					log.Warn("ZORVEN_IPSET_REFRESH cozulemedi, varsayilan kullanilacak", "deger", v)
+				} else {
+					ipCfg.Refresh = d
+				}
+			}
+			if n := router.SetupIPIntel(cmd.Context(), ipCfg, log); n > 0 {
+				log.Info("ip listeleri etkin", "saglayici_sayisi", n)
+			}
+
 			if err := router.Reload(cmd.Context()); err != nil {
 				return fmt.Errorf("tunel eslestirmeleri yuklenemedi: %w", err)
 			}
 
+			// Aktif saglik denetleyicisi (FAZ 4 / F21): yalnizca yuk dengeleme
+			// kaydinda saglik denetimi acik tunellere istek atar.
+			healthChecker := &ingress.HealthChecker{Router: router, Hub: hub, Log: log}
+			go healthChecker.Run(ctx)
+
 			requests := reqlog.New(5000)
+			captures := reqlog.NewCaptureStore(0) // FAZ 2: opt-in istek yakalama deposu
 			broker := events.New()
 
 			// Kalici istek loglari: batch persister Postgres'e yazar. Store
@@ -156,6 +197,12 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				return st.InsertRequestLogs(pctx, batch)
 			}, log)
 			go logPersister.Run(ctx)
+
+			// Log saklama temizligi: sabit sure, ZORVEN_LOG_RETENTION_DAYS (vars. 30);
+			// acilistan 1 dk sonra, sonra saatlik.
+			if pr, ok := st.(retention.Pruner); ok {
+				go retention.Run(ctx, pr, log, time.Minute, time.Hour)
+			}
 
 			entitlementSvc := entitlements.NewService(st)
 			bandwidthRecorder := bandwidth.NewLocalRecorder(st)
@@ -183,6 +230,10 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				}
 			}
 
+			// rawMgr, ham TCP/UDP rezerve-port dinleyicilerini yonetir (FAZ 3 / D2).
+			// Asagida kurulur; OnTunnelChange closure'i nil-guard ile tazeler.
+			var rawMgr *rawproxy.Manager
+
 			apiSrv := &api.Server{
 				Store: st, Hub: hub, Log: requests, Events: broker,
 				Logger: log, Version: protocol.Version,
@@ -191,12 +242,28 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				Entitlements: entitlementSvc,
 				PlatformDomain: strings.ToLower(strings.TrimSpace(
 					firstNonEmpty(platformDomain, os.Getenv("ZORVEN_PLATFORM_DOMAIN")))),
+				PanelHosts: controlHosts,
 				// Tunel degisikliginde yonlendirmeyi HEMEN tazele; yonetim API'si
 				// artik ayni surecte oldugu icin 10sn yoklamayi beklemeye gerek yok.
 				OnTunnelChange: func() {
 					if err := router.Reload(ctx); err != nil {
 						log.Warn("tunel eslestirmeleri tazelenemedi", "hata", err)
 					}
+					if rawMgr != nil {
+						rawMgr.Reload()
+					}
+				},
+				// Plan degisince bant genisligi kota/hiz durumunu hemen yeniden yukle.
+				OnPlanChange: bandwidthRecorder.Invalidate,
+				// FAZ 4 / F21: panel icin canli backend saglik durumu.
+				LBHealth: router.HealthStatus,
+				// FAZ 4 / F24: canli UDP istatistikleri. rawMgr asagida kurulur;
+				// istek aninda okunur, o yuzden kapanis nil kontrolu yapar.
+				UDPStats: func(tunnelID string) (rawproxy.UDPLiveStats, bool) {
+					if rawMgr == nil {
+						return rawproxy.UDPLiveStats{}, false
+					}
+					return rawMgr.UDPStats(tunnelID)
 				},
 			}
 
@@ -245,6 +312,8 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 			// Kontrol duzlemi: yalnizca control_hostname uzerinden.
 			control := http.NewServeMux()
 			control.Handle("/_tunnel/v1/connect", tunnelHandler)
+			// FAZ 6.4: metrik uyarı değerlendiricisi (arka planda periyodik).
+			go apiSrv.RunAlertEvaluator(ctx, time.Minute)
 			apiRoutes := apiSrv.Routes()
 			control.Handle("/api/v1/", apiRoutes)
 			control.Handle("/install.sh", apiRoutes)
@@ -276,7 +345,8 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 			// /api/v1/* admin anahtariyla korunur; /health ve auth uclari public kalir.
 			// GitHub oturum cerezi ve zrv_api_ tokenlari da kabul edilir.
 			// apiLimiter, programatik API token'lari icin kiraci basina comert bir
-			// hiz siniri (30 rps, burst 60).
+			// hiz siniri (30 rps, burst 60). Normal kullanimi engellemez; kotuye
+			// kullanimi ve kazara sonsuz donguleri sinirlar.
 			apiLimiter := ratelimit.New(30, 60)
 
 			guarded := &api.Middleware{
@@ -289,8 +359,10 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				Entitlements: entitlementSvc,
 				Sessions:     sessions,
 				BetterAuth:   betterAuthVerifier,
+				TrustedHosts: api.TrustedOriginHosts(apiSrv.PlatformDomain, controlHosts),
 				PublicPaths: map[string]bool{
 					"/api/v1/health":               true,
+					"/api/v1/status":               true,
 					"/api/v1/openapi.yaml":         true,
 					"/api/v1/openapi.en.yaml":      true,
 					"/api/v1/auth/config":          true,
@@ -308,7 +380,139 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				LogPersister:      logPersister,
 				BandwidthRecorder: bandwidthRecorder,
 				BandwidthTracker:  bandwidthRecorder,
+				PlatformDomain:    apiSrv.PlatformDomain,
+				Captures:          captures,
 			}
+			apiSrv.Captures = captures
+
+			// Ziyaretçi OAuth (tünel mode=oauth): tünel arkasındaki servise erişen
+			// dış kullanıcıları Google/GitHub ile doğrular. İmza sırrı ve en az bir
+			// sağlayıcı creds'i yoksa kendiliğinden devre dışı (oauth modu fail-closed).
+			visitorSecret := os.Getenv("BETTER_AUTH_SECRET")
+			visitorHost := strings.TrimSpace(os.Getenv("ZORVEN_VISITOR_AUTH_HOST"))
+			if visitorHost == "" && apiSrv.PlatformDomain != "" {
+				visitorHost = "app." + apiSrv.PlatformDomain
+			}
+			visitorMgr := visitorauth.New([]byte(visitorSecret), visitorHost,
+				map[string]*visitorauth.Provider{
+					"google": {
+						Name:         "google",
+						ClientID:     os.Getenv("GOOGLE_CLIENT_ID"),
+						ClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),
+						AuthURL:      "https://accounts.google.com/o/oauth2/v2/auth",
+						TokenURL:     "https://oauth2.googleapis.com/token",
+						UserInfoURL:  "https://openidconnect.googleapis.com/v1/userinfo",
+						Scopes:       "openid email profile",
+					},
+					"github": {
+						Name:         "github",
+						ClientID:     os.Getenv("GITHUB_CLIENT_ID"),
+						ClientSecret: os.Getenv("GITHUB_CLIENT_SECRET"),
+						AuthURL:      "https://github.com/login/oauth/authorize",
+						TokenURL:     "https://github.com/login/oauth/access_token",
+						UserInfoURL:  "https://api.github.com/user",
+						Scopes:       "read:user user:email",
+					},
+				},
+				func(host string) (string, []byte, bool, bool) {
+					hr, ok := router.Lookup(host)
+					if !ok {
+						return "", nil, false, false
+					}
+					return hr.AccessMode, hr.AccessConfig, hr.AccessEnabled, true
+				},
+				log,
+			)
+			proxy.Visitor = visitorMgr
+			if visitorMgr.Enabled() {
+				log.Info("ziyaretci OAuth erisim denetimi ACIK",
+					"saglayicilar", visitorMgr.ProviderNames(), "callback_host", visitorHost)
+			}
+
+			// Ham TCP/UDP rezerve-port dinleyici yoneticisi (FAZ 3 / D2, Mod A).
+			rawMgr = rawproxy.New(hub, ipFilter, log, func(lctx context.Context) ([]rawproxy.TunnelInfo, error) {
+				tuns, err := st.ListReservedPortTunnels(lctx)
+				if err != nil {
+					return nil, err
+				}
+				// UDP sinirlari (F24) ayni yenilemede tek sorguyla okunur; hata olursa
+				// dinleyiciler varsayilan sinirlarla calismaya devam eder.
+				udpCfg := map[string]store.TunnelUDP{}
+				if cfgs, uerr := st.ListTunnelUDPs(lctx); uerr == nil {
+					for _, c := range cfgs {
+						udpCfg[c.TunnelID] = c
+					}
+				} else {
+					log.Warn("rawproxy: UDP sinirlari okunamadi, varsayilanlar kullaniliyor", "hata", uerr)
+				}
+				out := make([]rawproxy.TunnelInfo, 0, len(tuns))
+				for _, tn := range tuns {
+					// O5: dondurulmus tunelin ham portu da acilmaz (freeze -> Reload kapatir).
+					if !tn.Enabled || tn.Frozen || tn.Exposure != store.ExposurePort || tn.PublicPort == 0 {
+						continue
+					}
+					if tn.Proto != store.ProtoTCP && tn.Proto != store.ProtoUDP {
+						continue
+					}
+					out = append(out, rawproxy.TunnelInfo{
+						TunnelID: tn.ID, ClientID: tn.ClientID, TenantID: tn.TenantID,
+						Proto: tn.Proto, Port: tn.PublicPort,
+						UDP: udpLimitsOf(udpCfg[tn.ID]),
+					})
+				}
+				return out, nil
+			})
+			rawMgr.Start(ctx)
+
+			// Gecici tunel supurucusu (FAZ 2 / F07): suresi dolan tunelleri
+			// dakikada bir kaldirir. Yalnizca gercekten silme olduysa router
+			// yeniden yuklenir — bos tur hicbir sey yapmaz.
+			go func() {
+				tk := time.NewTicker(time.Minute)
+				defer tk.Stop()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-tk.C:
+					}
+					n, err := st.DeleteExpiredTunnels(ctx)
+					if err != nil {
+						log.Warn("gecici tunel supurucusu hata verdi", "hata", err)
+						continue
+					}
+					if n == 0 {
+						continue
+					}
+					log.Info("suresi dolmus gecici tunel kaldirildi", "adet", n)
+					if err := router.Reload(ctx); err != nil {
+						log.Warn("supurme sonrasi tunel eslestirmeleri yenilenemedi", "hata", err)
+					}
+					// Suresi dolan ham TCP/UDP gecici tunelin dinleyicisi de kapansin.
+					rawMgr.Reload()
+				}
+			}()
+
+			// UDP istatistikleri (F24): dakikalik ozet yaz, 7 gunden eskiyi sil.
+			go rawMgr.RunUDPStats(ctx, func(sctx context.Context, rows []rawproxy.UDPMinute) {
+				out := make([]store.UDPStatMinute, 0, len(rows))
+				for _, r := range rows {
+					out = append(out, store.UDPStatMinute{
+						TunnelID: r.TunnelID, TenantID: r.TenantID, Minute: r.Minute,
+						PacketsIn: r.PacketsIn, PacketsOut: r.PacketsOut, BytesIn: r.BytesIn, BytesOut: r.BytesOut,
+						FlowsNew: r.FlowsNew, FlowsPeak: r.FlowsPeak,
+						DroppedRate: r.DroppedRate, DroppedSize: r.DroppedSize, DroppedFlows: r.DroppedFlows,
+					})
+				}
+				if err := st.InsertUDPStats(sctx, out); err != nil {
+					log.Warn("UDP istatistikleri yazilamadi", "hata", err)
+				}
+				if time.Now().Minute() == 0 {
+					if _, err := st.PruneUDPStats(sctx, time.Now().Add(-7*24*time.Hour)); err != nil {
+						log.Warn("eski UDP istatistikleri silinemedi", "hata", err)
+					}
+				}
+			})
 
 			// Hostname ayrimi (api_contract.md §0): control_hostname kontrol
 			// duzlemine, DIGER TUM hostname'ler tunele gider.
@@ -325,13 +529,15 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				if err != nil {
 					return fmt.Errorf("gecersiz auth-upstream adresi: %w", err)
 				}
-				proxy := httputil.NewSingleHostReverseProxy(u)
-				origDirector := proxy.Director
-				proxy.Director = func(req *http.Request) {
-					origDirector(req)
-					req.Host = u.Host
+				// Org degistirme, cikis, 2FA, sifre/e-posta degisimi vb. Better
+				// Auth'ta oturumu veya kullaniciyi degistirir; Go oturumu 30 sn
+				// onbellekledigi icin auth proxy'si istekten once ve yanit
+				// istemciye yazilmadan once temizler (bkz. authproxy.go).
+				var cache sessionCache
+				if betterAuthVerifier != nil {
+					cache = betterAuthVerifier
 				}
-				authProxy = proxy
+				authProxy = newAuthProxy(u, cache)
 				log.Info("Better Auth upstream proxy etkin", "upstream", authUpstream)
 			}
 
@@ -376,6 +582,31 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				log.Info("tanitim sitesi hostlari", "hosts", marketingHosts)
 			}
 
+			// Platformun KENDI hostlari (control/panel, tanitim, analytics, ziyaretci
+			// OAuth callback'i). Bu hostlar ASLA bir kiraci tuneline gitmez: ne :443
+			// SNI demux'u (ham TCP+SNI tunel) ne de mTLS istemci sertifikasi istegi
+			// bir kiraci kaydina gore karar verebilir. Aksi halde `panel` adini alan
+			// bir kiraci panel TLS trafigini (oturum cerezleri dahil) kendi ajanina
+			// cekebilir veya panele sertifika zorunlulugu koyup erisilemez kilabilirdi.
+			platformHostList := append([]string{}, controlHosts...)
+			platformHostList = append(platformHostList, marketingHosts...)
+			platformHostList = append(platformHostList, analyticsHosts...)
+			if visitorHost != "" {
+				platformHostList = append(platformHostList, visitorHost)
+			}
+			isPlatformHost := func(host string) bool {
+				return ingress.HostMatchesAny(host, platformHostList) || ingress.IsIPHost(host)
+			}
+			apiSrv.ReservedHost = isPlatformHost
+			// Rezerve listesine sonradan eklenen adlarla catisan eski kayitlari
+			// raporla (silme yok; trafik zaten platforma birakilir).
+			for _, ph := range platformHostList {
+				if rt, ok := router.Lookup(ph); ok && rt.TenantID != "" {
+					log.Warn("platform hostu bir kiraci kaydiyla catisiyor; kiraciya YONLENDIRILMEZ",
+						"host", ph, "kiraci", rt.TenantID, "tunel", rt.TunnelID)
+				}
+			}
+
 			mux := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				// analytics.<domain>: tum istekler Umami'ye (kok yolda). Control/tunel
 				// yonlendirmesinden ONCE, kendi host'unda calisir.
@@ -387,6 +618,11 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 					w.Header().Set("X-Content-Type-Options", "nosniff")
 					w.Header().Set("X-Frame-Options", "DENY")
 					w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+					// HSTS yalniz TLS'te ve yalniz kontrol hostlari icin. includeSubDomains
+					// YOK: kiraci tunel alt alanlarinin davranisini burada belirlemeyiz.
+					if r.TLS != nil && !ingress.IsIPHost(r.Host) {
+						w.Header().Set("Strict-Transport-Security", "max-age=31536000")
+					}
 					switch {
 					case strings.HasPrefix(r.URL.Path, "/_tunnel/"):
 						// Tunel WSS ucunun KENDI kimlik dogrulamasi var (istemci
@@ -400,6 +636,22 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 							return
 						}
 						control.ServeHTTP(w, r)
+					case r.URL.Path == "/_zva/callback":
+						// Ziyaretçi OAuth callback'i (SABİT kayıtlı redirect_uri).
+						// Public: kendi state HMAC'i doğrular. IP başına hız sınırlı.
+						if !publicLimiter.Allow(ipOf(r)) {
+							tooManyRequests(w)
+							return
+						}
+						visitorMgr.HandleCallback(w, r)
+					case r.URL.Path == "/api/v1/abuse" && r.Method == http.MethodPost:
+						// Kötüye kullanım bildirimi: PUBLIC (kimlik doğrulama yok).
+						// IP başına hız sınırlı: bildirim spam'ini engelle.
+						if !publicLimiter.Allow(ipOf(r)) {
+							tooManyRequests(w)
+							return
+						}
+						apiRoutes.ServeHTTP(w, r)
 					case r.URL.Path == "/api/v1/device/code" || r.URL.Path == "/api/v1/device/token":
 						// Masaustu "tarayicidan giris" eslestirmesi: auth'suz (public).
 						// device/approve GUARDED kalir (asagidaki /api/v1/ dalinda).
@@ -453,13 +705,34 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				acmeEmail = firstNonEmpty(acmeEmail, os.Getenv("ZORVEN_ACME_EMAIL"))
 				platDomain := firstNonEmpty(platformDomain, os.Getenv("ZORVEN_PLATFORM_DOMAIN"))
 				dualCertMgr = tlscert.NewDualCertManager(&defaultCert, platDomain, controlHosts, st, acmeEmail, autocertCache)
+				baseNextProtos := []string{"h2", "http/1.1", "acme-tls/1"}
 				srv.TLSConfig = &tls.Config{
 					GetCertificate: dualCertMgr.GetCertificate,
 					// Custom domain (ozel alan adi) sertifikalari icin TLS-ALPN-01
 					// ACME challenge'i: autocert, "acme-tls/1" ALPN'ini gordugunde
 					// GetCertificate icinde challenge sertifikasini doner. h2 ve
 					// http/1.1 acikca korunur (aksi halde HTTP/2 devre disi kalirdi).
-					NextProtos: []string{"h2", "http/1.1", "acme-tls/1"},
+					NextProtos: baseNextProtos,
+					// FAZ 6.6 mTLS: yalnizca mTLS ETKIN hostlar icin istemci sertifikasi
+					// iste. Diger tum hostlar (panel, marketing, normal tuneller) icin nil
+					// doneriz => taban yapilandirma kullanilir, hicbir sey degismez.
+					GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+						// Platform hostlari (panel vb.) bir kiraci kaydina gore asla
+						// istemci sertifikasi istemez (K1: panel DoS / ele gecirme).
+						if isPlatformHost(hello.ServerName) {
+							return nil, nil
+						}
+						pool, ok := router.MTLSFor(hello.ServerName)
+						if !ok {
+							return nil, nil // taban config: mTLS yok
+						}
+						return &tls.Config{
+							GetCertificate: dualCertMgr.GetCertificate,
+							NextProtos:     baseNextProtos,
+							ClientAuth:     tls.RequireAndVerifyClientCert,
+							ClientCAs:      pool,
+						}, nil
+					},
 				}
 			}
 
@@ -544,7 +817,35 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 
 			var srvErr error
 			if useTLS {
-				srvErr = srv.ListenAndServeTLS("", "")
+				// :443'ü SNI'ye göre ayır (FAZ 3 / D2, Mod B): ServerName bir SNI-modu
+				// ham TCP-tuneline eşleşiyorsa bağlantı rawMgr'a köprülenir, değilse
+				// http.Server.ServeTLS'e devredilir (peek edilmiş bağlantı; TLS'i o yapar).
+				baseLn, lerr := net.Listen("tcp", addr)
+				if lerr != nil {
+					return fmt.Errorf("dinleme baslatilamadi: %w", lerr)
+				}
+				sniLookup := func(host string) (rawproxy.TunnelInfo, bool) {
+					// K1: platformun kendi hostlari HER ZAMAN sunucunun kendi TLS'ine
+					// (http.Server) birakilir; ayni adla bir kiraci kaydi olsa bile.
+					if isPlatformHost(host) {
+						return rawproxy.TunnelInfo{}, false
+					}
+					hr, ok := router.Lookup(host)
+					// O5: dondurulmus (frozen) tunel ham trafik de alamaz.
+					if !ok || !hr.Enabled || hr.Frozen {
+						return rawproxy.TunnelInfo{}, false
+					}
+					// Şimdilik yalnızca TCP+SNI (UDP+SNI çerçeveleme gerektirir).
+					if hr.Proto != store.ProtoTCP || hr.Exposure != store.ExposureSNI {
+						return rawproxy.TunnelInfo{}, false
+					}
+					return rawproxy.TunnelInfo{
+						TunnelID: hr.TunnelID, ClientID: hr.ClientID,
+						TenantID: hr.TenantID, Proto: hr.Proto,
+					}, true
+				}
+				demux := rawproxy.NewDemuxListener(baseLn, srv.TLSConfig, sniLookup, rawMgr.HandleSNIConn, log)
+				srvErr = srv.ServeTLS(demux, "", "")
 			} else {
 				srvErr = srv.ListenAndServe()
 			}
@@ -1040,4 +1341,16 @@ getirilemez; tek cozum yenisini uretmektir. Istemciler ve tuneller etkilenmez.`,
 		},
 	})
 	return cmd
+}
+
+// udpLimitsOf, depodaki UDP ayarini rawproxy sinirlarina cevirir. Bos kayit
+// (sifir degerler) rawproxy tarafinda guvenli varsayilanlara duser.
+func udpLimitsOf(c store.TunnelUDP) rawproxy.UDPLimits {
+	return rawproxy.UDPLimits{
+		IdleTimeout: time.Duration(c.IdleTimeoutSec) * time.Second,
+		MaxPacket:   c.MaxPacketBytes,
+		MaxPPS:      c.MaxPPS,
+		MaxFlowPPS:  c.MaxFlowPPS,
+		MaxFlows:    c.MaxFlows,
+	}
 }

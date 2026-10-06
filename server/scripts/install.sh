@@ -55,15 +55,41 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 # Token kontrolu (yoksa interaktif sor)
+# NOT: "curl ... | sudo bash" ile stdin boru hattidir; read script'in kendi
+# satirlarini yutar. Bu yuzden terminalden (/dev/tty) okuyoruz.
 if [ -z "$TOKEN" ]; then
     echo -e "${YELLOW}Zorven istemci token'i bulunamadi.${NC}"
-    read -p "Zorven Istemci Token'inizi girin (zrv_live_...): " TOKEN
+    if [ -t 0 ]; then
+        read -r -p "Zorven Istemci Token'inizi girin (zrv_live_...): " TOKEN
+    elif [ -r /dev/tty ] && { : < /dev/tty; } 2> /dev/null; then
+        printf "Zorven Istemci Token'inizi girin (zrv_live_...): " > /dev/tty
+        read -r TOKEN < /dev/tty || TOKEN=""
+    else
+        echo -e "${RED}[HATA] Token verilmedi ve etkilesimli terminal bulunamadi.${NC}"
+        echo -e "Token'i parametre olarak vererek tekrar calistirin:"
+        echo -e "  ${BOLD}curl -fsSL https://zorven.app/install.sh | sudo bash -s -- --token zrv_live_...${NC}"
+        exit 1
+    fi
 fi
+
+# Bosluk/satir sonu temizle
+TOKEN="${TOKEN//[[:space:]]/}"
 
 if [ -z "$TOKEN" ]; then
     echo -e "${RED}[HATA] Token bos olamaz. Kurulum iptal edildi.${NC}"
+    echo -e "Tekrar deneyin: ${BOLD}curl -fsSL https://zorven.app/install.sh | sudo bash -s -- --token zrv_live_...${NC}"
     exit 1
 fi
+
+# Onek dogrulamasi (istemci ile ayni: zrv_live_ veya eski rpsh_live_)
+case "$TOKEN" in
+    zrv_live_*) ;;
+    rpsh_live_*) echo -e "${YELLOW}[UYARI] Eski bicimli (rpsh_live_) token kullaniliyor; yeni token'lar 'zrv_live_' ile baslar.${NC}" ;;
+    *)
+        echo -e "${RED}[HATA] Gecersiz token bicimi: token 'zrv_live_' ile baslamalidir.${NC}"
+        exit 1
+        ;;
+esac
 
 if [ -z "$SERVER" ]; then
     SERVER="localhost:8443"

@@ -1,0 +1,54 @@
+<!doctype html><html lang="tr"><head><meta charset="utf-8"><title>Zorven — Loglar</title>
+<style>
+:root{--sub:#5f6b66;--muted:#9aa4a0;--fg:#f4f7f5;--line:rgba(255,255,255,.1);--brand:#3ddc84;--warn:#f5b445;--danger:#ff5c5c;--mono:ui-monospace,Consolas,monospace}
+*{box-sizing:border-box}html,body{margin:0;height:100%}
+body{background:linear-gradient(180deg,#0b0e12,#080a0d);color:var(--fg);font:13px -apple-system,"Segoe UI",sans-serif;overflow-x:hidden}
+.bar{position:sticky;top:0;z-index:2;display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:12px;background:rgba(8,10,13,.92);border-bottom:1px solid var(--line);backdrop-filter:blur(8px)}
+.bar h1{font-size:14px;margin:0 8px 0 0;font-weight:700;white-space:nowrap}
+select,input{background:rgba(0,0,0,.35);border:1px solid var(--line);border-radius:8px;color:var(--fg);font:inherit;font-size:12px;padding:6px 8px;outline:none}
+select:focus,input:focus{border-color:var(--brand)}
+input.q{min-width:150px}
+.btn{cursor:pointer;background:rgba(255,255,255,.06);border:1px solid var(--line);border-radius:8px;color:var(--muted);font:inherit;font-size:12px;padding:6px 10px}
+.btn:hover{color:var(--fg);background:rgba(255,255,255,.1)}
+.btn.live{color:var(--brand);border-color:rgba(61,220,132,.4)}
+.count{margin-left:auto;color:var(--sub);font-family:var(--mono);font-size:11px;white-space:nowrap}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{position:sticky;top:53px;z-index:1;text-align:left;color:var(--sub);font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:.06em;padding:8px 10px;background:#0b0e12;border-bottom:1px solid var(--line)}
+td{padding:7px 10px;border-bottom:1px solid rgba(255,255,255,.05);font-family:var(--mono);white-space:nowrap}
+td.path{max-width:52vw;overflow:hidden;text-overflow:ellipsis}
+tr:hover{background:rgba(255,255,255,.03)}
+.m{color:var(--muted);font-weight:700;font-size:10px}
+.s2{color:var(--brand)}.s3{color:#6fb6ff}.s4{color:var(--warn)}.s5{color:var(--danger)}
+.empty{color:var(--sub);text-align:center;padding:48px;font-style:italic}
+::-webkit-scrollbar{width:10px}::-webkit-scrollbar-thumb{background:rgba(255,255,255,.12);border-radius:8px;border:2px solid transparent;background-clip:padding-box}
+</style></head><body>
+<div class="bar">
+  <h1>🟢 Zorven — Canlı Loglar</h1>
+  <select id="fm"><option value="">Metot: Hepsi</option><option>GET</option><option>POST</option><option>PUT</option><option>PATCH</option><option>DELETE</option><option>OPTIONS</option></select>
+  <select id="fs"><option value="">Durum: Hepsi</option><option value="2">2xx</option><option value="3">3xx</option><option value="4">4xx</option><option value="5">5xx</option></select>
+  <input class="q" id="fq" placeholder="path ara…">
+  <input id="fd" type="number" min="0" placeholder="min ms" style="width:84px">
+  <button class="btn live" id="fl">● canlı</button>
+  <button class="btn" id="fc">Temizle</button>
+  <button class="btn" id="fx">Kaydet (CSV)</button>
+  <span class="count" id="cnt">0 istek</span>
+</div>
+<table><thead><tr><th>Saat</th><th>Metot</th><th>Path</th><th>Durum</th><th>Süre</th></tr></thead><tbody id="tb"></tbody></table>
+<div class="empty" id="empty">Tünel hazır — gelen istekler burada canlı akacak…</div>
+<script>
+var rows=[],live=true,cnt=0;
+function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
+function match(r){var fm=document.getElementById('fm').value,fs=document.getElementById('fs').value,fq=document.getElementById('fq').value,fd=+document.getElementById('fd').value;
+ if(fm&&r.method!==fm)return false; if(fs&&String(r.status).charAt(0)!==fs)return false; if(fq&&(r.path||'').indexOf(fq)<0)return false; if(fd&&(r.duration_ms||0)<fd)return false; return true;}
+function sc(c){return c>=500?'s5':c>=400?'s4':c>=300?'s3':'s2'}
+function render(){var vis=rows.filter(match).slice(0,500);
+ document.getElementById('empty').style.display=vis.length?'none':'block';
+ document.getElementById('tb').innerHTML=vis.map(function(r){return '<tr><td style="color:#5f6b66">'+esc((r.ts||'').slice(11,19))+'</td><td class="m">'+esc(r.method||'GET')+'</td><td class="path" title="'+esc(r.path)+'">'+esc(r.path||'/')+'</td><td class="'+sc(r.status)+'">'+(r.status||200)+'</td><td style="color:#9aa4a0">'+(r.duration_ms||0)+'ms</td></tr>'}).join('');
+ document.getElementById('cnt').textContent=cnt+' istek';}
+window.__pushLog=function(r){cnt++;rows.unshift(r);if(rows.length>2000)rows.pop();if(live)render();else document.getElementById('cnt').textContent=cnt+' istek';};
+document.getElementById('fl').onclick=function(){live=!live;this.classList.toggle('live',live);this.textContent=live?'● canlı':'● duraklatıldı';if(live)render();};
+document.getElementById('fc').onclick=function(){rows=[];cnt=0;render();};
+['fm','fs','fq','fd'].forEach(function(id){document.getElementById(id).addEventListener('input',render);});
+document.getElementById('fx').onclick=function(){var vis=rows.filter(match);var csv='ts,method,path,status,duration_ms\n'+vis.map(function(r){return [r.ts,r.method,'"'+(r.path||'').replace(/"/g,'""')+'"',r.status,r.duration_ms].join(',')}).join('\n');var a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));a.download='zorven-loglar.csv';a.click();};
+render();
+</script></body></html>

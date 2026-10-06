@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { Hostname, Tunnel, VerificationInstructions } from '~/types/api'
+import type { Hostname, Tunnel, VerificationInstructions, PathRoute } from '~/types/api'
 
 const api = useApi()
 const { t } = useI18n()
@@ -26,13 +26,78 @@ const form = reactive({
 const verifyingId = ref<string | null>(null)
 const actionMessage = ref<{ text: string; isError: boolean } | null>(null)
 const selectedInstructionsDomain = ref<Hostname | null>(null)
+// Doğrulanmış (sahipliği kanıtlanmış) ama DNS'i henüz platforma yönlenmemiş ad için canlı kontrol.
+const dnsChecking = ref(false)
+const dnsResult = ref<{ id: string, pointed: boolean } | null>(null)
+async function checkDNS(h: Hostname) {
+  dnsChecking.value = true
+  try {
+    const r = await api.dnsCheckHostname(h.id)
+    dnsResult.value = { id: h.id, pointed: r.pointed }
+  } catch (e: any) {
+    toast.error(e?.data?.error?.message || t('domains.addFailed'))
+  } finally {
+    dnsChecking.value = false
+  }
+}
 const copiedKey = ref<string | null>(null)
 
+// FAZ 6.5 — yol tabanlı yönlendirme (hostname bazlı, açılır satır)
+const pathOpenId = ref<string | null>(null)
+const pathRoutes = ref<PathRoute[]>([])
+const pathLoading = ref(false)
+const pathSaving = ref(false)
+const pathForm = reactive({ path_prefix: '', tunnel_id: '' })
+
+async function togglePaths(h: Hostname) {
+  if (pathOpenId.value === h.id) { pathOpenId.value = null; return }
+  pathOpenId.value = h.id
+  pathRoutes.value = []
+  pathForm.path_prefix = ''
+  pathForm.tunnel_id = ''
+  pathLoading.value = true
+  try {
+    pathRoutes.value = await api.listPathRoutes(h.id)
+  } catch { /* sessizce */ } finally {
+    pathLoading.value = false
+  }
+}
+async function addPath(h: Hostname) {
+  if (!pathForm.path_prefix.trim() || !pathForm.tunnel_id) return
+  pathSaving.value = true
+  try {
+    const pr = await api.addPathRoute(h.id, { path_prefix: pathForm.path_prefix.trim(), tunnel_id: pathForm.tunnel_id })
+    pathRoutes.value.unshift(pr)
+    pathForm.path_prefix = ''
+    pathForm.tunnel_id = ''
+    toast.success(t('domains.pathAdded'))
+  } catch (err: any) {
+    toast.error(err?.data?.error?.message || err?.message || t('domains.pathAddFailed'))
+  } finally {
+    pathSaving.value = false
+  }
+}
+async function removePath(h: Hostname, routeID: string) {
+  try {
+    await api.deletePathRoute(h.id, routeID)
+    pathRoutes.value = pathRoutes.value.filter(p => p.id !== routeID)
+    toast.info(t('domains.pathRemoved'))
+  } catch (err: any) {
+    toast.error(err?.data?.error?.message || err?.message || t('domains.pathRemoveFailed'))
+  }
+}
+
 onMounted(async () => {
-  ;[hostnames.value, tunnels.value] = await Promise.all([
-    api.listHostnames(), api.listTunnels(),
-  ])
-  pending.value = false
+  try {
+    ;[hostnames.value, tunnels.value] = await Promise.all([
+      api.listHostnames(), api.listTunnels(),
+    ])
+  } catch (e) {
+    // Başarısız yükleme sonsuz spinner bırakmasın.
+    toast.error(hostnameError(e, t('domains.loadFailed')))
+  } finally {
+    pending.value = false
+  }
 })
 
 const tunnelLabel = (id?: string | null) => {
@@ -99,13 +164,23 @@ async function submit() {
       const hst = await api.createCustomHostname(form.custom_domain.trim())
       hostnames.value.push(hst)
       form.custom_domain = ''
-      // Yeni eklenen özel domain için DNS talimat modalını doğrudan aç
-      selectedInstructionsDomain.value = hst
-      toast.success(t('domains.addedCustom', { fqdn: hst.fqdn }))
+      if (hst.auto_verified && hst.dns_pointed) {
+        // Üst zone doğrulanmış VE ad zaten platforma yönleniyor → hemen aktif.
+        toast.success(t('domains.autoVerified', { fqdn: hst.fqdn, zone: hst.parent_zone || '' }))
+      } else if (hst.auto_verified) {
+        // Sahiplik doğrulandı ama trafik için alt alan adının CNAME kaydı gerekir.
+        dnsResult.value = { id: hst.id, pointed: false }
+        selectedInstructionsDomain.value = hst
+        toast.success(t('domains.autoVerifiedNeedsDns', { fqdn: hst.fqdn }))
+      } else {
+        // Yeni eklenen özel domain için DNS talimat modalını doğrudan aç
+        selectedInstructionsDomain.value = hst
+        toast.success(t('domains.addedCustom', { fqdn: hst.fqdn }))
+      }
     }
     loadBillingData()
   } catch (e: any) {
-    const code = e?.data?.error?.code
+    const code = apiErrorCode(e)
     const msg = hostnameError(e, t('domains.addFailed'))
     formError.value = msg
     if (code === 'feature_not_available' || code === 'plan_limit_reached') {
@@ -257,7 +332,7 @@ async function remove(h: Hostname) {
               {{ t('domains.dnsInstructions') }} <span class="font-mono text-accent">{{ selectedInstructionsDomain.fqdn }}</span>
             </h2>
           </div>
-          <p class="mt-1 text-xs text-fg-muted">{{ t('domains.dnsIntro') }}</p>
+          <p class="mt-1 text-xs text-fg-muted">{{ selectedInstructionsDomain.verified ? t('domains.dnsOnlyIntro') : t('domains.dnsIntro') }}</p>
         </div>
         <button
           class="rounded p-1 text-fg-muted hover:bg-surface-2 hover:text-fg"
@@ -267,7 +342,7 @@ async function remove(h: Hostname) {
         </button>
       </div>
 
-      <div class="mt-4 grid gap-4 md:grid-cols-2">
+      <div class="mt-4 grid gap-4" :class="selectedInstructionsDomain.verified ? '' : 'md:grid-cols-2'">
         <!-- Yöntem 1: CNAME -->
         <div class="rounded border border-line bg-surface-1 p-3">
           <div class="flex items-center justify-between">
@@ -306,8 +381,8 @@ async function remove(h: Hostname) {
           </div>
         </div>
 
-        <!-- Yöntem 2: TXT Challenge -->
-        <div class="rounded border border-line bg-surface-1 p-3">
+        <!-- Yöntem 2: TXT Challenge (yalnızca sahiplik doğrulanmamışken) -->
+        <div v-if="!selectedInstructionsDomain.verified" class="rounded border border-line bg-surface-1 p-3">
           <div class="flex items-center justify-between">
             <span class="text-xs font-semibold text-fg">{{ t('domains.method2') }}</span>
             <span class="text-[10px] text-fg-subtle">{{ t('domains.method2Sub') }}</span>
@@ -351,8 +426,22 @@ async function remove(h: Hostname) {
           {{ t('domains.statusLabel') }}
           <span v-if="selectedInstructionsDomain.verified" class="font-medium text-emerald-600 dark:text-emerald-400">{{ t('domains.verified') }}</span>
           <span v-else class="font-medium text-amber-700 dark:text-amber-400">{{ t('domains.pendingVerify') }}</span>
+          <template v-if="dnsResult && dnsResult.id === selectedInstructionsDomain.id">
+            ·
+            <span v-if="dnsResult.pointed" class="font-medium text-emerald-600 dark:text-emerald-400">{{ t('domains.dnsPointed') }}</span>
+            <span v-else class="font-medium text-amber-700 dark:text-amber-400">{{ t('domains.dnsNotPointed') }}</span>
+          </template>
         </div>
         <div class="flex items-center gap-2">
+          <button
+            v-if="selectedInstructionsDomain.verified"
+            :disabled="dnsChecking"
+            class="flex items-center gap-1.5 rounded bg-accent px-3 py-1.5 text-xs font-medium text-on-accent transition-opacity hover:opacity-90 disabled:opacity-50"
+            @click="checkDNS(selectedInstructionsDomain)"
+          >
+            <Icon name="lucide:refresh-cw" class="size-3.5" :class="{ 'animate-spin': dnsChecking }" />
+            {{ dnsChecking ? t('domains.checking') : t('domains.dnsCheck') }}
+          </button>
           <button
             v-if="!selectedInstructionsDomain.verified"
             :disabled="verifyingId === selectedInstructionsDomain.id"
@@ -394,13 +483,14 @@ async function remove(h: Hostname) {
             </tr>
           </thead>
           <tbody class="divide-y divide-line">
-            <tr v-for="h in hostnames" :key="h.id" class="hover:bg-surface-2/40">
+            <template v-for="h in hostnames" :key="h.id">
+            <tr class="hover:bg-surface-2/40">
               <td class="px-4 py-2.5 font-mono text-xs">
                 <span class="font-medium text-fg">{{ h.fqdn }}</span>
               </td>
               <td class="px-4 py-2.5">
                 <span
-                  class="rounded border px-1.5 py-0.5 font-mono text-[10px]"
+                  class="inline-block whitespace-nowrap rounded border px-1.5 py-0.5 font-mono text-[10px]"
                   :class="TYPE_META[h.type]?.cls || 'border-line text-fg-muted'"
                   :title="TYPE_META[h.type]?.title"
                 >
@@ -471,6 +561,16 @@ async function remove(h: Hostname) {
                     </button>
                   </template>
 
+                  <!-- Yol kuralları (path routing) -->
+                  <button
+                    class="cursor-pointer rounded p-1.5 transition-colors hover:bg-surface-2"
+                    :class="pathOpenId === h.id ? 'text-accent' : 'text-fg-muted hover:text-accent'"
+                    :title="t('domains.pathRoutes')"
+                    @click="togglePaths(h)"
+                  >
+                    <Icon name="lucide:route" class="size-4" />
+                  </button>
+
                   <!-- Silme butonu -->
                   <button
                     class="cursor-pointer rounded p-1.5 text-fg-muted transition-colors duration-150 hover:bg-danger/10 hover:text-danger"
@@ -482,6 +582,47 @@ async function remove(h: Hostname) {
                 </div>
               </td>
             </tr>
+
+            <!-- Yol kuralları açılır satırı (FAZ 6.5) -->
+            <tr v-if="pathOpenId === h.id" class="bg-surface-2/30">
+              <td colspan="6" class="px-4 py-3">
+                <div class="space-y-2.5">
+                  <div class="flex items-center gap-1.5 text-xs font-medium text-fg">
+                    <Icon name="lucide:route" class="size-3.5 text-accent" />
+                    <span>{{ t('domains.pathRoutesFor', { fqdn: h.fqdn }) }}</span>
+                  </div>
+                  <p class="text-[11px] text-fg-subtle">{{ t('domains.pathIntro') }}</p>
+
+                  <div class="flex flex-wrap items-center gap-2">
+                    <input v-model="pathForm.path_prefix" placeholder="/api" class="w-32 rounded border border-line bg-bg px-2 py-1.5 font-mono text-xs focus:border-accent">
+                    <span class="text-fg-subtle">→</span>
+                    <select v-model="pathForm.tunnel_id" class="flex-1 min-w-[180px] cursor-pointer rounded border border-line bg-bg px-2 py-1.5 text-xs focus:border-accent">
+                      <option value="">{{ t('domains.pathSelectTunnel') }}</option>
+                      <option v-for="tn in tunnels" :key="tn.id" :value="tn.id">{{ tn.target }} ({{ tn.id }})</option>
+                    </select>
+                    <button :disabled="pathSaving || !pathForm.path_prefix.trim() || !pathForm.tunnel_id" class="shrink-0 rounded bg-accent px-3 py-1.5 text-xs font-medium text-on-accent transition-opacity hover:opacity-90 disabled:opacity-50" @click="addPath(h)">
+                      {{ t('common.add') }}
+                    </button>
+                  </div>
+
+                  <p v-if="pathLoading" class="py-2 text-center text-xs text-fg-muted">{{ t('common.loading') }}</p>
+                  <p v-else-if="!pathRoutes.length" class="rounded border border-dashed border-line py-3 text-center text-[11px] text-fg-muted">{{ t('domains.pathEmpty') }}</p>
+                  <ul v-else class="divide-y divide-line rounded border border-line">
+                    <li v-for="pr in pathRoutes" :key="pr.id" class="flex items-center justify-between gap-2 px-3 py-1.5">
+                      <div class="flex items-center gap-2 font-mono text-xs">
+                        <span class="rounded bg-surface px-1.5 py-0.5 text-fg">{{ pr.path_prefix }}</span>
+                        <span class="text-fg-subtle">→</span>
+                        <span class="text-fg-muted">{{ tunnelLabel(pr.tunnel_id) }}</span>
+                      </div>
+                      <button class="shrink-0 rounded p-1 text-fg-muted hover:bg-danger/10 hover:text-danger" :aria-label="t('common.delete')" @click="removePath(h, pr.id)">
+                        <Icon name="lucide:trash-2" class="size-3.5" />
+                      </button>
+                    </li>
+                  </ul>
+                </div>
+              </td>
+            </tr>
+            </template>
           </tbody>
         </table>
       </div>

@@ -26,6 +26,7 @@ type App struct {
 	status agent.Status
 	cancel context.CancelFunc // aktif baglantiyi durdurur
 	ag     *agent.Agent       // aktif calisan ajan
+	target string             // SharePort ile acikca istenen hedef (yoksa bos)
 
 	auto *autostart.Manager
 	tray *tray
@@ -102,7 +103,16 @@ func (a *App) SaveConfig(cfg Config) string {
 }
 
 // Connect, tunel baglantisini baslatir. Zaten bagliysa once koparir.
+//
+// Bu cagri HICBIR yerel port icin tunel acmaz: istemci yalnizca sunucuda
+// tanimli tunelleri alir. Belirli bir portu paylasmak icin SharePort kullanilir.
 func (a *App) Connect() string {
+	return a.connect("")
+}
+
+// connect, baglantiyi kurar. target bos degilse (yalnizca SharePort'tan,
+// kullanicinin acik istegiyle) sunucudan o hedef icin tunel istenir.
+func (a *App) connect(target string) string {
 	a.mu.Lock()
 	if a.cancel != nil {
 		a.cancel()
@@ -120,17 +130,24 @@ func (a *App) Connect() string {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	ag := &agent.Agent{
+	var ag *agent.Agent
+	ag = &agent.Agent{
 		ServerAddr:      cfg.ServerAddr,
 		Token:           cfg.Token,
-		LocalURL:        cfg.LocalURL,
-		RequestedTarget: cfg.LocalURL,
+		LocalURL:        target,
+		RequestedTarget: target,
 		Insecure:        cfg.Insecure,
 		CACertPath:      cfg.CACertPath,
 		NoTerminal:      cfg.NoTerminal,
 		NoScreen:        cfg.NoScreen,
 		Log:             a.log,
-		OnStatus:        a.publish,
+		// Eski (iptal edilmis) ajanin gec gelen "durduruldu" durumu yeni
+		// baglantinin durumunu ezmesin: yalnizca aktif ajan yayin yapar.
+		OnStatus: func(s agent.Status) {
+			if a.isCurrent(ag) {
+				a.publish(s)
+			}
+		},
 		OnRequest: func(method, path string, status int, duration time.Duration) {
 			if a.ctx != nil {
 				wailsrt.EventsEmit(a.ctx, "request_log", map[string]any{
@@ -147,11 +164,12 @@ func (a *App) Connect() string {
 	a.mu.Lock()
 	a.cancel = cancel
 	a.ag = ag
+	a.target = target
 	a.mu.Unlock()
 
 	go func() {
 		defer cancel()
-		if err := ag.Run(ctx); err != nil {
+		if err := ag.Run(ctx); err != nil && a.isCurrent(ag) {
 			a.publish(agent.Status{State: agent.StateFatal, Message: err.Error()})
 		}
 	}()
@@ -165,7 +183,9 @@ func (a *App) SharePort(port int, secureMode bool) string {
 	}
 	a.mu.Lock()
 	a.cfg.LastPort = port
-	a.cfg.LocalURL = fmt.Sprintf("http://localhost:%d", port)
+	// Hedef KALICI olarak config'e yazilmaz: sonraki Baglan/otomatik baglanma
+	// bu portu yeniden tunellemesin. Yalnizca bu cagri icin kullanilir.
+	target := fmt.Sprintf("http://localhost:%d", port)
 	newRecents := []int{port}
 	for _, p := range a.cfg.RecentPorts {
 		if p != port && len(newRecents) < 6 {
@@ -181,7 +201,7 @@ func (a *App) SharePort(port int, secureMode bool) string {
 	a.mu.Unlock()
 
 	_ = saveConfig(cfg)
-	return a.Connect()
+	return a.connect(target)
 }
 
 // GetHardwareMetrics, sistem telemetrisini anlik olarak ceker.
@@ -261,6 +281,13 @@ func (a *App) SetAutostart(on bool) string {
 func (a *App) Platform() string { return runtime.GOOS }
 
 // --- ic yardimcilar --------------------------------------------------------
+
+// isCurrent, verilen ajanin hala aktif baglanti olup olmadigini soyler.
+func (a *App) isCurrent(ag *agent.Agent) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.ag == ag
+}
 
 // publish, durumu saklar ve arayuze olay olarak gonderir.
 func (a *App) publish(s agent.Status) {

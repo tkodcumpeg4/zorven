@@ -45,8 +45,18 @@ if (-not $Token) {
     $Token = Read-Host "Zorven Istemci Token'inizi girin (zrv_live_...)"
 }
 
+if ($Token) { $Token = ($Token -replace '\s', '') }
+
 if (-not $Token) {
     Write-Host "[HATA] Token bos olamaz. Kurulum iptal edildi." -ForegroundColor Red
+    return
+}
+
+# Onek dogrulamasi (istemci ile ayni: zrv_live_ veya eski rpsh_live_)
+if ($Token -like "rpsh_live_*") {
+    Write-Host "[UYARI] Eski bicimli (rpsh_live_) token kullaniliyor; yeni token'lar 'zrv_live_' ile baslar." -ForegroundColor Yellow
+} elseif ($Token -notlike "zrv_live_*") {
+    Write-Host "[HATA] Gecersiz token bicimi: token 'zrv_live_' ile baslamalidir." -ForegroundColor Red
     return
 }
 

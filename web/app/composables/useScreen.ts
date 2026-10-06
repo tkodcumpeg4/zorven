@@ -23,7 +23,37 @@ type FrameMsg = {
   /** Uzak ekranin GERCEK boyutu (olceklenmemis). Eski istemcilerde yok. */
   screen_w?: number
   screen_h?: number
+  seq?: number
+  capture_ms?: number
+  encode_ms?: number
   message?: string
+}
+
+/**
+ * Akis metrikleri. Saniyede bir yayinlanir.
+ *
+ * NEDEN GECIKME (latency) YOK: tek yonlu gecikmeyi olcmek istemci ile tarayici
+ * saatlerinin senkron olmasini gerektirir; degiller. Onun yerine GERCEKTEN
+ * olcebildiklerimizi veriyoruz — varis hizi, kare araligi ve kayip — cunku
+ * uydurma bir gecikme sayisi hic sayi olmamasindan kotudur.
+ */
+export interface ScreenStats {
+  /** Son saniyede gelen kare sayisi. */
+  fps: number
+  /** Son saniyedeki veri hizi (kilobit/sn). */
+  kbps: number
+  /** Kumulatif: sunucunun dusurdugu kare (seq atlamalarindan sayilir). */
+  dropped: number
+  /** Kumulatif: alinan kare. */
+  frames: number
+  /** Uzak makinede son karenin yakalanma suresi (ms). 0 => bildirilmedi. */
+  captureMs: number
+  /** Uzak makinede son karenin kodlanma suresi (ms). */
+  encodeMs: number
+  /** Son penceredeki ortalama kare araligi (ms). */
+  intervalMs: number
+  /** Son penceredeki EN KOTU kare araligi (ms) — takilmayi bu gosterir. */
+  maxIntervalMs: number
 }
 
 export function useScreen() {
@@ -39,6 +69,8 @@ export function useScreen() {
       onOpen: () => void
       onClose: (code?: number, reason?: string) => void
       mode?: string
+      /** Saniyedeki kare hedefi (0/undefined => sunucu varsayilani). */
+      fps?: number
       /** Kareyi bu genislige olcekle (0/undefined => tam cozunurluk). */
       maxWidth?: number
       /** Gelen karenin (olceklenmis) boyutu. */
@@ -49,6 +81,8 @@ export function useScreen() {
        * varsayilan bir sinir uygular (4K ekran 1600x900 gorunurdu).
        */
       onScreenSize?: (w: number, h: number) => void
+      /** Akis metrikleri; saniyede bir cagrilir. */
+      onStats?: (s: ScreenStats) => void
     },
   ): Promise<ScreenHandle> {
     const headers: Record<string, string> = {}
@@ -69,8 +103,44 @@ export function useScreen() {
     // Sunucu bu parametreleri dogrudan ScreenOpen'a gecirir (api/screen.go).
     const params = new URLSearchParams({ ticket })
     if (opts.mode) params.set('mode', opts.mode)
+    if (opts.fps && opts.fps > 0) params.set('fps', String(opts.fps))
     if (opts.maxWidth && opts.maxWidth > 0) params.set('max_width', String(opts.maxWidth))
     const ws = new WebSocket(`${base}/api/v1/clients/${clientID}/screen?${params}`)
+
+    // --- Metrikler ---
+    //
+    // Sunucu tikaninca kare dusurur (bkz. tunnel.Session). Kareler istemcide
+    // 1'den baslayarak ARTAN seq tasidigi icin atlamalari sayarak kaybi
+    // tarayicida tam olarak olcebiliyoruz — tahmin yok.
+    let frames = 0
+    let dropped = 0
+    let lastSeq = 0
+    let winFrames = 0
+    let winBytes = 0
+    let lastFrameAt = 0
+    let winIntervalSum = 0
+    let winIntervalMax = 0
+    let lastCaptureMs = 0
+    let lastEncodeMs = 0
+
+    const statsTimer = opts.onStats
+      ? setInterval(() => {
+          opts.onStats!({
+            fps: winFrames,
+            kbps: Math.round((winBytes * 8) / 1000),
+            dropped,
+            frames,
+            captureMs: lastCaptureMs,
+            encodeMs: lastEncodeMs,
+            intervalMs: winFrames > 1 ? Math.round(winIntervalSum / (winFrames - 1)) : 0,
+            maxIntervalMs: Math.round(winIntervalMax),
+          })
+          winFrames = 0
+          winBytes = 0
+          winIntervalSum = 0
+          winIntervalMax = 0
+        }, 1000)
+      : null
 
     // --- H.264 (MSE) durumu ---
     let mediaSource: MediaSource | null = null
@@ -150,6 +220,26 @@ export function useScreen() {
 
       const bytes = base64ToBytes(msg.data)
 
+      // --- Metrik toplama ---
+      frames++
+      winFrames++
+      winBytes += bytes.length
+      if (msg.seq) {
+        // seq 1'den baslar ve her karede bir artar; aradaki bosluk sunucunun
+        // dusurdugu kare sayisidir.
+        if (lastSeq && msg.seq > lastSeq + 1) dropped += msg.seq - lastSeq - 1
+        lastSeq = msg.seq
+      }
+      const now = performance.now()
+      if (lastFrameAt) {
+        const gap = now - lastFrameAt
+        winIntervalSum += gap
+        if (gap > winIntervalMax) winIntervalMax = gap
+      }
+      lastFrameAt = now
+      if (msg.capture_ms != null) lastCaptureMs = msg.capture_ms
+      if (msg.encode_ms != null) lastEncodeMs = msg.encode_ms
+
       if (codec === 'h264') {
         pending.push(bytes)
         pumpMSE()
@@ -169,6 +259,7 @@ export function useScreen() {
     }
 
     function close() {
+      if (statsTimer) clearInterval(statsTimer)
       try { ws.close() } catch { /* yok say */ }
       if (mediaSource && mediaSource.readyState === 'open') {
         try { mediaSource.endOfStream() } catch { /* yok say */ }

@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zorven"
+version = "0.1.0"
+description = "Zorven tunnel SDK — open a public tunnel to a local port programmatically (wraps the zorven CLI)."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "AGPL-3.0-or-later" }
+keywords = ["zorven", "tunnel", "ngrok", "reverse-proxy", "self-hosted"]
+authors = [{ name = "Zorven" }]
+urls = { Homepage = "https://zorven.app", Repository = "https://github.com/tkodcumpeg4/zorven" }
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["zorven*"]

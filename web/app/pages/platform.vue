@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import type { AdminGlobalStats, TenantWithCounts, ClientWithTenant, HostnameWithTenant } from '~/types/api'
+import type { AdminGlobalStats, TenantWithCounts, ClientWithTenant, HostnameWithTenant, AbuseReport } from '~/types/api'
 
 const api = useApi()
 const toast = useToast()
-const { platformAdmin, switchOrganization, organizations, check } = useAuth()
+const { platformAdmin, method, switchOrganization, organizations, check } = useAuth()
+const { setAdminTenant, clearAdminTenant } = useAdminTenant()
+const { clearActiveProject } = useActiveProject()
 const { relativeTime } = useFormat()
 const { t } = useI18n()
 
@@ -11,26 +13,30 @@ const stats = ref<AdminGlobalStats | null>(null)
 const tenants = ref<TenantWithCounts[]>([])
 const clients = ref<ClientWithTenant[]>([])
 const hostnames = ref<HostnameWithTenant[]>([])
+const abuseReports = ref<AbuseReport[]>([])
 
 const pending = ref(true)
 const switching = ref<string | null>(null)
-const activeTab = ref<'tenants' | 'clients' | 'hostnames'>('tenants')
+const freezing = ref<string | null>(null)
+const activeTab = ref<'tenants' | 'clients' | 'hostnames' | 'abuse'>('tenants')
 const error = ref('')
 
 async function loadData() {
   pending.value = true
   error.value = ''
   try {
-    const [st, tn, cl, hn] = await Promise.all([
+    const [st, tn, cl, hn, ab] = await Promise.all([
       api.adminGetStats(),
       api.adminListTenants(),
       api.adminListClients(),
       api.adminListHostnames(),
+      api.adminListAbuseReports(),
     ])
     stats.value = st
     tenants.value = tn
     clients.value = cl
     hostnames.value = hn
+    abuseReports.value = ab
   } catch (err: any) {
     error.value = err?.data?.error?.message || err?.message || t('platform.loadFailed')
     toast.error(error.value)
@@ -43,9 +49,17 @@ async function handleSwitchToTenant(ten: TenantWithCounts) {
   switching.value = ten.id
   try {
     await api.adminSwitchTenant(ten.id)
+    // Admin anahtarinin oturumu yok: secim X-Tenant-ID basligi ile tasinir.
+    if (method.value === 'key') {
+      if (ten.id === 'ten_default') clearAdminTenant()
+      else setAdminTenant(ten.id)
+    }
     toast.success(t('platform.switchedTo', { slug: ten.slug }))
+    // Proje slug'i kiraciya ozeldir; yeni kiraciya tasinmamali.
+    clearActiveProject()
     await check()
-    await navigateTo('/')
+    // Plan/proje/abonelik state'i yeni kiraciya gore tazelensin diye tam yenileme.
+    window.location.assign('/')
   } catch (err: any) {
     toast.error(err?.data?.error?.message || err?.message || t('platform.switchFailed'))
   } finally {
@@ -99,6 +113,19 @@ function getPlanBadgeClass(plan?: string) {
       return 'border border-emerald-300 bg-emerald-50 text-emerald-800 dark:bg-emerald-500/20 dark:text-emerald-300 dark:border-emerald-500/30 font-semibold'
     default:
       return 'bg-surface-2 text-fg-muted border border-line font-medium'
+  }
+}
+
+async function handleFreeze(fqdn: string, frozen: boolean) {
+  freezing.value = fqdn
+  try {
+    await api.adminFreeze({ fqdn, frozen })
+    toast.success(frozen ? t('platform.frozenOk', { fqdn }) : t('platform.unfrozenOk', { fqdn }))
+    await loadData()
+  } catch (err: any) {
+    toast.error(err?.data?.error?.message || err?.message || t('platform.freezeFailed'))
+  } finally {
+    freezing.value = null
   }
 }
 
@@ -210,9 +237,19 @@ onMounted(() => {
         <Icon name="lucide:globe" class="size-3.5" />
         <span>{{ t('platform.tabHostnames', { n: hostnames.length }) }}</span>
       </button>
+
+      <button
+        type="button"
+        class="flex cursor-pointer items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors"
+        :class="activeTab === 'abuse' ? 'bg-surface-2 text-fg border border-line' : 'text-fg-muted hover:text-fg'"
+        @click="activeTab = 'abuse'"
+      >
+        <Icon name="lucide:shield-alert" class="size-3.5" :class="abuseReports.length ? 'text-danger' : ''" />
+        <span>{{ t('platform.tabAbuse', { n: abuseReports.length }) }}</span>
+      </button>
+
     </div>
 
-    <!-- 1. Kiracılar Tablosu -->
     <PanelFrame v-if="activeTab === 'tenants'" :label="t('platform.allTenants')" :meta="`${tenants.length}`">
       <p v-if="pending" class="px-4 py-6 text-sm text-fg-muted">{{ t('common.loading') }}</p>
       <div v-else class="overflow-x-auto">
@@ -379,6 +416,64 @@ onMounted(() => {
       </div>
     </PanelFrame>
 
+    <!-- 4. Kötüye Kullanım Bildirimleri -->
+    <PanelFrame v-if="activeTab === 'abuse'" :label="t('platform.allAbuse')" :meta="`${abuseReports.length}`">
+      <p v-if="pending" class="px-4 py-6 text-sm text-fg-muted">{{ t('common.loading') }}</p>
+      <p v-else-if="!abuseReports.length" class="px-4 py-8 text-center text-sm text-fg-muted">
+        {{ t('platform.abuseEmpty') }}
+      </p>
+      <div v-else class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="border-b border-line text-left">
+              <th class="label-sys px-4 py-2 font-normal">{{ t('platform.colFqdn') }}</th>
+              <th class="label-sys px-4 py-2 font-normal">{{ t('platform.colReason') }}</th>
+              <th class="label-sys px-4 py-2 font-normal">{{ t('platform.colReporter') }}</th>
+              <th class="label-sys px-4 py-2 font-normal">{{ t('platform.colCreated') }}</th>
+              <th class="px-4 py-2 text-right"><span class="sr-only">{{ t('platform.colAction') }}</span></th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-line">
+            <tr v-for="rep in abuseReports" :key="rep.id" class="hover:bg-surface-2/40">
+              <td class="px-4 py-2.5 font-mono text-xs">
+                <a :href="`https://${rep.fqdn}`" target="_blank" rel="noopener noreferrer" class="font-medium text-fg hover:text-accent hover:underline">
+                  {{ rep.fqdn }}
+                </a>
+              </td>
+              <td class="px-4 py-2.5 text-xs text-fg-muted max-w-md">
+                <span class="line-clamp-2">{{ rep.reason || '—' }}</span>
+              </td>
+              <td class="px-4 py-2.5 font-mono text-xs text-fg-subtle">{{ rep.reporter_ip || '—' }}</td>
+              <td class="px-4 py-2.5 text-xs text-fg-muted">{{ relativeTime(rep.created_at) }}</td>
+              <td class="px-4 py-2.5 text-right">
+                <div class="flex items-center justify-end gap-1.5">
+                  <button
+                    type="button"
+                    :disabled="freezing === rep.fqdn"
+                    class="cursor-pointer inline-flex items-center gap-1 rounded border border-danger/30 px-2.5 py-1 text-xs text-danger hover:bg-danger/10 disabled:opacity-50"
+                    @click="handleFreeze(rep.fqdn, true)"
+                  >
+                    <Icon v-if="freezing === rep.fqdn" name="lucide:loader-2" class="size-3 animate-spin" />
+                    <Icon v-else name="lucide:snowflake" class="size-3" />
+                    <span>{{ t('platform.freeze') }}</span>
+                  </button>
+                  <button
+                    type="button"
+                    :disabled="freezing === rep.fqdn"
+                    class="cursor-pointer inline-flex items-center gap-1 rounded border border-line px-2.5 py-1 text-xs text-fg-muted hover:border-emerald-500/40 hover:text-emerald-400 disabled:opacity-50"
+                    @click="handleFreeze(rep.fqdn, false)"
+                  >
+                    <Icon name="lucide:sun" class="size-3" />
+                    <span>{{ t('platform.unfreeze') }}</span>
+                  </button>
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </PanelFrame>
+
     <!-- Modal: Kiracı Planını Değiştir -->
     <div
       v-if="showPlanModal && selectedTenant"
@@ -410,6 +505,7 @@ onMounted(() => {
               </option>
             </select>
           </div>
+
         </div>
 
         <div class="flex justify-end gap-2 pt-4 border-t border-line mt-4">

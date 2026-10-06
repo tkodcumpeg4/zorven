@@ -40,18 +40,28 @@ func NewSender(relayAddr, domain string) *Sender {
 // Send, tek alicili duz-metin bir e-posta gonderir. Yanit ise inReplyTo,
 // yanitlanan mesajin Message-ID'sidir (bos gecilebilir). Uretilen Message-ID
 // doner (kayit icin).
-func (s *Sender) Send(from, to, subject, body, inReplyTo string, attachments []Attachment) (string, error) {
+// htmlBody bos gecilebilir; doluysa e-posta multipart/alternative (text + html)
+// olarak gonderilir (istemciler HTML'i gosterir, metin fallback kalir).
+func (s *Sender) Send(from, to, subject, body, htmlBody, inReplyTo string, attachments []Attachment) (string, error) {
 	if s.relayAddr == "" {
 		return "", fmt.Errorf("mail relay yapilandirilmadi")
 	}
-	from = strings.TrimSpace(from)
-	to = strings.TrimSpace(to)
-	if from == "" || to == "" {
-		return "", fmt.Errorf("gonderen ve alici zorunlu")
+	// Gonderen ve alici TEK ayristiricidan (ParseAddress) gecer; basliga ve
+	// SMTP zarfina ayni yalin adres yazilir (kisit/zarf ayrismasi olmasin).
+	var err error
+	if from, err = ParseAddress(from); err != nil {
+		return "", fmt.Errorf("gonderen adresi gecersiz: %w", err)
+	}
+	if to, err = ParseAddress(to); err != nil {
+		return "", fmt.Errorf("alici adresi gecersiz: %w", err)
+	}
+	inReplyTo = strings.TrimSpace(inReplyTo)
+	if !ValidHeaderValue(inReplyTo) {
+		return "", fmt.Errorf("in-reply-to gecersiz")
 	}
 
 	messageID := fmt.Sprintf("<%s@%s>", randHex(16), s.domain)
-	msg := s.buildMessage(from, to, subject, body, inReplyTo, messageID, attachments)
+	msg := s.buildMessage(from, to, subject, body, htmlBody, inReplyTo, messageID, attachments)
 
 	if err := s.deliver(from, to, []byte(msg)); err != nil {
 		return "", err
@@ -65,7 +75,7 @@ func normalizeCRLF(s string) string {
 	return strings.ReplaceAll(s, "\n", "\r\n")
 }
 
-func (s *Sender) buildMessage(from, to, subject, body, inReplyTo, messageID string, attachments []Attachment) string {
+func (s *Sender) buildMessage(from, to, subject, body, htmlBody, inReplyTo, messageID string, attachments []Attachment) string {
 	var b strings.Builder
 	b.WriteString("From: " + from + "\r\n")
 	b.WriteString("To: " + to + "\r\n")
@@ -78,33 +88,72 @@ func (s *Sender) buildMessage(from, to, subject, body, inReplyTo, messageID stri
 	}
 	b.WriteString("MIME-Version: 1.0\r\n")
 
-	// Ek yoksa duz text/plain; varsa multipart/mixed (metin + ekler).
-	if len(attachments) == 0 {
-		b.WriteString("Content-Type: text/plain; charset=\"utf-8\"\r\n")
-		b.WriteString("Content-Transfer-Encoding: 8bit\r\n\r\n")
-		b.WriteString(normalizeCRLF(body))
+	hasHTML := strings.TrimSpace(htmlBody) != ""
+	hasAtt := len(attachments) > 0
+
+	// buildBody, govde blogunu (yalniz text; veya text+html multipart/alternative)
+	// olusturur ve (Content-Type basligi, ham govde) doner.
+	buildBody := func() (string, string) {
+		if !hasHTML {
+			return "text/plain; charset=\"utf-8\"", normalizeCRLF(body)
+		}
+		var mp strings.Builder
+		w := multipart.NewWriter(&mp)
+		th := textproto.MIMEHeader{}
+		th.Set("Content-Type", "text/plain; charset=\"utf-8\"")
+		th.Set("Content-Transfer-Encoding", "8bit")
+		if pw, err := w.CreatePart(th); err == nil {
+			_, _ = pw.Write([]byte(normalizeCRLF(body)))
+		}
+		hh := textproto.MIMEHeader{}
+		hh.Set("Content-Type", "text/html; charset=\"utf-8\"")
+		hh.Set("Content-Transfer-Encoding", "8bit")
+		if pw, err := w.CreatePart(hh); err == nil {
+			_, _ = pw.Write([]byte(normalizeCRLF(htmlBody)))
+		}
+		_ = w.Close()
+		return "multipart/alternative; boundary=\"" + w.Boundary() + "\"", mp.String()
+	}
+
+	// Ek yok: govde blogu dogrudan mesaj govdesidir.
+	if !hasAtt {
+		ct, content := buildBody()
+		b.WriteString("Content-Type: " + ct + "\r\n")
+		if !hasHTML {
+			b.WriteString("Content-Transfer-Encoding: 8bit\r\n")
+		}
+		b.WriteString("\r\n")
+		b.WriteString(content)
 		return b.String()
 	}
 
+	// Ek var: multipart/mixed { govde blogu, ekler... }.
 	var mp strings.Builder
 	w := multipart.NewWriter(&mp)
 	b.WriteString("Content-Type: multipart/mixed; boundary=\"" + w.Boundary() + "\"\r\n\r\n")
 
-	// 1) Metin govdesi
-	textHdr := textproto.MIMEHeader{}
-	textHdr.Set("Content-Type", "text/plain; charset=\"utf-8\"")
-	textHdr.Set("Content-Transfer-Encoding", "8bit")
-	if pw, err := w.CreatePart(textHdr); err == nil {
-		_, _ = pw.Write([]byte(normalizeCRLF(body)))
+	// 1) Govde (yalniz text; veya nested multipart/alternative)
+	bodyCT, bodyContent := buildBody()
+	bodyHdr := textproto.MIMEHeader{}
+	bodyHdr.Set("Content-Type", bodyCT)
+	if !hasHTML {
+		bodyHdr.Set("Content-Transfer-Encoding", "8bit")
+	}
+	if pw, err := w.CreatePart(bodyHdr); err == nil {
+		_, _ = pw.Write([]byte(bodyContent))
 	}
 
 	// 2) Ekler (base64)
 	for _, att := range attachments {
-		ct := att.ContentType
-		if ct == "" {
-			ct = "application/octet-stream"
+		// Content-Type kullanicidan gelir: ham yazilirsa baslik enjeksiyonu olur.
+		// Gecerli bir medya tipine ayristirilip yeniden bicimlenir.
+		ct := "application/octet-stream"
+		if mt, params, perr := mime.ParseMediaType(att.ContentType); perr == nil && ValidHeaderValue(att.ContentType) {
+			if f := mime.FormatMediaType(mt, params); f != "" {
+				ct = f
+			}
 		}
-		fn := att.Filename
+		fn := strings.NewReplacer("\r", "", "\n", "", "\"", "'", "\\", "_").Replace(strings.TrimSpace(att.Filename))
 		if fn == "" {
 			fn = "dosya"
 		}
@@ -158,10 +207,10 @@ func (s *Sender) deliver(from, to string, msg []byte) error {
 		}
 	}
 
-	if err := c.Mail(addrOnly(from)); err != nil {
+	if err := c.Mail(from); err != nil {
 		return fmt.Errorf("MAIL FROM reddedildi: %w", err)
 	}
-	if err := c.Rcpt(addrOnly(to)); err != nil {
+	if err := c.Rcpt(to); err != nil {
 		return fmt.Errorf("RCPT TO reddedildi: %w", err)
 	}
 	w, err := c.Data()
@@ -175,17 +224,6 @@ func (s *Sender) deliver(from, to string, msg []byte) error {
 		return fmt.Errorf("DATA kapatilamadi: %w", err)
 	}
 	return c.Quit()
-}
-
-// addrOnly, "Ad <a@b.com>" -> "a@b.com". Zarf (envelope) icin saf adres gerekir.
-func addrOnly(s string) string {
-	s = strings.TrimSpace(s)
-	if i := strings.LastIndex(s, "<"); i >= 0 {
-		if j := strings.Index(s[i:], ">"); j >= 0 {
-			return strings.TrimSpace(s[i+1 : i+j])
-		}
-	}
-	return s
 }
 
 func randHex(n int) string {

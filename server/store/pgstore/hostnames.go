@@ -11,9 +11,14 @@ import (
 )
 
 // hostnameCols, tum hostname sorgularinin ortak kolon listesi.
-const hostnameCols = `id, tenant_id, COALESCE(tunnel_id, ''), fqdn, type, verified, COALESCE(verify_token, ''), created_at`
+const hostnameCols = `id, tenant_id, COALESCE(tunnel_id, ''), fqdn, type, verified, COALESCE(verify_token, ''), created_at, COALESCE(project_id, '')`
 
-func (s *Store) AddHostname(ctx context.Context, tenantID, tunnelID, fqdn, typ string) (store.Hostname, error) {
+func (s *Store) AddHostnameWithProject(ctx context.Context, tenantID, tunnelID, fqdn, typ, projectID string) (store.Hostname, error) {
+	if projectID == "" {
+		if def, err := s.GetDefaultProject(ctx, tenantID); err == nil {
+			projectID = def.ID
+		}
+	}
 	var tunnelVal *string
 	if tunnelID != "" {
 		tunnelVal = &tunnelID
@@ -21,6 +26,7 @@ func (s *Store) AddHostname(ctx context.Context, tenantID, tunnelID, fqdn, typ s
 	h := store.Hostname{
 		ID:        newID("hst"),
 		TenantID:  tenantID,
+		ProjectID: projectID,
 		TunnelID:  tunnelID,
 		FQDN:      fqdn,
 		Type:      typ,
@@ -28,9 +34,9 @@ func (s *Store) AddHostname(ctx context.Context, tenantID, tunnelID, fqdn, typ s
 		CreatedAt: time.Now().UTC(),
 	}
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO hostnames (id, tenant_id, tunnel_id, fqdn, type, verified, created_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-		h.ID, h.TenantID, tunnelVal, h.FQDN, h.Type, h.Verified, h.CreatedAt)
+		`INSERT INTO hostnames (id, tenant_id, tunnel_id, fqdn, type, verified, created_at, project_id)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+		h.ID, h.TenantID, tunnelVal, h.FQDN, h.Type, h.Verified, h.CreatedAt, h.ProjectID)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
@@ -41,7 +47,15 @@ func (s *Store) AddHostname(ctx context.Context, tenantID, tunnelID, fqdn, typ s
 	return h, nil
 }
 
+func (s *Store) AddHostname(ctx context.Context, tenantID, tunnelID, fqdn, typ string) (store.Hostname, error) {
+	return s.AddHostnameWithProject(ctx, tenantID, tunnelID, fqdn, typ, "")
+}
+
 func (s *Store) AddCustomHostname(ctx context.Context, tenantID, tunnelID, fqdn, verifyToken string) (store.Hostname, error) {
+	var projectID string
+	if def, err := s.GetDefaultProject(ctx, tenantID); err == nil {
+		projectID = def.ID
+	}
 	var tunnelVal *string
 	if tunnelID != "" {
 		tunnelVal = &tunnelID
@@ -49,6 +63,7 @@ func (s *Store) AddCustomHostname(ctx context.Context, tenantID, tunnelID, fqdn,
 	h := store.Hostname{
 		ID:          newID("hst"),
 		TenantID:    tenantID,
+		ProjectID:   projectID,
 		TunnelID:    tunnelID,
 		FQDN:        fqdn,
 		Type:        store.HostTypeCustom,
@@ -57,9 +72,9 @@ func (s *Store) AddCustomHostname(ctx context.Context, tenantID, tunnelID, fqdn,
 		CreatedAt:   time.Now().UTC(),
 	}
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO hostnames (id, tenant_id, tunnel_id, fqdn, type, verified, verify_token, created_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-		h.ID, h.TenantID, tunnelVal, h.FQDN, h.Type, h.Verified, h.VerifyToken, h.CreatedAt)
+		`INSERT INTO hostnames (id, tenant_id, tunnel_id, fqdn, type, verified, verify_token, created_at, project_id)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+		h.ID, h.TenantID, tunnelVal, h.FQDN, h.Type, h.Verified, h.VerifyToken, h.CreatedAt, h.ProjectID)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
@@ -108,7 +123,7 @@ func (s *Store) VerifyHostname(ctx context.Context, tenantID, id string) (store.
 		 WHERE id = $1 AND tenant_id = $2
 		 RETURNING `+hostnameCols,
 		id, tenantID).
-		Scan(&h.ID, &h.TenantID, &h.TunnelID, &h.FQDN, &h.Type, &h.Verified, &h.VerifyToken, &h.CreatedAt)
+		Scan(&h.ID, &h.TenantID, &h.TunnelID, &h.FQDN, &h.Type, &h.Verified, &h.VerifyToken, &h.CreatedAt, &h.ProjectID)
 	if err != nil {
 		return store.Hostname{}, store.ErrNotFound
 	}
@@ -120,7 +135,7 @@ func (s *Store) GetHostnameByID(ctx context.Context, tenantID, id string) (store
 	err := s.pool.QueryRow(ctx,
 		`SELECT `+hostnameCols+` FROM hostnames WHERE id = $1 AND tenant_id = $2`,
 		id, tenantID).
-		Scan(&h.ID, &h.TenantID, &h.TunnelID, &h.FQDN, &h.Type, &h.Verified, &h.VerifyToken, &h.CreatedAt)
+		Scan(&h.ID, &h.TenantID, &h.TunnelID, &h.FQDN, &h.Type, &h.Verified, &h.VerifyToken, &h.CreatedAt, &h.ProjectID)
 	if err != nil {
 		return store.Hostname{}, store.ErrNotFound
 	}
@@ -133,7 +148,7 @@ func (s *Store) GetHostnameByFQDN(ctx context.Context, fqdn string) (store.Hostn
 	err := s.pool.QueryRow(ctx,
 		`SELECT `+hostnameCols+` FROM hostnames WHERE lower(fqdn) = lower($1)`,
 		fqdn).
-		Scan(&h.ID, &h.TenantID, &h.TunnelID, &h.FQDN, &h.Type, &h.Verified, &h.VerifyToken, &h.CreatedAt)
+		Scan(&h.ID, &h.TenantID, &h.TunnelID, &h.FQDN, &h.Type, &h.Verified, &h.VerifyToken, &h.CreatedAt, &h.ProjectID)
 	if err != nil {
 		return store.Hostname{}, store.ErrNotFound
 	}
@@ -144,6 +159,15 @@ func (s *Store) ListHostnames(ctx context.Context, tenantID string) ([]store.Hos
 	return s.queryHostnames(ctx,
 		`SELECT `+hostnameCols+` FROM hostnames WHERE tenant_id = $1 ORDER BY created_at`,
 		tenantID)
+}
+
+func (s *Store) ListHostnamesByProject(ctx context.Context, tenantID, projectID string) ([]store.Hostname, error) {
+	if projectID == "" {
+		return s.ListHostnames(ctx, tenantID)
+	}
+	return s.queryHostnames(ctx,
+		`SELECT `+hostnameCols+` FROM hostnames WHERE tenant_id = $1 AND project_id = $2 ORDER BY created_at`,
+		tenantID, projectID)
 }
 
 func (s *Store) ListHostnamesByTunnel(ctx context.Context, tenantID, tunnelID string) ([]store.Hostname, error) {
@@ -165,7 +189,7 @@ func (s *Store) ListHostnamesByClient(ctx context.Context, clientID string) ([]s
 
 // hostnameColsQualified, JOIN'li sorgularda "h." onekiyle kullanilan kolon
 // listesi; hostnameCols ile ayni sirada olmali (Scan sirasi buna bagli).
-const hostnameColsQualified = `h.id, h.tenant_id, h.tunnel_id, h.fqdn, h.type, h.verified, COALESCE(h.verify_token, ''), h.created_at`
+const hostnameColsQualified = `h.id, h.tenant_id, h.tunnel_id, h.fqdn, h.type, h.verified, COALESCE(h.verify_token, ''), h.created_at, COALESCE(h.project_id, '')`
 
 func (s *Store) queryHostnames(ctx context.Context, sql string, args ...any) ([]store.Hostname, error) {
 	rows, err := s.pool.Query(ctx, sql, args...)
@@ -177,7 +201,7 @@ func (s *Store) queryHostnames(ctx context.Context, sql string, args ...any) ([]
 	var out []store.Hostname
 	for rows.Next() {
 		var h store.Hostname
-		if err := rows.Scan(&h.ID, &h.TenantID, &h.TunnelID, &h.FQDN, &h.Type, &h.Verified, &h.VerifyToken, &h.CreatedAt); err != nil {
+		if err := rows.Scan(&h.ID, &h.TenantID, &h.TunnelID, &h.FQDN, &h.Type, &h.Verified, &h.VerifyToken, &h.CreatedAt, &h.ProjectID); err != nil {
 			return nil, err
 		}
 		out = append(out, h)
@@ -218,10 +242,25 @@ func (s *Store) IsReservedName(ctx context.Context, name string) (bool, error) {
 // Dogrulanmamis (verified=false) custom domainler tunele iletilmez.
 func (s *Store) ListHostRoutes(ctx context.Context) ([]store.HostRoute, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT h.fqdn, h.tenant_id, t.id, t.client_id, t.target, t.enabled
+		`SELECT h.fqdn, h.tenant_id, t.id, t.client_id, t.target, t.enabled,
+		        t.proto, t.exposure,
+		        COALESCE(ap.mode,'none'), COALESCE(ap.config,'{}'::jsonb), COALESCE(ap.enabled,false),
+		        COALESCE(sub.plan,'free'), t.frozen,
+		        COALESCE(rep.clients, '{}') AS replica_clients,
+		        COALESCE(tp.config,'{}'::jsonb), COALESCE(tp.enabled,false),
+		        COALESCE(mt.enabled,false), COALESCE(mt.ca_pem,'')
 		 FROM hostnames h
 		 JOIN tunnels t ON t.id = h.tunnel_id
-		 WHERE h.type != 'custom' OR h.verified = true
+		 LEFT JOIN tunnel_access_policies ap ON ap.tunnel_id = t.id
+		 LEFT JOIN tunnel_traffic_policies tp ON tp.tunnel_id = t.id
+		 LEFT JOIN tunnel_mtls mt ON mt.tunnel_id = t.id
+		 LEFT JOIN subscriptions sub ON sub.tenant_id = t.tenant_id
+		 LEFT JOIN (SELECT tunnel_id, array_agg(client_id) AS clients
+		            FROM tunnel_replicas GROUP BY tunnel_id) rep ON rep.tunnel_id = t.id
+		 WHERE (h.type != 'custom' OR h.verified = true)
+		   -- Ozel kaynaklar (F17) internete ASLA yonlendirilmez: yanlislikla bir
+		   -- ad baglansa bile burada elenir (savunma derinligi).
+		   AND t.exposure != 'private'
 		 ORDER BY h.created_at`)
 	if err != nil {
 		return nil, fmt.Errorf("yonlendirmeler listelenemedi: %w", err)
@@ -232,7 +271,10 @@ func (s *Store) ListHostRoutes(ctx context.Context) ([]store.HostRoute, error) {
 	for rows.Next() {
 		var r store.HostRoute
 		if err := rows.Scan(&r.FQDN, &r.TenantID, &r.TunnelID, &r.ClientID,
-			&r.Target, &r.Enabled); err != nil {
+			&r.Target, &r.Enabled, &r.Proto, &r.Exposure,
+			&r.AccessMode, &r.AccessConfig, &r.AccessEnabled, &r.Plan, &r.Frozen,
+			&r.ReplicaClientIDs, &r.TrafficConfig, &r.TrafficEnabled,
+			&r.MTLSEnabled, &r.MTLSCAPem); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

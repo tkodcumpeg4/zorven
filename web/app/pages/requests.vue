@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import type { RequestLog, Tunnel, LogFilter } from '~/types/api'
+import type { RequestLog, Tunnel, LogFilter, RequestDetail, ReplayResult, ReplayOverrides } from '~/types/api'
 
 const api = useApi()
+const toast = useToast()
 const { duration, bytes, clock } = useFormat()
 const { t } = useI18n()
 
@@ -10,6 +11,135 @@ const tunnels = ref<Tunnel[]>([])
 const pending = ref(true)
 const live = ref(true)
 const selected = ref<RequestLog | null>(null)
+
+// --- FAZ 2: İstek inspector (yakalama + detay + replay) ---
+const captureEnabled = ref(false)
+const captureBusy = ref(false)
+const detail = ref<RequestDetail | null>(null)
+const detailLoading = ref(false)
+const replaying = ref(false)
+const replayResult = ref<ReplayResult | null>(null)
+
+async function toggleCapture() {
+  captureBusy.value = true
+  try {
+    captureEnabled.value = await api.setCaptureEnabled(!captureEnabled.value)
+    toast.info(captureEnabled.value ? t('requests.captureOn') : t('requests.captureOff'))
+  } catch (e: any) {
+    toast.error(e?.data?.error?.message || t('requests.captureFailed'))
+  } finally {
+    captureBusy.value = false
+  }
+}
+
+// --- F08: düzenle & replay ---
+const editing = ref(false)
+const edMethod = ref('')
+const edPath = ref('')
+const edQuery = ref('')
+const edBody = ref('')
+const edHeaders = ref('')        // "Ad: deger" satirlari
+const edRemoveHeaders = ref('')  // virgulle ayrilmis
+const edTunnelID = ref('')
+
+// Formu yakalamadan doldur. Düzenleme açılınca orijinali göstermek, kullanıcının
+// neyi değiştirdiğini görmesini sağlar; boş formda ne değiştiği belirsiz kalırdı.
+function resetEditor() {
+  const d = detail.value
+  edMethod.value = d?.method || ''
+  edPath.value = d?.path || ''
+  edQuery.value = d?.query || ''
+  edBody.value = d?.req_body || ''
+  edHeaders.value = headerLines(d?.req_headers)
+  edRemoveHeaders.value = ''
+  edTunnelID.value = d?.tunnel_id || ''
+}
+
+function toggleEditor() {
+  editing.value = !editing.value
+  if (editing.value) resetEditor()
+}
+
+// "Ad: deger" satirlarini haritaya cevirir. Ad bos veya iki nokta yoksa satir atlanir.
+function parseHeaderLines(text: string): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const line of text.split('\n')) {
+    const i = line.indexOf(':')
+    if (i <= 0) continue
+    const k = line.slice(0, i).trim()
+    const v = line.slice(i + 1).trim()
+    if (k) out[k] = v
+  }
+  return out
+}
+
+// Yalnizca GERCEKTEN degisen alanlari gonderiyoruz: degismemis alani gondermek
+// sunucuda gereksiz dogrulama yapar ve "neyi degistirdim" bilgisini bulanik birakir.
+function buildOverrides(): ReplayOverrides | undefined {
+  const d = detail.value
+  if (!d) return undefined
+  const ov: ReplayOverrides = {}
+  if (edMethod.value.trim() && edMethod.value.trim().toUpperCase() !== (d.method || '').toUpperCase()) {
+    ov.method = edMethod.value.trim()
+  }
+  if (edPath.value !== (d.path || '')) ov.path = edPath.value
+  if (edQuery.value !== (d.query || '')) ov.query = edQuery.value
+  if (edBody.value !== (d.req_body || '')) ov.body = edBody.value
+  if (edTunnelID.value.trim() && edTunnelID.value.trim() !== d.tunnel_id) ov.tunnel_id = edTunnelID.value.trim()
+
+  const headers = parseHeaderLines(edHeaders.value)
+  const original = parseHeaderLines(headerLines(d.req_headers))
+  const changed: Record<string, string> = {}
+  for (const [k, v] of Object.entries(headers)) {
+    if (original[k] !== v) changed[k] = v
+  }
+  if (Object.keys(changed).length) ov.headers = changed
+
+  const remove = edRemoveHeaders.value.split(',').map(x => x.trim()).filter(Boolean)
+  // Formdan tamamen silinen basliklar da kaldirilmali; aksi halde kullanici
+  // satiri sildigi halde baslik gitmezdi.
+  for (const k of Object.keys(original)) {
+    if (!(k in headers) && !remove.includes(k)) remove.push(k)
+  }
+  if (remove.length) ov.remove_headers = remove
+
+  return Object.keys(ov).length ? ov : undefined
+}
+
+// Seçim değişince tam detayı getir (yakalama varsa).
+watch(selected, async (r) => {
+  detail.value = null
+  replayResult.value = null
+  editing.value = false
+  if (!r) return
+  detailLoading.value = true
+  try {
+    detail.value = await api.getRequestDetail(r.id)
+  } catch {
+    detail.value = null // yakalama kapalı veya kayıt düşmüş
+  } finally {
+    detailLoading.value = false
+  }
+})
+
+async function doReplay() {
+  if (!selected.value) return
+  replaying.value = true
+  replayResult.value = null
+  try {
+    replayResult.value = await api.replayRequest(selected.value.id, editing.value ? buildOverrides() : undefined)
+    toast.success(t('requests.replayDone'))
+  } catch (e: any) {
+    toast.error(e?.data?.error?.message || e?.message || t('requests.replayFailed'))
+  } finally {
+    replaying.value = false
+  }
+}
+
+function headerLines(h?: Record<string, string[]>): string {
+  if (!h) return ''
+  return Object.entries(h).map(([k, vs]) => `${k}: ${(vs || []).join(', ')}`).join('\n')
+}
 
 // --- Gelişmiş filtreler ---
 const fMethod = ref('')
@@ -44,11 +174,17 @@ function buildFilter(): LogFilter {
   return f
 }
 
+// Hata olursa spinner kalici olmasin; kullaniciya toast gosterilir.
 async function applyFilters() {
   pending.value = true
-  rows.value = await api.listRequests(buildFilter())
-  selected.value = null
-  pending.value = false
+  try {
+    rows.value = await api.listRequests(buildFilter())
+    selected.value = null
+  } catch (e: any) {
+    toast.error(e?.data?.error?.message || t('requests.loadFailed'))
+  } finally {
+    pending.value = false
+  }
 }
 
 function clearFilters() {
@@ -72,14 +208,21 @@ function matches(r: RequestLog): boolean {
 }
 
 let stopStream: (() => void) | undefined
+// Kullanici await sirasinda sayfadan cikarsa akis unmount'tan sonra acilmasin.
+let unmounted = false
+onUnmounted(() => {
+  unmounted = true
+  stopStream?.()
+})
 onMounted(async () => {
-  tunnels.value = await api.listTunnels()
+  try { tunnels.value = await api.listTunnels() } catch { /* hostname listesi bos kalir */ }
+  try { captureEnabled.value = await api.getCaptureEnabled() } catch { /* yok say */ }
   await applyFilters()
+  if (unmounted) return
   stopStream = api.streamRequests((r) => {
     if (live.value && matches(r)) rows.value = [r, ...rows.value].slice(0, 1000)
   })
 })
-onUnmounted(() => stopStream?.())
 
 function exportData(fmt: 'csv' | 'json') {
   let content: string, mime: string, ext: string
@@ -109,6 +252,14 @@ function exportData(fmt: 'csv' | 'json') {
         <p class="mt-0.5 text-sm text-fg-muted">{{ t('requests.subtitle') }}</p>
       </div>
       <div class="flex items-center gap-2">
+        <button
+          class="flex cursor-pointer items-center gap-1.5 rounded border px-2.5 py-1.5 font-mono text-[11px] transition-colors disabled:opacity-50"
+          :class="captureEnabled ? 'border-accent/40 bg-accent/10 text-accent' : 'border-line text-fg-muted hover:bg-surface-2'"
+          :aria-pressed="captureEnabled" :disabled="captureBusy" :title="t('requests.captureHint')" @click="toggleCapture"
+        >
+          <Icon :name="captureEnabled ? 'lucide:circle-dot' : 'lucide:circle'" class="size-3" />
+          {{ captureEnabled ? t('requests.captureActive') : t('requests.captureIdle') }}
+        </button>
         <button
           class="flex cursor-pointer items-center gap-1.5 rounded border border-line px-2.5 py-1.5 font-mono text-[11px] transition-colors hover:bg-surface-2"
           :class="live ? 'text-accent' : 'text-fg-muted'" :aria-pressed="live" @click="live = !live"
@@ -206,6 +357,124 @@ function exportData(fmt: 'csv' | 'json') {
             <div><dt class="label-sys mb-1">{{ t('requests.bytesOut') }}</dt><dd class="font-mono text-xs tabular-nums text-fg-subtle">{{ bytes(selected.bytes_out) }}</dd></div>
           </div>
           <div><dt class="label-sys mb-1">{{ t('requests.tunnelId') }}</dt><dd class="break-all font-mono text-[11px] text-fg-subtle">{{ selected.tunnel_id }}</dd></div>
+
+          <!-- FAZ 2: tam yakalama (header + gövde) + Replay -->
+          <div class="border-t border-line pt-3">
+            <p v-if="detailLoading" class="text-xs text-fg-muted">{{ t('common.loading') }}</p>
+            <div v-else-if="!detail" class="rounded border border-dashed border-line p-2.5 text-[11px] text-fg-subtle">
+              {{ captureEnabled ? t('requests.notCaptured') : t('requests.enableCaptureHint') }}
+            </div>
+            <div v-else class="space-y-3">
+              <div class="flex gap-1.5">
+                <button
+                  :disabled="replaying"
+                  class="flex flex-1 cursor-pointer items-center justify-center gap-1.5 rounded bg-accent px-3 py-1.5 text-xs font-semibold text-on-accent transition hover:opacity-90 disabled:opacity-50"
+                  @click="doReplay"
+                >
+                  <Icon name="lucide:repeat-2" class="size-3.5" :class="{ 'animate-spin': replaying }" />
+                  {{ replaying ? t('requests.replaying') : (editing ? t('requests.replayEdited') : t('requests.replay')) }}
+                </button>
+                <button
+                  class="flex cursor-pointer items-center gap-1.5 rounded border border-line px-2.5 py-1.5 text-xs text-fg-muted transition hover:text-fg"
+                  :class="editing ? 'border-accent text-fg' : ''"
+                  @click="toggleEditor"
+                >
+                  <Icon name="lucide:pencil" class="size-3.5" />
+                  {{ t('requests.edit') }}
+                </button>
+              </div>
+
+              <!-- F08: duzenle & replay -->
+              <div v-if="editing" class="space-y-1.5 rounded border border-accent/40 bg-surface-1 p-2">
+                <div class="flex items-center justify-between">
+                  <span class="label-sys">{{ t('requests.editSection') }}</span>
+                  <button class="text-[10px] text-fg-muted hover:text-fg" @click="resetEditor">{{ t('requests.resetEdits') }}</button>
+                </div>
+                <div class="grid grid-cols-3 gap-1.5">
+                  <input v-model="edMethod" type="text" placeholder="GET" class="rounded border border-line bg-bg px-2 py-1 font-mono text-[11px] text-fg outline-none focus:border-accent">
+                  <input v-model="edPath" type="text" placeholder="/api/x" class="col-span-2 rounded border border-line bg-bg px-2 py-1 font-mono text-[11px] text-fg outline-none focus:border-accent">
+                </div>
+                <input v-model="edQuery" type="text" :placeholder="t('requests.queryPh')" class="w-full rounded border border-line bg-bg px-2 py-1 font-mono text-[11px] text-fg outline-none focus:border-accent">
+                <textarea v-model="edHeaders" rows="3" :placeholder="t('requests.headersPh')" class="w-full rounded border border-line bg-bg px-2 py-1 font-mono text-[10px] text-fg outline-none focus:border-accent" />
+                <input v-model="edRemoveHeaders" type="text" :placeholder="t('requests.removeHeadersPh')" class="w-full rounded border border-line bg-bg px-2 py-1 font-mono text-[11px] text-fg outline-none focus:border-accent">
+                <textarea v-model="edBody" rows="4" :placeholder="t('requests.bodyPh')" class="w-full rounded border border-line bg-bg px-2 py-1 font-mono text-[10px] text-fg outline-none focus:border-accent" />
+                <input v-model="edTunnelID" type="text" :placeholder="t('requests.targetTunnelPh')" class="w-full rounded border border-line bg-bg px-2 py-1 font-mono text-[11px] text-fg outline-none focus:border-accent">
+                <p class="text-[10px] leading-relaxed text-fg-subtle">{{ t('requests.editHint') }}</p>
+              </div>
+
+              <div v-if="replayResult" class="rounded border border-line bg-surface-1 p-2">
+                <div class="mb-1 flex items-center gap-2"><span class="label-sys">{{ t('requests.replayResult') }}</span><StatusCode :code="replayResult.status" /></div>
+                <pre class="max-h-32 overflow-auto whitespace-pre-wrap break-all rounded bg-bg p-2 font-mono text-[10px] text-fg-muted">{{ replayResult.body }}{{ replayResult.body_truncated ? '…' : '' }}</pre>
+              </div>
+
+              <!-- F09: orijinal vs replay farki -->
+              <div v-if="replayResult?.diff" class="rounded border border-line bg-surface-1 p-2">
+                <div class="mb-1.5 flex items-center gap-2">
+                  <span class="label-sys">{{ t('requests.diffSection') }}</span>
+                  <span v-if="replayResult.diff.truncated" class="text-[10px] text-warn">({{ t('requests.truncated') }})</span>
+                </div>
+
+                <div class="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px]">
+                  <span class="flex items-center gap-1">
+                    <span class="text-fg-subtle">{{ t('requests.status') }}</span>
+                    <StatusCode :code="replayResult.diff.old_status" />
+                    <Icon name="lucide:arrow-right" class="size-3 text-fg-subtle" />
+                    <StatusCode :code="replayResult.diff.new_status" />
+                  </span>
+                  <span class="font-mono tabular-nums text-fg-subtle">
+                    {{ replayResult.diff.old_duration_ms }}ms &rarr; {{ replayResult.diff.new_duration_ms }}ms
+                  </span>
+                </div>
+
+                <p v-if="!replayResult.diff.status_changed && !replayResult.diff.headers.length && !replayResult.diff.body.length"
+                   class="text-[11px] text-fg-subtle">{{ t('requests.diffNone') }}</p>
+
+                <div v-if="replayResult.diff.headers.length" class="mb-2">
+                  <span class="label-sys">{{ t('requests.diffHeaders') }}</span>
+                  <div class="mt-1 space-y-0.5">
+                    <div v-for="d in replayResult.diff.headers" :key="'h-' + d.path" class="font-mono text-[10px]">
+                      <span class="text-fg-muted">{{ d.path }}</span>
+                      <span v-if="d.old" class="text-danger"> &minus; {{ d.old }}</span>
+                      <span v-if="d.new" class="text-success"> + {{ d.new }}</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div v-if="replayResult.diff.body.length">
+                  <span class="label-sys">{{ t('requests.diffBody') }} ({{ replayResult.diff.body_kind }})</span>
+                  <div class="mt-1 max-h-40 space-y-0.5 overflow-auto">
+                    <div v-for="d in replayResult.diff.body" :key="'b-' + d.path" class="font-mono text-[10px]">
+                      <span class="text-fg-muted">{{ d.path }}</span>
+                      <span v-if="d.old" class="text-danger"> &minus; {{ d.old }}</span>
+                      <span v-if="d.new" class="text-success"> + {{ d.new }}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <details open>
+                <summary class="cursor-pointer text-xs font-medium text-fg">{{ t('requests.requestSection') }}</summary>
+                <div class="mt-1.5 space-y-1.5">
+                  <pre v-if="headerLines(detail.req_headers)" class="max-h-32 overflow-auto whitespace-pre-wrap break-all rounded bg-bg p-2 font-mono text-[10px] text-fg-muted">{{ headerLines(detail.req_headers) }}</pre>
+                  <div v-if="detail.req_body">
+                    <span class="label-sys">{{ t('requests.body') }}<span v-if="detail.req_body_truncated" class="text-warn"> ({{ t('requests.truncated') }})</span></span>
+                    <pre class="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-all rounded bg-bg p-2 font-mono text-[10px]">{{ detail.req_body }}</pre>
+                  </div>
+                </div>
+              </details>
+
+              <details open>
+                <summary class="cursor-pointer text-xs font-medium text-fg">{{ t('requests.responseSection') }}</summary>
+                <div class="mt-1.5 space-y-1.5">
+                  <pre v-if="headerLines(detail.resp_headers)" class="max-h-32 overflow-auto whitespace-pre-wrap break-all rounded bg-bg p-2 font-mono text-[10px] text-fg-muted">{{ headerLines(detail.resp_headers) }}</pre>
+                  <div v-if="detail.resp_body">
+                    <span class="label-sys">{{ t('requests.body') }}<span v-if="detail.resp_body_truncated" class="text-warn"> ({{ t('requests.truncated') }})</span></span>
+                    <pre class="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-all rounded bg-bg p-2 font-mono text-[10px]">{{ detail.resp_body }}</pre>
+                  </div>
+                </div>
+              </details>
+            </div>
+          </div>
         </dl>
       </PanelFrame>
     </div>

@@ -204,9 +204,20 @@ func (s *Server) sendMail(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &body) {
 		return
 	}
-	to := strings.TrimSpace(body.To)
-	if to == "" || !strings.Contains(to, "@") {
-		writeJSONError(w, http.StatusUnprocessableEntity, "invalid_recipient", "gecerli bir alici adresi girin")
+	// Alici TEK ayristiricidan gecer (mail.ParseAddress); plan kisiti ve SMTP
+	// zarfi bu yalin adresten turetilir. Liste, tirnakli yerel kisim, CR/LF reddedilir.
+	to, perr := mail.ParseAddress(body.To)
+	if perr != nil {
+		writeJSONError(w, http.StatusUnprocessableEntity, "invalid_recipient", "gecerli tek bir alici adresi girin")
+		return
+	}
+	inReplyTo := strings.TrimSpace(body.InReplyTo)
+	if !mail.ValidHeaderValue(inReplyTo) {
+		writeJSONError(w, http.StatusUnprocessableEntity, "invalid_in_reply_to", "in_reply_to gecersiz karakter iceriyor")
+		return
+	}
+	if !mail.ValidHeaderValue(body.Subject) {
+		writeJSONError(w, http.StatusUnprocessableEntity, "invalid_subject", "konu satir sonu iceremez")
 		return
 	}
 	if strings.TrimSpace(body.Body) == "" {
@@ -217,20 +228,15 @@ func (s *Server) sendMail(w http.ResponseWriter, r *http.Request) {
 	// Plan siniri: Enterprise OLMAYAN kiracilar YALNIZCA ic adreslere
 	// (@mail.<domain>) gonderebilir. Harici (or. gmail.com) gonderim yalnizca
 	// Enterprise planinda; platform admin (super-admin) her zaman gonderebilir.
-	recipientDomain := ""
-	if at := strings.LastIndex(to, "@"); at >= 0 {
-		recipientDomain = strings.ToLower(to[at+1:])
-	}
-	if recipientDomain != s.MailDomain && !isPlatformAdmin(r.Context()) {
+	recipientDomain := mail.AddressDomain(to)
+	if recipientDomain != strings.ToLower(strings.TrimSpace(s.MailDomain)) && !isPlatformAdmin(r.Context()) {
 		plan := ""
 		if sub, err := s.Store.GetSubscription(r.Context(), tenantID); err == nil {
 			plan = strings.ToLower(strings.TrimSpace(sub.Plan))
 		}
 		if plan != "enterprise" {
-			writeJSON(w, http.StatusForbidden, map[string]any{
-				"code":  "external_mail_not_allowed",
-				"error": "Harici e-posta gonderimi yalnizca Enterprise planinda kullanilabilir. Mevcut planinizda yalnizca @" + s.MailDomain + " adreslerine gonderebilirsiniz.",
-			})
+			writeJSONError(w, http.StatusForbidden, "external_mail_not_allowed",
+				"Harici e-posta gonderimi yalnizca Enterprise planinda kullanilabilir. Mevcut planinizda yalnizca @"+s.MailDomain+" adreslerine gonderebilirsiniz.")
 			return
 		}
 	}
@@ -279,7 +285,8 @@ func (s *Server) sendMail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	subject := strings.TrimSpace(body.Subject)
-	messageID, err := s.MailSender.Send(from, to, subject, body.Body, strings.TrimSpace(body.InReplyTo), atts)
+
+	messageID, err := s.MailSender.Send(from, to, subject, body.Body, "", inReplyTo, atts)
 	if err != nil {
 		writeJSONError(w, http.StatusBadGateway, "send_failed", "mail gonderilemedi: "+err.Error())
 		return
@@ -293,7 +300,7 @@ func (s *Server) sendMail(w http.ResponseWriter, r *http.Request) {
 		Subject:   subject,
 		TextBody:  body.Body,
 		MessageID: messageID,
-		InReplyTo: strings.TrimSpace(body.InReplyTo),
+		InReplyTo: inReplyTo,
 		Seen:      true,
 	})
 	if err != nil {

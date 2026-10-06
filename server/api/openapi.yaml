@@ -691,5 +691,9 @@ components:
         current_period_end: { type: [string, "null"], format: date-time }
         bandwidth_limit_bytes: { type: integer }
         trial_used: { type: boolean }
+        extra_devices: { type: integer, description: "Team ek cihaz (yalnızca Team planında etkili)" }
+        extra_gb: { type: integer, description: "Team ek aylık GB" }
+        effective_max_clients: { type: [integer, "null"], description: "Ek cihazlar dahil istemci limiti; null = sınırsız" }
+        effective_bandwidth_limit_bytes: { type: [integer, "null"], description: "Ek GB dahil aylık trafik limiti; null = sınırsız" }
         created_at: { type: string, format: date-time }
         plan_details: { $ref: "#/components/schemas/Plan" }

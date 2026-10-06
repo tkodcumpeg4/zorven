@@ -3,8 +3,9 @@ import type { Tunnel, Client, RequestLog } from '~/types/api'
 
 const api = useApi()
 const { t } = useI18n()
+const toast = useToast()
 const { relativeTime, duration, clock } = useFormat()
-const { subscription, usage, currentPlan, formatBytes, formatCurrency, openUpgrade } = useBilling()
+const { usage, effectiveMaxClients, effectiveBandwidthBytes, formatBytes, loadBillingData } = useBilling()
 
 const tunnels = ref<Tunnel[]>([])
 const clients = ref<Client[]>([])
@@ -12,6 +13,7 @@ const requests = ref<RequestLog[]>([])
 const pending = ref(true)
 
 let stopStream: (() => void) | undefined
+let loadErrorShown = false
 
 async function fetchDashboard() {
   try {
@@ -23,25 +25,36 @@ async function fetchDashboard() {
     tunnels.value = t
     clients.value = c
     requests.value = r
-  } catch {
-    // sessizce devam et
+  } catch (e: any) {
+    // Polling her 10 sn'de tekrarlar; ayni hatayi yalnizca bir kez goster.
+    if (!loadErrorShown) {
+      loadErrorShown = true
+      toast.error(e?.data?.error?.message || t('overview.loadFailed'))
+    }
   } finally {
     pending.value = false
   }
 }
 
-onMounted(async () => {
-  await fetchDashboard()
-  const interval = setInterval(fetchDashboard, 10000)
+// Temizlik setup'ta SENKRON kaydedilmeli: await sonrasi onUnmounted
+// aktif bilesen olmadigindan kaydedilmez ve polling/SSE sizar.
+let interval: ReturnType<typeof setInterval> | undefined
+let unmounted = false
+onUnmounted(() => {
+  unmounted = true
+  if (interval) clearInterval(interval)
+  stopStream?.()
+})
 
-  // Canlı akış: yeni istekler başa eklenir, liste 40 kayıtta tutulur
+onMounted(async () => {
+  void loadBillingData()
+  await fetchDashboard()
+  if (unmounted) return
+  interval = setInterval(fetchDashboard, 10000)
+
+  // Canli akis: yeni istekler basa eklenir, liste 40 kayitta tutulur
   stopStream = api.streamRequests((r) => {
     requests.value = [r, ...requests.value].slice(0, 40)
-  })
-
-  onUnmounted(() => {
-    clearInterval(interval)
-    stopStream?.()
   })
 })
 
@@ -77,7 +90,6 @@ const avgCpu = computed(() => {
         <p class="mt-0.5 text-sm text-fg-muted">{{ t('overview.subtitle') }}</p>
       </div>
       <div class="flex items-center gap-2 text-xs text-fg-subtle">
-        <span class="size-2 rounded-full bg-accent animate-pulse" />
         <span>{{ t('overview.liveSync') }}</span>
       </div>
     </header>
@@ -93,28 +105,17 @@ const avgCpu = computed(() => {
       <StatTile index="04" :label="t('overview.statP95')" :value="pending ? '—' : p95" :hint="t('overview.statLast40')" />
     </div>
 
-    <!-- Abonelik & Kaynak Kotaları Özeti -->
+    <!-- Kaynak Kullanımı Özeti (acik surum: tum kaynaklar sinirsiz) -->
     <div class="rounded-xl border border-line bg-surface/60 p-4 backdrop-blur-sm">
       <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-        <!-- Sol: Plan Rozeti ve Hız -->
+        <!-- Sol: Başlık -->
         <div class="flex items-center gap-3">
           <span class="grid size-9 place-items-center rounded-lg bg-accent/15 text-accent shrink-0">
-            <Icon name="lucide:sparkles" class="size-5" />
+            <Icon name="lucide:gauge" class="size-5" />
           </span>
           <div>
-            <div class="flex items-center gap-2">
-              <h3 class="text-sm font-semibold text-fg capitalize">
-                {{ currentPlan?.name || subscription?.plan || 'Free' }} {{ t('overview.planWord') }}
-              </h3>
-              <span class="font-mono text-xs text-fg-muted">
-                ({{ formatCurrency(currentPlan?.price_monthly, currentPlan?.id) }})
-              </span>
-            </div>
-            <div class="flex items-center gap-2 mt-0.5 text-xs text-fg-subtle">
-              <span>{{ t('overview.speed') }} <strong class="font-mono text-accent">{{ currentPlan?.bandwidth_normal_mbps || 10 }} Mbps</strong></span>
-              <span>•</span>
-              <span>{{ t('overview.throttled') }} <strong class="font-mono text-fg-muted">{{ currentPlan?.bandwidth_throttled_mbps || 1 }} Mbps</strong></span>
-            </div>
+            <h3 class="text-sm font-semibold text-fg">{{ t('overview.usageTitle') }}</h3>
+            <div class="mt-0.5 text-xs text-fg-subtle">{{ t('overview.usageUnlimited') }}</div>
           </div>
         </div>
 
@@ -123,36 +124,25 @@ const avgCpu = computed(() => {
           <QuotaBar
             :label="t('overview.quotaClient')"
             :used="usage?.clients_count || 0"
-            :limit="currentPlan?.max_clients ?? 2"
+            :limit="effectiveMaxClients"
           />
           <QuotaBar
             :label="t('overview.quotaTunnel')"
             :used="usage?.tunnels_count || 0"
-            :limit="currentPlan?.max_tunnels ?? 2"
+            :limit="null"
           />
           <QuotaBar
             :label="t('overview.quotaCustomDomain')"
             :used="usage?.custom_domains_count || 0"
-            :limit="currentPlan?.max_custom_domains ?? 0"
+            :limit="null"
           />
           <QuotaBar
             :label="t('overview.quotaMonthlyData')"
             :used="usage?.bandwidth_used_bytes || 0"
-            :limit="currentPlan?.bandwidth_limit_bytes ?? (5 * 1024 * 1024 * 1024)"
+            :limit="effectiveBandwidthBytes"
             :custom-used-text="formatBytes(usage?.bandwidth_used_bytes || 0)"
-            :custom-limit-text="formatBytes(currentPlan?.bandwidth_limit_bytes)"
+            :custom-limit-text="formatBytes(effectiveBandwidthBytes)"
           />
-        </div>
-
-        <!-- Sağ: Aksiyon Butonu -->
-        <div class="flex items-center gap-2 shrink-0">
-          <NuxtLink
-            to="/billing"
-            class="flex items-center gap-1.5 rounded-lg border border-line bg-surface-2 px-3 py-1.5 text-xs font-medium text-fg transition-colors hover:border-accent/40 hover:text-accent"
-          >
-            <span>{{ t('overview.quotasPlans') }}</span>
-            <Icon name="lucide:arrow-right" class="size-3.5" />
-          </NuxtLink>
         </div>
       </div>
     </div>
@@ -190,7 +180,7 @@ const avgCpu = computed(() => {
       <PanelFrame :label="t('overview.liveRequests')">
         <template #actions>
           <span class="inline-flex items-center gap-1.5 font-mono text-[11px] text-accent">
-            <span class="size-1.5 animate-pulse rounded-full bg-accent" />{{ t('overview.live') }}
+            {{ t('overview.live') }}
           </span>
         </template>
 

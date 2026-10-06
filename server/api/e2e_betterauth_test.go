@@ -43,6 +43,15 @@ func TestBetterAuth_E2E_Flow(t *testing.T) {
 	}
 	defer pool.Close()
 
+	// Store'u EN BASTA ac: migration'lar (Better Auth tablolari dahil) burada
+	// uygulanir. Onceden asagidaki INSERT'lerden sonra aciliyordu; bos bir test
+	// veritabaninda "user" tablosu henuz yokken test kiriliyordu.
+	st, err := pgstore.Open(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pgstore.Open: %v", err)
+	}
+	defer st.Close()
+
 	// Temizlik
 	_, _ = pool.Exec(ctx, `DELETE FROM "session" WHERE "token" IN ('tok_e2e_user1', 'tok_e2e_user2')`)
 	_, _ = pool.Exec(ctx, `DELETE FROM "member" WHERE "id" IN ('mem_e2e_1', 'mem_e2e_2')`)
@@ -84,12 +93,7 @@ func TestBetterAuth_E2E_Flow(t *testing.T) {
 		t.Fatalf("session insert: %v", err)
 	}
 
-	// 2. Go Store ve Server ayarla
-	st, err := pgstore.Open(ctx, dsn)
-	if err != nil {
-		t.Fatalf("pgstore.Open: %v", err)
-	}
-	defer st.Close()
+	// 2. Go Store ve Server ayarla (store yukarida, migration'lar icin acildi)
 
 	verifier := auth.NewBetterAuthVerifier(st.Pool(), 1*time.Minute)
 	hub := tunnel.NewHub()
@@ -220,6 +224,8 @@ func TestBetterAuth_E2E_Flow(t *testing.T) {
 			t.Fatalf("NewRequest: %v", err)
 		}
 		req.Header.Set("Content-Type", "application/json")
+		// Cerezli yazma istekleri guvenilir Origin ister (csrf.go).
+		req.Header.Set("Origin", ts.URL)
 		req.AddCookie(&http.Cookie{
 			Name:  "better-auth.session_token",
 			Value: "tok_e2e_user1",

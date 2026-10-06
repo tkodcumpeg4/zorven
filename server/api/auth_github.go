@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -58,8 +59,15 @@ func (g GitHubAuth) Enabled() bool {
 
 // authConfig, dashboard'a hangi giris yontemlerinin mevcut oldugunu bildirir.
 func (s *Server) authConfig(w http.ResponseWriter, _ *http.Request) {
+	// Sosyal giris asil olarak Better Auth (web container) uzerinden yapilir;
+	// bu yuzden butonlarin gorunurlugunu Better Auth'un kullandigi env
+	// degiskenleriyle belirliyoruz (GITHUB_CLIENT_ID / GOOGLE_CLIENT_ID). Eski
+	// Go-tarafi GitHub yolu (s.GitHub) hala fallback olarak destekleniyor.
 	writeJSON(w, http.StatusOK, map[string]any{
-		"github_enabled": s.GitHub.Enabled(),
+		"github_enabled": s.GitHub.Enabled() || os.Getenv("GITHUB_CLIENT_ID") != "",
+		"google_enabled": os.Getenv("GOOGLE_CLIENT_ID") != "",
+		// Panel rezerve-port baglanti adresini (host:port) bununla kurar.
+		"platform_domain": s.PlatformDomain,
 	})
 }
 

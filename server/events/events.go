@@ -20,6 +20,16 @@ const (
 type Event struct {
 	Type string
 	Data any
+	// Tenant, olayin ait oldugu kiraci. SSE akisi yalnizca izleyenin etkin
+	// kiracisiyla eslesen olaylari gonderir; bos kiracili olay HIC gonderilmez
+	// (fail-closed: kapsamsiz olay capraz kiraci sizintisina donusmesin).
+	Tenant string
+}
+
+// VisibleTo, olayin verilen kiraci tarafindan gorulup gorulemeyecegini soyler.
+// Kiraci bilinmiyorsa (izleyen ya da olay tarafinda) olay gizlenir.
+func (e Event) VisibleTo(viewerTenant string) bool {
+	return viewerTenant != "" && e.Tenant != "" && e.Tenant == viewerTenant
 }
 
 // bufferPerSubscriber, abone basina tamponlanacak olay sayisi.
@@ -43,7 +53,13 @@ func New() *Broker {
 // geride kalirsa olay DUSURULUR. Aksi halde ingress sicak yolu bir
 // tarayicinin hizina baglanirdi — tek yavas dashboard tum tuneli yavaslatirdi.
 func (b *Broker) Publish(typ string, data any) {
-	e := Event{Type: typ, Data: data}
+	b.PublishTenant("", typ, data)
+}
+
+// PublishTenant, olayi kiraci etiketiyle yayinlar. Panel akisina gidecek her
+// olay bu yolla yayinlanmalidir; etiketsiz olaylar SSE'de suzulur.
+func (b *Broker) PublishTenant(tenant, typ string, data any) {
+	e := Event{Type: typ, Data: data, Tenant: tenant}
 
 	b.mu.RLock()
 	defer b.mu.RUnlock()

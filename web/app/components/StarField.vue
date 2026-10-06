@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * Referans sitedeki (finagent.tkod.tr) yıldız/parçacık arka planı.
+ * Referans sitedeki (finagent.example.net) yıldız/parçacık arka planı.
  * Sabit konumlu, içeriğin arkasında, tıklamayı engellemez.
  * - prefers-reduced-motion: hareket durur, statik alan çizilir
  * - sekme gizliyken RAF durdurulur (boşuna CPU yakmasın)
@@ -70,12 +70,14 @@ onMounted(() => {
   seed()
   start()
 
-  window.addEventListener('resize', () => { seed(); draw() })
+  const onResize = () => { seed(); draw() }
+  window.addEventListener('resize', onResize)
   document.addEventListener('visibilitychange', onVisibility)
 
   onUnmounted(() => {
     cancelAnimationFrame(raf)
     document.removeEventListener('visibilitychange', onVisibility)
+    window.removeEventListener('resize', onResize)
   })
 })
 </script>

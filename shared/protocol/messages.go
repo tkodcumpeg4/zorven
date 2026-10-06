@@ -43,20 +43,22 @@ const (
 	CodeWebSocketUnsup   = "websocket_not_supported"
 	CodeRateLimited      = "rate_limited"
 	CodeIPForbidden      = "ip_forbidden"
+	CodeAuthRequired     = "auth_required" // tunel erisim denetimi: kimlik gerekli (401)
+	CodeAccessDenied     = "access_denied" // tunel erisim denetimi: reddedildi (403)
 )
 
 // MessageType, kontrol mesajlarinin ayrimini yapan zarf alani.
 type MessageType string
 
 const (
-	TypeHello        MessageType = "hello"
-	TypeHelloAck     MessageType = "hello_ack"
-	TypePing         MessageType = "ping"
-	TypePong         MessageType = "pong"
-	TypeHTTPRequest  MessageType = "http_request"
-	TypeHTTPResponse MessageType = "http_response"
-	TypeHTTPError    MessageType = "http_error"
-	TypeCancel       MessageType = "cancel"
+	TypeHello           MessageType = "hello"
+	TypeHelloAck        MessageType = "hello_ack"
+	TypePing            MessageType = "ping"
+	TypePong            MessageType = "pong"
+	TypeHTTPRequest     MessageType = "http_request"
+	TypeHTTPResponse    MessageType = "http_response"
+	TypeHTTPError       MessageType = "http_error"
+	TypeCancel          MessageType = "cancel"
 	TypeConfigUpdate    MessageType = "config_update"
 	TypeUpdateAvailable MessageType = "update_available"
 	TypeBye             MessageType = "bye"
@@ -65,6 +67,11 @@ const (
 	TypeWSOpen   MessageType = "ws_open"   // sunucu -> ajan: yerel WS'e baglan
 	TypeWSAccept MessageType = "ws_accept" // ajan -> sunucu: 101 sonucu veya hata
 	TypeWSClose  MessageType = "ws_close"  // her iki yon: WS akisini kapat
+
+	// Ham TCP/UDP tunel (FAZ 3 / D2): ziyaretci baglantisini yerel hedefe kopruler.
+	TypeStreamOpen  MessageType = "stream_open"  // sunucu -> ajan: yerel TCP/UDP hedefe baglan
+	TypeStreamAck   MessageType = "stream_ack"   // ajan -> sunucu: baglanti sonucu (ok/hata)
+	TypeStreamClose MessageType = "stream_close" // her iki yon: akisi kapat
 
 	// Uzak terminal (dashboard -> sunucu -> istemci -> PTY).
 	//
@@ -108,9 +115,20 @@ type Hello struct {
 	// sunucunun bu istemciye aninda tunel acmasini veya var olan uygun tuneli baglamasini ister.
 	RequestedTarget string `json:"requested_target,omitempty"`
 
+	// RequestedTTLSec (FAZ 2 / F07), RequestedTarget ile acilacak tunelin GECICI
+	// olmasini ister; sure dolunca sunucu tuneli kaldirir. 0 / yok = kalici.
+	// Eski istemciler bu alani hic gondermez, sunucu kalici tunel acar.
+	RequestedTTLSec int `json:"requested_ttl_sec,omitempty"`
+
 	// IsService, istemcinin arka plan sistem servisi (Windows Service / systemd)
 	// olarak calisip calismadigini belirtir.
 	IsService bool `json:"is_service,omitempty"`
+
+	// Cihaz kimligi (FAZ 3 / F14). Baglanti kopunca kaybolmamasi icin sunucuda
+	// kalicilastirilir: cihaz OFFLINE iken de "bu neydi" sorusu cevaplanabilsin.
+	// Eski istemciler bu alanlari gondermez; gondermemeleri hata DEGILDIR.
+	Hostname string   `json:"hostname,omitempty"`
+	IPs      []string `json:"ips,omitempty"` // yerel adresler (loopback haric)
 
 	// Metrics, istemcinin ilk baglanti anindaki canli donanim metrikleri.
 	Metrics *Metrics `json:"metrics,omitempty"`
@@ -171,6 +189,11 @@ type HelloAck struct {
 	// Features, sunucunun bu oturum icin ETKINLESTIRDIGI yetenekler
 	// (istemcinin istedikleri ile sunucunun destekledeklerinin kesisimi).
 	Features []string `json:"features,omitempty"`
+
+	// Settings (FAZ 3 / F15), cihaz icin kayitli uzak ayarlar. Baglanti
+	// aninda gonderilir ki ajan ilk andan itibaren dogru yapilandirmayla
+	// calissin; sonraki degisiklikler config_update ile iletilir.
+	Settings *AgentSettings `json:"settings,omitempty"`
 }
 
 type Ping struct {
@@ -179,15 +202,19 @@ type Ping struct {
 }
 
 type HTTPRequest struct {
-	Type       MessageType         `json:"type"`
-	ReqID      uint64              `json:"req_id"`
-	TunnelID   string              `json:"tunnel_id"`
-	Method     string              `json:"method"`
-	Path       string              `json:"path"`
-	Query      string              `json:"query"`
-	Headers    map[string][]string `json:"headers"`
-	HasBody    bool                `json:"has_body"`
-	RemoteAddr string              `json:"remote_addr"`
+	Type     MessageType         `json:"type"`
+	ReqID    uint64              `json:"req_id"`
+	TunnelID string              `json:"tunnel_id"`
+	Method   string              `json:"method"`
+	Path     string              `json:"path"`
+	Query    string              `json:"query"`
+	Headers  map[string][]string `json:"headers"`
+	HasBody  bool                `json:"has_body"`
+	// ContentLength, orijinal istegin bilinen govde uzunlugu (bayt). >0 ise ajan
+	// yerel istegi CHUNKED yerine Content-Length ile gonderir (Content-Length
+	// bekleyen backend'ler bos govde gormesin). -1/0: bilinmiyor -> chunked.
+	ContentLength int64  `json:"content_length,omitempty"`
+	RemoteAddr    string `json:"remote_addr"`
 }
 
 type Cancel struct {
@@ -199,6 +226,33 @@ type Cancel struct {
 type ConfigUpdate struct {
 	Type    MessageType  `json:"type"`
 	Tunnels []TunnelSpec `json:"tunnels"`
+
+	// Settings (FAZ 3 / F15), uzaktan ajan yapilandirmasi. nil ise ajan
+	// mevcut ayarlarini korur — "ayar gonderilmedi" ile "ayarlari sifirla"
+	// ayni sey DEGILDIR.
+	Settings *AgentSettings `json:"settings,omitempty"`
+}
+
+// AgentSettings, panelden yonetilen ajan ayarlari (FAZ 3 / F15).
+//
+// GUVENLIK ILKESI: bu ayarlar yalnizca KISITLAYABILIR. Yerel olarak
+// --no-terminal / --no-screen ile kapatilmis bir izin sunucudan ACILAMAZ.
+// Aksi halde sunucuyu ele geciren biri, kullanicinin kasitla kapattigi uzak
+// kabugu geri acabilirdi. Uygulama yeri: client/agent/settings.go.
+//
+// Isaretci alanlar: nil = "sunucu bu konuda bir sey soylemiyor", false =
+// "kapat". Ikisi ayni sey degildir.
+type AgentSettings struct {
+	AutoUpdate    *bool `json:"auto_update,omitempty"`
+	AllowTerminal *bool `json:"allow_terminal,omitempty"`
+	AllowScreen   *bool `json:"allow_screen,omitempty"`
+
+	// MetricsIntervalSec, 0 ise ajan varsayilanini korur.
+	MetricsIntervalSec int `json:"metrics_interval_sec,omitempty"`
+	// LogLevel: debug | info | warn | error. Bos ise degistirilmez.
+	LogLevel string `json:"log_level,omitempty"`
+	// ReconnectMaxBackoffSec, 0 ise ajan varsayilanini korur.
+	ReconnectMaxBackoffSec int `json:"reconnect_max_backoff_sec,omitempty"`
 }
 
 // UpdateAvailable, sunucudan ajana: "yeni bir istemci surumu yayinlandi, simdi
@@ -237,6 +291,46 @@ type WSAccept struct {
 
 // WSClose, her iki yon: WS akisini sonlandir.
 type WSClose struct {
+	Type   MessageType `json:"type"`
+	ReqID  uint64      `json:"req_id"`
+	Reason string      `json:"reason,omitempty"`
+}
+
+// Ham tunel protokol sabitleri (StreamOpen.Proto). Sunucu store katmanindaki
+// ProtoTCP/ProtoUDP ile ayni degerler; protokol paketi bagimsiz kalsin diye burada.
+const (
+	ProtoTCP = "tcp"
+	ProtoUDP = "udp"
+)
+
+// --- Ham TCP/UDP tunel (FAZ 3 / D2) ----------------------------------------
+
+// StreamOpen, sunucudan ajana: yerel hedefe ham TCP/UDP baglantisi ac. ReqID
+// bu akisi (stream/flow) tekil olarak tanimlar; sonraki FrameStreamData /
+// FrameDatagram cerceveleri ve StreamClose ayni ReqID'yi tasir.
+type StreamOpen struct {
+	Type       MessageType `json:"type"`
+	ReqID      uint64      `json:"req_id"`
+	TunnelID   string      `json:"tunnel_id"`
+	Proto      string      `json:"proto"`                 // tcp | udp
+	RemoteAddr string      `json:"remote_addr,omitempty"` // ziyaretci ip:port (log)
+
+	// Dest (FAZ 3 / F20): alt ag yonlendirmesinde istenen hedef "ip:port".
+	// Ajan bunu YALNIZCA tunel hedefi "subnet:<CIDR>" ise ve ip o araligin
+	// icindeyse kullanir; aksi halde yok sayar (tunel tanimindaki hedefe gider).
+	Dest string `json:"dest,omitempty"`
+}
+
+// StreamAck, ajandan sunucuya: baglanti kuruldu (Code bos) veya hata (Code dolu).
+type StreamAck struct {
+	Type    MessageType `json:"type"`
+	ReqID   uint64      `json:"req_id"`
+	Code    string      `json:"code,omitempty"`
+	Message string      `json:"message,omitempty"`
+}
+
+// StreamClose, her iki yon: ham akisi sonlandir.
+type StreamClose struct {
 	Type   MessageType `json:"type"`
 	ReqID  uint64      `json:"req_id"`
 	Reason string      `json:"reason,omitempty"`
@@ -365,7 +459,18 @@ type ScreenFrame struct {
 	// Codec: "mjpeg" => Data tek bir JPEG karedir (canvas'a cizilir).
 	// "h264" => Data, fragmented-MP4 akisinin sirali bir PARCASIDIR; dashboard
 	// tum parcalari MSE SourceBuffer'a ekler. Ilk h264 parcalari init segmentidir.
+	//
+	// ONEMLI: h264'te parcalar SIRALI ve EKSIKSIZ olmalidir. Bir parca
+	// dusurulurse MSE akisi kurtarilamaz (bkz. tunnel.Session kare yonlendirme).
 	Codec string `json:"codec"`
+
+	// CaptureMS/EncodeMS, istemcide bu kareyi uretmenin maliyeti (milisaniye).
+	//
+	// Neden istemciden: dashboard yalnizca karelerin VARIS hizini olcebilir;
+	// darbogazin yakalama mi, kodlama mi, yoksa ag mi oldugunu ayirt edemez.
+	// Bu iki sayi metrik panelinde bunu ayirir. 0 => bildirilmedi.
+	CaptureMS int `json:"capture_ms,omitempty"`
+	EncodeMS  int `json:"encode_ms,omitempty"`
 }
 
 // ScreenInput, fare/klavye olayi (dashboard -> sunucu -> istemci).
@@ -376,12 +481,42 @@ type ScreenFrame struct {
 type ScreenInput struct {
 	Type      MessageType `json:"type"`
 	SessionID string      `json:"session_id"`
-	Kind      string      `json:"kind"`    // mousemove|mousedown|mouseup|wheel|keydown|keyup
-	X         float64     `json:"x"`       // 0..1 (fare olaylari)
-	Y         float64     `json:"y"`       // 0..1
-	Button    int         `json:"button"`  // 0=sol 1=orta 2=sag (tarayici standardi)
-	DeltaY    float64     `json:"delta_y"` // tekerlek
-	Key       string      `json:"key"`     // tarayici KeyboardEvent.key
+	Kind      string      `json:"kind"`   // mousemove|mousedown|mouseup|wheel|keydown|keyup
+	X         float64     `json:"x"`      // 0..1 (fare olaylari)
+	Y         float64     `json:"y"`      // 0..1
+	Button    int         `json:"button"` // 0=sol 1=orta 2=sag (tarayici standardi)
+
+	// DeltaX/DeltaY, tekerlek. Tarayici birimi DeltaMode belirler:
+	// 0=piksel, 1=satir, 2=sayfa. Istemci bunu platformun centik birimine
+	// (Windows'ta WHEEL_DELTA=120) cevirir; ham deger gonderilirse
+	// deltaMode=1'de (deltaY=3) neredeyse hic kaydirma olmaz.
+	DeltaX    float64 `json:"delta_x"`
+	DeltaY    float64 `json:"delta_y"`
+	DeltaMode int     `json:"delta_mode"`
+
+	// Key, KeyboardEvent.key — KLAVYE DUZENINE BAGLI yazilabilir deger
+	// ("a", "A", "ğ"). Yazi girisi icin kullanilir.
+	Key string `json:"key"`
+
+	// Code, KeyboardEvent.code — FIZIKSEL tus ("KeyA", "ArrowLeft", "F5").
+	// Duzenden bagimsizdir; ozel tuslar ve kisayollar bununla eslenir, cunku
+	// Key ok tuslari icin "ArrowLeft" gibi ad verse de Ctrl basiliyken
+	// harfler icin duzene gore degisir.
+	Code string `json:"code"`
+
+	// Modifier durumu: her olayda TARAYICININ bildirdigi anlik durum.
+	//
+	// Neden olay basina: uzak tarafta ayri bir modifier durumu tutmak
+	// kacinilmaz olarak KAYAR (alt+tab ile pencere degisince keyup kaybolur ve
+	// modifier sonsuza dek basili kalir). Tarayicinin gercegi her olayda
+	// tasinirsa uzak taraf kendini her seferinde senkronlar.
+	Ctrl  bool `json:"ctrl"`
+	Shift bool `json:"shift"`
+	Alt   bool `json:"alt"`
+	Meta  bool `json:"meta"`
+
+	// Repeat, tusun otomatik tekrar olayi oldugunu soyler.
+	Repeat bool `json:"repeat"`
 }
 
 // ScreenClose, yakalamayi durdurma istegi (sunucu -> istemci).

@@ -4,7 +4,6 @@ import type { TeamMember, TeamOverview, Client } from '~/types/api'
 const api = useApi()
 const toast = useToast()
 const { relativeTime } = useFormat()
-const { subscription, currentPlan, openUpgrade, loadBillingData, loading: billingLoading } = useBilling()
 const { user: currentUser, platformAdmin } = useAuth()
 const { t } = useI18n()
 
@@ -36,57 +35,20 @@ const updatingRole = ref<string | null>(null)
 // Üye Silme
 const removingMemberId = ref<string | null>(null)
 
-const router = useRouter()
-const hasTeamAccess = computed(() => {
+// Davet/rol/cikarma/jeton yonetimi yalnizca owner/admin (sunucu kapisi 403 verir;
+// burada arayuz sadelestirilir). Platform admin her zaman yonetir.
+const canManage = computed(() => {
   if (platformAdmin.value) return true
-  const p = subscription.value?.plan
-  return p === 'team' || p === 'enterprise'
+  const r = (currentUser.value?.role || '').toLowerCase()
+  return r === 'owner' || r === 'admin'
 })
 
-const effectiveMaxMembers = computed(() => {
-  if (overview.value?.max_members !== undefined && overview.value?.max_members !== null) {
-    return overview.value.max_members
-  }
-  if (currentPlan.value?.max_members !== undefined && currentPlan.value?.max_members !== null) {
-    return currentPlan.value.max_members
-  }
-  if (subscription.value?.plan === 'team') {
-    return 5
-  }
-  if (subscription.value?.plan === 'pro') {
-    return 3
-  }
-  return null
-})
+function errMsg(err: any, fallback: string): string {
+  const e = err?.data?.error
+  return (typeof e === 'string' ? e : e?.message) || err?.message || fallback
+}
 
-const maxMembersDisplay = computed(() => {
-  if (subscription.value?.plan === 'enterprise' || effectiveMaxMembers.value === null) {
-    return t('team.unlimited')
-  }
-  return t('team.limitSuffix', { n: effectiveMaxMembers.value })
-})
-
-watch(() => subscription.value?.plan, async (newPlan, oldPlan) => {
-  if (newPlan && newPlan !== oldPlan) {
-    if (hasTeamAccess.value) {
-      await fetchTeam()
-    } else {
-      openUpgrade(t('team.upgradeMsg'), 'members')
-      router.replace('/')
-    }
-  }
-})
-
-onMounted(async () => {
-  await loadBillingData()
-  if (!hasTeamAccess.value) {
-    // Teame erisemeyen model: hic sayfa acilmasin, direkt pop up ile uyarsin ve ana sayfaya yonlendirsin
-    openUpgrade(t('team.upgradeMsg'), 'members')
-    router.replace('/')
-    return
-  }
-  await fetchTeam()
-})
+onMounted(fetchTeam)
 
 async function fetchTeam() {
   pending.value = true
@@ -95,7 +57,7 @@ async function fetchTeam() {
     overview.value = data
     members.value = data.members || []
   } catch (err: any) {
-    toast.error(err?.data?.error?.message || err?.message || t('team.teamLoadFailed'))
+    toast.error(errMsg(err, t('team.teamLoadFailed')))
   } finally {
     pending.value = false
   }
@@ -118,6 +80,7 @@ const totalTokensCount = computed(() => {
 // --- Davet Islemleri ---
 
 async function handleInvite() {
+  if (!canManage.value) return
   if (!inviteEmail.value.trim() || !inviteEmail.value.includes('@')) {
     toast.warn(t('team.warnValidEmail'))
     return
@@ -134,22 +97,36 @@ async function handleInvite() {
     if (overview.value) {
       overview.value.count++
     }
-    toast.success(t('team.memberAdded', { name: newMem.name || newMem.email }))
+    if (newMem.email_sent === false) {
+      toast.warn(t('team.inviteMailFailed', { email: newMem.email }))
+    } else {
+      toast.success(t('team.inviteSent', { email: newMem.email }))
+    }
     showInviteModal.value = false
     inviteEmail.value = ''
     inviteName.value = ''
     inviteRole.value = 'member'
-    await loadBillingData()
   } catch (err: any) {
-    const code = err?.data?.error?.code
-    const msg = err?.data?.error?.message || err?.message || t('team.inviteFailed')
-    if (code === 'member_limit_reached') {
-      openUpgrade(msg, 'members')
-    } else {
-      toast.error(msg)
-    }
+    toast.error(errMsg(err, t('team.inviteFailed')))
   } finally {
     inviting.value = false
+  }
+}
+
+// --- Bekleyen Daveti Yeniden Gonder ---
+
+const resendingId = ref<string | null>(null)
+
+async function handleResend(member: TeamMember) {
+  resendingId.value = member.id
+  try {
+    const res = await api.resendInvitation(member.id)
+    if (res.email_sent) toast.success(t('team.inviteSent', { email: member.email }))
+    else toast.warn(t('team.inviteMailFailed', { email: member.email }))
+  } catch (err: any) {
+    toast.error(errMsg(err, t('team.inviteFailed')))
+  } finally {
+    resendingId.value = null
   }
 }
 
@@ -163,7 +140,7 @@ async function handleRoleChange(member: TeamMember, newRole: string) {
     member.role = newRole
     toast.success(t('team.roleUpdated', { name: member.name || member.email }))
   } catch (err: any) {
-    toast.error(err?.data?.error?.message || err?.message || t('team.roleUpdateFailed'))
+    toast.error(errMsg(err, t('team.roleUpdateFailed')))
   } finally {
     updatingRole.value = null
   }
@@ -188,9 +165,8 @@ async function handleRemoveMember(member: TeamMember) {
       overview.value.count--
     }
     toast.success(t('team.memberRemoved'))
-    await loadBillingData()
   } catch (err: any) {
-    toast.error(err?.data?.error?.message || err?.message || t('team.removeFailed'))
+    toast.error(errMsg(err, t('team.removeFailed')))
   } finally {
     removingMemberId.value = null
   }
@@ -212,7 +188,7 @@ async function fetchMemberTokens(memberId: string) {
   try {
     memberTokens.value = await api.listMemberTokens(memberId)
   } catch (err: any) {
-    toast.error(t('team.tokensLoadFailed'))
+    toast.error(errMsg(err, t('team.tokensLoadFailed')))
   } finally {
     loadingTokens.value = false
   }
@@ -230,15 +206,8 @@ async function handleCreateMemberToken() {
     copiedToken.value = false
     activeMember.value.tokens_count = (activeMember.value.tokens_count || 0) + 1
     toast.success(t('team.memberTokenIssued'))
-    await loadBillingData()
   } catch (err: any) {
-    const code = err?.data?.error?.code
-    const msg = err?.data?.error?.message || err?.message || t('team.tokenCreateFailed')
-    if (code === 'plan_limit_reached') {
-      openUpgrade(msg, 'clients')
-    } else {
-      toast.error(msg)
-    }
+    toast.error(errMsg(err, t('team.tokenCreateFailed')))
   } finally {
     creatingToken.value = false
   }
@@ -258,12 +227,18 @@ async function handleRevokeToken(client: Client) {
     }
     toast.success(t('team.tokenRevoked'))
   } catch (err: any) {
-    toast.error(t('team.tokenRevokeFailed'))
+    toast.error(errMsg(err, t('team.tokenRevokeFailed')))
   }
 }
 
-function copyToClipboard(text: string) {
-  navigator.clipboard.writeText(text)
+async function copyToClipboard(text: string) {
+  try {
+    await navigator.clipboard.writeText(text)
+  } catch {
+    // HTTP veya izin reddi: kopyalandi demeyelim.
+    toast.error(t('team.copyFailed'))
+    return
+  }
   copiedToken.value = true
   toast.success(t('team.copied'))
   setTimeout(() => { copiedToken.value = false }, 2000)
@@ -280,7 +255,7 @@ function getInitials(name: string, email: string) {
 </script>
 
 <template>
-  <div v-if="hasTeamAccess" class="space-y-6">
+  <div class="space-y-6">
     <!-- Sayfa Basligi -->
     <div class="mb-6 flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
       <div>
@@ -304,6 +279,7 @@ function getInitials(name: string, email: string) {
         </button>
 
         <button
+          v-if="canManage"
           type="button"
           class="flex cursor-pointer items-center gap-1.5 rounded-lg bg-accent px-3.5 py-2 text-xs font-semibold text-on-accent transition-all duration-150 hover:opacity-90 active:scale-95 shadow-sm"
           @click="showInviteModal = true"
@@ -315,7 +291,7 @@ function getInitials(name: string, email: string) {
     </div>
 
     <!-- Ozet Istatistik Kartlari -->
-    <div class="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
+    <div class="mb-6 grid grid-cols-2 gap-3">
       <div class="card-interactive rounded-xl border border-line bg-surface p-4">
         <div class="label-sys mb-1 flex items-center gap-1.5">
           <Icon name="lucide:users" class="size-3.5 text-accent" />
@@ -323,9 +299,6 @@ function getInitials(name: string, email: string) {
         </div>
         <div class="flex items-baseline gap-2">
           <span class="font-mono text-2xl font-bold text-fg">{{ overview?.count ?? members.length }}</span>
-          <span class="text-xs font-semibold text-fg-muted">
-            / {{ maxMembersDisplay }}
-          </span>
         </div>
       </div>
 
@@ -337,30 +310,6 @@ function getInitials(name: string, email: string) {
         <div class="font-mono text-2xl font-bold text-fg">{{ totalTokensCount }}</div>
       </div>
 
-      <div class="card-interactive rounded-xl border border-line bg-surface p-4">
-        <div class="label-sys mb-1 flex items-center gap-1.5">
-          <Icon name="lucide:shield-check" class="size-3.5 text-accent" />
-          <span>{{ t('team.currentPlan') }}</span>
-        </div>
-        <div class="flex items-center gap-2 mt-1">
-          <span class="rounded bg-accent/15 border border-accent/30 px-2 py-0.5 font-mono text-xs font-bold capitalize text-accent">
-            {{ currentPlan?.name || subscription?.plan || 'Free' }}
-          </span>
-        </div>
-      </div>
-
-      <div class="card-interactive rounded-xl border border-line bg-surface p-4">
-        <div class="label-sys mb-1 flex items-center gap-1.5">
-          <Icon name="lucide:sparkles" class="size-3.5 text-accent" />
-          <span>{{ t('team.quotaStatus') }}</span>
-        </div>
-        <div class="mt-1 flex items-center gap-1.5">
-          <span class="size-2 rounded-full" :class="overview?.can_add ? 'bg-accent pulse-glow' : 'bg-warn'" />
-          <span class="text-xs font-semibold" :class="overview?.can_add ? 'text-accent' : 'text-warn'">
-            {{ overview?.can_add ? t('team.quotaAvailable') : t('team.quotaFull') }}
-          </span>
-        </div>
-      </div>
     </div>
 
     <!-- Filtre & Arama -->
@@ -435,9 +384,9 @@ function getInitials(name: string, email: string) {
                   <Icon name="lucide:crown" class="size-3 text-amber-600 dark:text-amber-400" />
                   <span>{{ t('team.ownerRole') }}</span>
                 </div>
-                <!-- Bekleyen davet: rol henuz degistirilemez (uyelik olusmadi) -->
+                <!-- Salt okunur: yetkisiz kullanici ve kendi satiri (sunucu da reddeder) -->
                 <span
-                  v-else-if="member.status === 'pending'"
+                  v-else-if="!canManage || currentUser?.id === member.user_id"
                   class="inline-flex items-center rounded-md border border-line bg-surface-2 px-2.5 py-1 font-mono text-[11px] font-semibold text-fg-muted"
                 >
                   {{ member.role === 'admin' ? t('team.roleAdmin') : t('team.roleMember') }}
@@ -459,6 +408,7 @@ function getInitials(name: string, email: string) {
               <!-- Ozel Jetonlar (bekleyen davette jeton yonetimi yok) -->
               <td class="px-4 py-3">
                 <span v-if="member.status === 'pending'" class="font-mono text-[11px] text-fg-subtle">—</span>
+                <span v-else-if="!canManage" class="font-mono text-[11px] text-fg-muted">{{ t('team.tokensBadge', { n: member.tokens_count || 0 }) }}</span>
                 <button
                   v-else
                   type="button"
@@ -479,7 +429,18 @@ function getInitials(name: string, email: string) {
               <td class="px-4 py-3 text-right">
                 <div class="flex items-center justify-end gap-1.5">
                   <button
-                    v-if="member.status !== 'pending'"
+                    v-if="canManage && member.status === 'pending'"
+                    type="button"
+                    class="cursor-pointer rounded-lg border border-line p-1.5 text-fg-muted transition-colors hover:border-accent/40 hover:bg-surface-2 hover:text-accent disabled:opacity-50"
+                    :disabled="resendingId === member.id"
+                    :title="t('team.resendInvite')"
+                    @click="handleResend(member)"
+                  >
+                    <Icon v-if="resendingId === member.id" name="lucide:loader-2" class="size-3.5 animate-spin" />
+                    <Icon v-else name="lucide:mail" class="size-3.5" />
+                  </button>
+                  <button
+                    v-if="canManage && member.status !== 'pending'"
                     type="button"
                     class="cursor-pointer rounded-lg border border-line p-1.5 text-fg-muted transition-colors hover:border-accent/40 hover:bg-surface-2 hover:text-accent"
                     :title="t('team.manageTokensTitle')"
@@ -489,7 +450,7 @@ function getInitials(name: string, email: string) {
                   </button>
 
                   <button
-                    v-if="member.role !== 'owner' && currentUser?.id !== member.user_id"
+                    v-if="canManage && member.role !== 'owner' && currentUser?.id !== member.user_id"
                     type="button"
                     class="cursor-pointer rounded-lg border border-line p-1.5 text-fg-muted transition-colors hover:border-danger/40 hover:bg-surface-2 hover:text-danger"
                     :disabled="removingMemberId === member.id"
@@ -727,12 +688,5 @@ function getInitials(name: string, email: string) {
         </div>
       </div>
     </div>
-  </div>
-  <div v-else-if="billingLoading" class="flex min-h-[50vh] flex-col items-center justify-center gap-3">
-    <Icon name="lucide:loader-2" class="size-6 animate-spin text-accent" />
-    <span class="text-xs text-fg-subtle font-mono">{{ t('team.checkingAccess') }}</span>
-  </div>
-  <div v-else class="flex min-h-[50vh] flex-col items-center justify-center gap-3">
-    <!-- Non-team: UpgradeModal will pop up and router redirects to / -->
   </div>
 </template>

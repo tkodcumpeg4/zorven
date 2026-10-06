@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import type { Project } from '~/types/api'
+
 const {
   authed,
   method,
@@ -15,14 +17,8 @@ const {
 } = useAuth()
 
 const api = useApi()
+const { adminTenant } = useAdminTenant()
 const toast = useToast()
-const {
-  subscription,
-  currentPlan,
-  openUpgrade,
-  loadBillingData,
-} = useBilling()
-
 const { isLight, toggleTheme, initTheme } = useTheme()
 const { t, locale } = useI18n()
 
@@ -34,7 +30,7 @@ function switchLang() {
 
 onMounted(() => {
   initTheme()
-  loadBillingData()
+  loadProjects()
 })
 
 const nav = computed(() => {
@@ -44,6 +40,10 @@ const nav = computed(() => {
     { to: '/domains',  label: t('nav.domains'),  icon: 'lucide:globe' },
     { to: '/clients',  label: t('nav.clients'),  icon: 'lucide:monitor-smartphone' },
     { to: '/tokens',   label: t('nav.security'), icon: 'lucide:shield-check' },
+    { to: '/policies', label: t('nav.policies'), icon: 'lucide:shield-half' },
+    { to: '/network',  label: t('nav.network'),  icon: 'lucide:network' },
+    { to: '/secrets',  label: t('nav.secrets'),  icon: 'lucide:key-round' },
+    { to: '/organization', label: t('nav.organization'), icon: 'lucide:building-2' },
     { to: '/team',     label: t('nav.team'),     icon: 'lucide:users' },
     { to: '/requests', label: t('nav.logs'),     icon: 'lucide:list' },
     { to: '/mail',     label: t('nav.mail'),     icon: 'lucide:mail' },
@@ -62,31 +62,18 @@ const nav = computed(() => {
   return items
 })
 
-// Platform Admin (süper-admin) her zaman tam erişime sahiptir: plan kapısına takılmaz.
-const hasTeamAccess = computed(() => {
-  if (platformAdmin.value) return true
-  const p = subscription.value?.plan
-  return p === 'team' || p === 'enterprise'
-})
-
-const hasSecurityAccess = computed(() => {
-  if (platformAdmin.value) return true
-  const p = subscription.value?.plan
-  return p === 'pro' || p === 'team' || p === 'enterprise'
-})
-
-function handleNavClick(e: MouseEvent, item: { to: string }) {
-  if (item.to === '/team' && !hasTeamAccess.value) {
-    e.preventDefault()
-    openUpgrade(t('team.upgradeMsg'), 'members')
-    return
-  }
-  if (item.to === '/tokens' && !hasSecurityAccess.value) {
-    e.preventDefault()
-    openUpgrade(t('tokens.upgradeMsg'), 'api_access')
-    return
-  }
+function handleNavClick() {
+  // Menuden secim yapilinca mobil cekmece hemen kapansin.
+  sidebarOpen.value = false
 }
+
+// Mobilde sol kenar cubugu acik mi. Masaustunde (lg+) her zaman gorunur.
+const sidebarOpen = ref(false)
+// Rota degisince (geri/ileri dahil) mobil cekmece kapansin. useRoute() DEGIL
+// router.currentRoute: layout'taki useRoute sayfa bileseni cozulene kadar
+// guncellenmez; oturum kontrolunde bekleyen sayfada cekmece acik kaliyordu.
+const router = useRouter()
+watch(() => router.currentRoute.value.path, () => { sidebarOpen.value = false })
 
 const showOrgMenu = ref(false)
 const showNewOrgModal = ref(false)
@@ -104,6 +91,8 @@ async function handleSwitchOrg(id: string) {
       await switchOrganization(id)
     }
     toast.success(t('shell.orgSwitched'))
+    // Proje slug'i kiraciya ozeldir; yeni organizasyona tasinmamali.
+    clearActiveProject()
     await check()
     window.location.reload()
   } catch (err: any) {
@@ -133,99 +122,273 @@ async function handleCreateOrg() {
     creatingOrg.value = false
   }
 }
+
+// Proje Yönetimi (FAZ 0 / F00)
+const { activeProject, setActiveProject, clearActiveProject } = useActiveProject()
+const projects = ref<Project[]>([])
+const showProjectMenu = ref(false)
+const showNewProjectModal = ref(false)
+const newProjectName = ref('')
+const newProjectSlug = ref('')
+const creatingProject = ref(false)
+const projectError = ref('')
+
+const activeProjectObj = computed(() => {
+  if (!activeProject.value) return projects.value.find(p => p.slug === 'default')
+  return projects.value.find(p => p.slug === activeProject.value || p.id === activeProject.value)
+})
+
+async function loadProjects() {
+  if (!authed.value) return
+  try {
+    const list = await api.listProjects()
+    projects.value = list
+    if (!activeProject.value && list.length > 0) {
+      const def = list.find(p => p.slug === 'default') || list[0]
+      if (def) setActiveProject(def.slug)
+    }
+    // Saklanan proje bu kiracida yoksa (org degismis olabilir) default'a don.
+    if (activeProject.value && !list.some(p => p.slug === activeProject.value)) {
+      const def = list.find(p => p.slug === 'default') || list[0]
+      setActiveProject(def ? def.slug : null)
+    }
+  } catch {
+    // sessizce geç
+  }
+}
+
+function handleSelectProject(proj: Project) {
+  showProjectMenu.value = false
+  if (activeProject.value === proj.slug) return
+  setActiveProject(proj.slug)
+  window.location.reload()
+}
+
+async function handleCreateProject() {
+  if (!newProjectName.value.trim() || !newProjectSlug.value.trim()) {
+    projectError.value = t('shell.errNameSlug') || 'Ad ve slug zorunludur'
+    toast.warn(projectError.value)
+    return
+  }
+  creatingProject.value = true
+  projectError.value = ''
+  try {
+    const created = await api.createProject({
+      name: newProjectName.value.trim(),
+      slug: newProjectSlug.value.trim().toLowerCase(),
+    })
+    showNewProjectModal.value = false
+    newProjectName.value = ''
+    newProjectSlug.value = ''
+    toast.success(t('projects.created'))
+    setActiveProject(created.slug)
+    await loadProjects()
+    window.location.reload()
+  } catch (err: any) {
+    projectError.value = err?.data?.error?.message || err?.data?.error || err?.message || t('projects.createFailed')
+    toast.error(projectError.value)
+  } finally {
+    creatingProject.value = false
+  }
+}
+
+watch(authed, (isAuth) => {
+  if (isAuth) loadProjects()
+})
 </script>
 
 <template>
   <div class="relative min-h-screen">
     <StarField />
 
-    <!-- Üst bar -->
-    <header class="sticky top-0 z-20 border-b border-line bg-bg/80 backdrop-blur">
-      <div class="mx-auto flex max-w-6xl items-center justify-between gap-4 px-5 py-3">
-        <div class="flex items-center gap-4">
-          <NuxtLink to="/" class="flex cursor-pointer items-center gap-2.5">
-            <Logo class="size-7 shrink-0" />
-            <span class="font-mono text-base font-bold tracking-tight text-fg">zorven</span>
-          </NuxtLink>
+    <!-- Mobil: kenar cubugu acikken arka plani karart, tiklayinca kapat -->
+    <div
+      v-if="sidebarOpen"
+      class="fixed inset-0 z-30 bg-black/50 backdrop-blur-sm lg:hidden"
+      @click="sidebarOpen = false"
+    />
 
-          <!-- Better Auth Organizasyon / Kiraci Secici -->
-          <div v-if="authed && method === 'better-auth'" class="relative">
-            <button
-              type="button"
-              class="flex cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-surface/60 px-2.5 py-1 text-xs text-fg transition-colors hover:border-accent/40 hover:bg-surface"
-              @click="showOrgMenu = !showOrgMenu"
-            >
-              <Icon name="lucide:building-2" class="size-3.5 text-accent" />
-              <span class="font-mono font-medium">{{ tenantSlug || t('shell.orgDefault') }}</span>
-              <Icon name="lucide:chevron-down" class="size-3 text-fg-subtle transition-transform" :class="{ 'rotate-180': showOrgMenu }" />
-            </button>
+    <!-- Sol kenar cubugu: logo, organizasyon/proje secici, dikey menu -->
+    <aside
+      class="fixed inset-y-0 left-0 z-40 flex w-64 flex-col border-r border-line bg-bg/95 backdrop-blur transition-transform duration-200 lg:translate-x-0"
+      :class="sidebarOpen ? 'translate-x-0' : '-translate-x-full'"
+    >
+      <div class="flex items-center justify-between gap-2 px-4 pb-2 pt-4">
+        <NuxtLink to="/" class="flex cursor-pointer items-center gap-2.5">
+          <Logo class="size-7 shrink-0" />
+          <span class="font-mono text-base font-bold tracking-tight text-fg">zorven</span>
+        </NuxtLink>
+        <button
+          type="button"
+          class="grid size-8 cursor-pointer place-items-center rounded-lg text-fg-muted hover:bg-surface hover:text-fg lg:hidden"
+          :aria-label="t('shell.closeMenu')"
+          @click="sidebarOpen = false"
+        >
+          <Icon name="lucide:x" class="size-4" />
+        </button>
+      </div>
 
-            <!-- Dropdown Menu -->
-            <div
-              v-if="showOrgMenu"
-              class="absolute left-0 top-full mt-1.5 w-60 rounded-lg border border-line bg-surface p-1.5 shadow-xl backdrop-blur-md z-30"
-            >
-              <div class="px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-fg-subtle">
-                {{ t('shell.orgsHeader') }}
-              </div>
-              <div class="max-h-48 overflow-y-auto space-y-0.5">
-                <button
-                  v-for="org in organizations"
-                  :key="org.id"
-                  type="button"
-                  class="flex w-full cursor-pointer items-center justify-between rounded-md px-2 py-1.5 text-left text-xs transition-colors hover:bg-bg"
-                  :class="org.slug === tenantSlug ? 'bg-bg text-accent font-medium' : 'text-fg'"
-                  @click="handleSwitchOrg(org.id)"
-                >
-                  <div class="flex items-center gap-2 truncate">
-                    <Icon name="lucide:layers" class="size-3.5 shrink-0 opacity-70" />
-                    <span class="truncate">{{ org.name }}</span>
-                  </div>
-                  <Icon v-if="org.slug === tenantSlug" name="lucide:check" class="size-3.5 text-accent shrink-0" />
-                </button>
-              </div>
+      <div class="space-y-2 border-b border-line px-3 pb-3 pt-2">
+        <!-- Better Auth Organizasyon / Kiraci Secici -->
+        <div v-if="authed && method === 'better-auth'" class="relative min-w-0">
+          <button
+            type="button"
+            class="flex w-full min-w-0 cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-surface/60 px-2.5 py-1.5 text-xs text-fg transition-colors hover:border-accent/40 hover:bg-surface"
+            @click="showOrgMenu = !showOrgMenu"
+          >
+            <Icon name="lucide:building-2" class="size-3.5 shrink-0 text-accent" />
+            <span class="truncate font-mono font-medium">{{ tenantSlug || t('shell.orgDefault') }}</span>
+            <Icon name="lucide:chevron-down" class="ml-auto size-3 shrink-0 text-fg-subtle transition-transform" :class="{ 'rotate-180': showOrgMenu }" />
+          </button>
 
-              <div class="mt-1 border-t border-line pt-1">
-                <button
-                  type="button"
-                  class="flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-xs text-fg-muted transition-colors hover:bg-bg hover:text-fg"
-                  @click="showOrgMenu = false; showNewOrgModal = true"
-                >
-                  <Icon name="lucide:plus" class="size-3.5" />
-                  <span>{{ t('shell.newOrg') }}</span>
-                </button>
-              </div>
+          <!-- Dropdown Menu -->
+          <div
+            v-if="showOrgMenu"
+            class="absolute left-0 top-full mt-1.5 w-full rounded-lg border border-line bg-surface p-1.5 shadow-xl backdrop-blur-md z-30"
+          >
+            <div class="px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-fg-subtle">
+              {{ t('shell.orgsHeader') }}
             </div>
-          </div>
+            <div class="max-h-48 overflow-y-auto space-y-0.5">
+              <button
+                v-for="org in organizations"
+                :key="org.id"
+                type="button"
+                class="flex w-full cursor-pointer items-center justify-between rounded-md px-2 py-1.5 text-left text-xs transition-colors hover:bg-bg"
+                :class="org.slug === tenantSlug ? 'bg-bg text-accent font-medium' : 'text-fg'"
+                @click="handleSwitchOrg(org.id)"
+              >
+                <div class="flex items-center gap-2 truncate">
+                  <Icon name="lucide:layers" class="size-3.5 shrink-0 opacity-70" />
+                  <span class="truncate">{{ org.name }}</span>
+                </div>
+                <Icon v-if="org.slug === tenantSlug" name="lucide:check" class="size-3.5 text-accent shrink-0" />
+              </button>
+            </div>
 
-          <!-- Admin Key veya Legacy badge -->
-          <div v-else-if="authed && tenantSlug" class="hidden sm:inline-flex items-center gap-1 rounded border border-line px-2 py-0.5 font-mono text-[10px] text-fg-muted">
-            <Icon :name="method === 'key' ? 'lucide:shield' : 'lucide:github'" class="size-3" />
-            <span>{{ method === 'key' ? t('shell.adminBadge') : tenantSlug }}</span>
+            <div class="mt-1 border-t border-line pt-1">
+              <button
+                type="button"
+                class="flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-xs text-fg-muted transition-colors hover:bg-bg hover:text-fg"
+                @click="showOrgMenu = false; showNewOrgModal = true"
+              >
+                <Icon name="lucide:plus" class="size-3.5" />
+                <span>{{ t('shell.newOrg') }}</span>
+              </button>
+            </div>
           </div>
         </div>
 
-        <!-- Sag Kisim: Kullanici Profili & Cikis -->
-        <div class="flex items-center gap-2">
-          <!-- Plan Rozeti (Tiklanabilir -> UpgradeModal) -->
+        <!-- Proje Seçici (FAZ 0 / F00) -->
+        <div v-if="authed" class="relative min-w-0">
           <button
-            v-if="authed"
             type="button"
-            class="flex cursor-pointer items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs transition-colors font-medium"
-            :class="[
-              subscription?.plan === 'pro'
-                ? 'border-purple-300 bg-purple-100 text-purple-800 hover:bg-purple-200 dark:border-purple-500/40 dark:bg-purple-950/30 dark:text-purple-300 dark:hover:border-purple-400'
-                : subscription?.plan === 'team' || subscription?.plan === 'enterprise'
-                  ? 'border-accent/40 bg-accent/10 text-accent hover:border-accent font-semibold'
-                  : 'border-line bg-surface text-fg-muted hover:border-line-hover hover:text-fg'
-            ]"
-            :title="t('shell.planBadgeTitle')"
-            @click="openUpgrade()"
+            class="flex w-full min-w-0 cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-surface/60 px-2.5 py-1.5 text-xs text-fg transition-colors hover:border-accent/40 hover:bg-surface"
+            @click="showProjectMenu = !showProjectMenu"
           >
-            <Icon name="lucide:sparkles" class="size-3.5" :class="subscription?.plan === 'pro' ? 'text-purple-700 dark:text-purple-400' : 'text-accent'" />
-            <span class="capitalize">{{ currentPlan?.name || subscription?.plan || 'Free' }}</span>
+            <Icon name="lucide:folder-git-2" class="size-3.5 shrink-0 text-accent" />
+            <span class="truncate font-mono font-medium">{{ activeProjectObj?.name || activeProject || t('projects.default') }}</span>
+            <Icon name="lucide:chevron-down" class="ml-auto size-3 shrink-0 text-fg-subtle transition-transform" :class="{ 'rotate-180': showProjectMenu }" />
           </button>
 
+          <!-- Dropdown Menu -->
+          <div
+            v-if="showProjectMenu"
+            class="absolute left-0 top-full mt-1.5 w-full rounded-lg border border-line bg-surface p-1.5 shadow-xl backdrop-blur-md z-30"
+          >
+            <div class="px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-fg-subtle">
+              {{ t('projects.title') }}
+            </div>
+            <div class="max-h-48 overflow-y-auto space-y-0.5">
+              <button
+                v-for="proj in projects"
+                :key="proj.id"
+                type="button"
+                class="flex w-full cursor-pointer items-center justify-between rounded-md px-2 py-1.5 text-left text-xs transition-colors hover:bg-bg"
+                :class="(activeProject === proj.slug || (!activeProject && proj.slug === 'default')) ? 'bg-bg text-accent font-medium' : 'text-fg'"
+                @click="handleSelectProject(proj)"
+              >
+                <div class="flex items-center gap-2 truncate">
+                  <Icon name="lucide:folder" class="size-3.5 shrink-0 opacity-70" />
+                  <span class="truncate">{{ proj.name }}</span>
+                  <span class="text-[10px] text-fg-muted font-mono">({{ proj.slug }})</span>
+                </div>
+                <Icon v-if="(activeProject === proj.slug || (!activeProject && proj.slug === 'default'))" name="lucide:check" class="size-3.5 text-accent shrink-0" />
+              </button>
+            </div>
+
+            <div class="mt-1 border-t border-line pt-1">
+              <button
+                type="button"
+                class="flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-xs text-fg-muted transition-colors hover:bg-bg hover:text-fg"
+                @click="showProjectMenu = false; showNewProjectModal = true"
+              >
+                <Icon name="lucide:plus" class="size-3.5" />
+                <span>{{ t('projects.new') }}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Admin Key veya Legacy badge -->
+        <div v-else-if="authed && tenantSlug" class="inline-flex items-center gap-1 rounded border border-line px-2 py-0.5 font-mono text-[10px] text-fg-muted">
+          <Icon :name="method === 'key' ? 'lucide:shield' : 'lucide:github'" class="size-3" />
+          <span>{{ method === 'key' ? (adminTenant ? `${t('shell.adminBadge')} / ${tenantSlug}` : t('shell.adminBadge')) : tenantSlug }}</span>
+        </div>
+      </div>
+
+      <nav class="flex-1 space-y-0.5 overflow-y-auto px-3 py-3 no-scrollbar" :aria-label="t('shell.mainNav')">
+        <NuxtLink
+          v-for="item in nav"
+          :key="item.to"
+          :to="item.to"
+          class="chip flex w-full cursor-pointer items-center gap-2.5 border border-transparent
+                 px-2.5 py-2 text-[13px] font-medium text-fg-muted hover:bg-surface hover:text-fg transition-all"
+          active-class="chip-active !border-accent/40"
+          @click="handleNavClick"
+        >
+          <Icon :name="item.icon" class="size-4 shrink-0" aria-hidden="true" />
+          <span class="truncate">{{ item.label }}</span>
+        </NuxtLink>
+      </nav>
+    </aside>
+
+    <!-- Ust bar: mobilde menu dugmesi; sagda plan, kullanici ve ayarlar.
+         Sarmalayici div YOK: sticky, ust elemanin kutusuyla sinirlidir. -->
+    <header class="sticky top-0 z-20 border-b border-line bg-bg/80 backdrop-blur lg:ml-64">
+        <div class="flex items-center justify-between gap-2 px-4 py-3 sm:gap-4 sm:px-5">
+          <div class="flex min-w-0 items-center gap-2">
+            <button
+              type="button"
+              class="grid size-8 cursor-pointer place-items-center rounded-lg border border-line text-fg-muted hover:bg-surface hover:text-fg lg:hidden"
+              :aria-label="t('shell.openMenu')"
+              @click="sidebarOpen = true"
+            >
+              <Icon name="lucide:menu" class="size-4" />
+            </button>
+            <NuxtLink to="/" class="flex items-center gap-2 lg:hidden">
+              <Logo class="size-6 shrink-0" />
+              <span class="hidden font-mono text-sm font-bold tracking-tight text-fg sm:inline">zorven</span>
+            </NuxtLink>
+
+            <!-- Aktif organizasyon / proje: seciciler kenar cubugunda, ama nerede
+                 oldugun her sayfada ustte gorunsun. Tiklayinca yonetim sayfasi. -->
+            <NuxtLink
+              v-if="authed"
+              to="/organization"
+              class="flex min-w-0 items-center gap-1.5 rounded-lg border border-line bg-surface/60 px-2.5 py-1 text-xs text-fg transition-colors hover:border-accent/40 hover:bg-surface"
+              :title="t('shell.contextTitle')"
+            >
+              <Icon name="lucide:building-2" class="size-3.5 shrink-0 text-accent" />
+              <span class="max-w-[90px] truncate font-mono font-medium sm:max-w-[160px]">{{ tenantSlug || t('shell.orgDefault') }}</span>
+              <span class="text-fg-subtle">/</span>
+              <Icon name="lucide:folder-git-2" class="size-3.5 shrink-0 text-accent" />
+              <span class="max-w-[90px] truncate font-mono font-medium sm:max-w-[160px]">{{ activeProjectObj?.name || activeProject || t('projects.default') }}</span>
+            </NuxtLink>
+          </div>
+
+          <!-- Sag Kisim: Kullanici Profili & Cikis -->
+          <div class="flex shrink-0 items-center gap-1.5 sm:gap-2">
           <!-- Platform Admin Rozeti -->
           <NuxtLink
             v-if="platformAdmin"
@@ -234,7 +397,7 @@ async function handleCreateOrg() {
             :title="t('shell.platformPanel')"
           >
             <Icon name="lucide:shield-check" class="size-3.5 text-accent" />
-            <span>{{ t('header.platformAdmin') }}</span>
+            <span class="hidden sm:inline">{{ t('header.platformAdmin') }}</span>
           </NuxtLink>
 
           <div v-if="authed && user" class="hidden sm:flex items-center gap-1.5 rounded-lg border border-line bg-surface px-2.5 py-1 text-xs text-fg-muted">
@@ -290,46 +453,14 @@ async function handleCreateOrg() {
           <a
             href="https://github.com/tkodcumpeg4/zorven"
             target="_blank" rel="noopener noreferrer"
-            class="grid size-8 cursor-pointer place-items-center rounded-lg border border-line
-                   text-fg-muted transition-colors duration-150 hover:bg-surface hover:text-fg"
+            class="hidden size-8 cursor-pointer place-items-center rounded-lg border border-line
+                   text-fg-muted transition-colors duration-150 hover:bg-surface hover:text-fg sm:grid"
             :aria-label="t('shell.githubRepo')"
           >
             <Icon name="lucide:github" class="size-4" />
           </a>
+          </div>
         </div>
-      </div>
-
-      <!-- Chip navigasyon -->
-      <nav class="mx-auto flex max-w-6xl items-center gap-1.5 overflow-x-auto px-5 pb-3 no-scrollbar">
-        <NuxtLink
-          v-for="item in nav"
-          :key="item.to"
-          :to="item.to"
-          class="chip flex shrink-0 cursor-pointer items-center gap-1.5 border border-line
-                 px-2.5 py-1 text-xs sm:text-[13px] font-medium text-fg-muted hover:bg-surface hover:text-fg transition-all"
-          active-class="chip-active !border-accent/40"
-          @click="handleNavClick($event, item)"
-        >
-          <Icon :name="item.icon" class="size-3.5 shrink-0" aria-hidden="true" />
-          <span>{{ item.label }}</span>
-          <span
-            v-if="item.to === '/team' && !hasTeamAccess"
-            class="rounded bg-line/80 px-1.5 py-0.2 text-[9px] font-mono text-fg-subtle flex items-center gap-0.5"
-            :title="t('shell.teamLock')"
-          >
-            <Icon name="lucide:lock" class="size-2.5 text-warn" />
-            Team
-          </span>
-          <span
-            v-if="item.to === '/tokens' && !hasSecurityAccess"
-            class="rounded bg-line/80 px-1.5 py-0.2 text-[9px] font-mono text-fg-subtle flex items-center gap-0.5"
-            :title="t('shell.proLock')"
-          >
-            <Icon name="lucide:lock" class="size-2.5 text-warn" />
-            Pro
-          </span>
-        </NuxtLink>
-      </nav>
     </header>
 
     <!-- Modal: Yeni Organizasyon Olustur -->
@@ -394,16 +525,79 @@ async function handleCreateOrg() {
       </div>
     </div>
 
-    <!-- Hız Sınırlandırması Şeridi (Bant Genişliği Aşımı) -->
-    <ThrottledBanner />
+    <!-- Yeni Proje Modalı (FAZ 0 / F00) -->
+    <div
+      v-if="showNewProjectModal"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-xs"
+      @click.self="showNewProjectModal = false"
+    >
+      <div class="w-full max-w-md rounded-xl border border-line bg-surface p-6 shadow-2xl">
+        <div class="flex items-center justify-between mb-4">
+          <h3 class="text-base font-semibold text-fg">{{ t('projects.createModalTitle') }}</h3>
+          <button
+            type="button"
+            class="text-fg-subtle hover:text-fg cursor-pointer"
+            @click="showNewProjectModal = false"
+          >
+            <Icon name="lucide:x" class="size-4" />
+          </button>
+        </div>
 
-    <main class="relative z-10 mx-auto max-w-6xl px-5 py-8">
-      <AdminKeyGate>
-        <slot />
-      </AdminKeyGate>
-    </main>
+        <form class="space-y-4" @submit.prevent="handleCreateProject">
+          <div v-if="projectError" class="rounded bg-rose-500/10 p-2 text-xs text-rose-400">
+            {{ projectError }}
+          </div>
 
-    <!-- Global Plan Yükseltme Modalı -->
-    <UpgradeModal />
+          <div>
+            <label class="block text-xs font-medium text-fg-muted mb-1">{{ t('projects.name') }}</label>
+            <input
+              v-model="newProjectName"
+              type="text"
+              required
+              placeholder="Backend Services"
+              class="w-full rounded border border-line bg-bg px-3 py-1.5 text-sm text-fg placeholder:text-fg-subtle focus:border-accent focus:outline-none"
+              @input="newProjectSlug = newProjectName.toLowerCase().replace(/[^a-z0-9_-]/g, '-')"
+            />
+          </div>
+
+          <div>
+            <label class="block text-xs font-medium text-fg-muted mb-1">{{ t('projects.slug') }}</label>
+            <input
+              v-model="newProjectSlug"
+              type="text"
+              required
+              placeholder="backend-services"
+              class="w-full rounded border border-line bg-bg px-3 py-1.5 font-mono text-sm text-fg placeholder:text-fg-subtle focus:border-accent focus:outline-none"
+            />
+          </div>
+
+          <div class="flex justify-end gap-2 pt-2">
+            <button
+              type="button"
+              class="rounded px-3 py-1.5 text-xs text-fg-muted hover:bg-bg cursor-pointer"
+              @click="showNewProjectModal = false"
+            >
+              {{ t('common.cancel') }}
+            </button>
+            <button
+              type="submit"
+              :disabled="creatingProject"
+              class="rounded bg-accent px-3 py-1.5 text-xs font-medium text-on-accent hover:opacity-90 disabled:opacity-50 cursor-pointer"
+            >
+              {{ creatingProject ? t('common.creating') : t('common.create') }}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+
+    <div class="lg:pl-64">
+      <main class="relative z-10 mx-auto max-w-6xl px-4 py-6 sm:px-5 sm:py-8">
+        <AdminKeyGate>
+          <slot />
+        </AdminKeyGate>
+      </main>
+    </div>
   </div>
 </template>

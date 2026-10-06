@@ -93,13 +93,26 @@ func (s *Server) adminUpdateTenantPlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.planChanged(tenantID)
+
 	sub, err := s.Store.GetSubscription(r.Context(), tenantID)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "db_error", "Guncel abonelik alinamadi")
 		return
 	}
 
+	s.auditFor(r, tenantID, "plan.change", tenantID, "plan="+body.Plan)
 	writeJSON(w, http.StatusOK, sub)
+}
+
+// planChanged, plan degisiminin calisma zamani etkilerini HEMEN uygular:
+// bant genisligi kota/hiz durumu yeniden yuklenir ve ingress router'i
+// (HostRoute.Plan -> interstitial karari) tazelenir.
+func (s *Server) planChanged(tenantID string) {
+	if s.OnPlanChange != nil {
+		s.OnPlanChange(tenantID)
+	}
+	s.tunnelsChanged()
 }
 
 // listPlans, GET /api/v1/plans

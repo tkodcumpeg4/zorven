@@ -22,6 +22,9 @@ func (s *Store) CreateTenant(ctx context.Context, slug string) (store.Tenant, er
 	sub := DefaultSubscriptionForPlan(t.ID, store.PlanFree)
 	_ = s.UpsertSubscription(ctx, sub)
 
+	// Yeni kiraciya otomatik default proje olustur.
+	_, _ = s.GetDefaultProject(ctx, t.ID)
+
 	return t, nil
 }
 

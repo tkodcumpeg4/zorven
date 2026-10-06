@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"sync/atomic"
 
 	"github.com/tkodcumpeg4/zorven/shared/protocol"
 )
@@ -74,13 +75,24 @@ type Exchange struct {
 	// onDrain, tuketici n bayt okudugunda cagrilir. Session bunu window_update
 	// gondermek (kredi iade etmek) icin kullanir. nil olabilir.
 	onDrain func(n int)
+
+	// queued, kanalda + cur'da BEKLEYEN bayt sayisi. Akis kontrolu penceresi
+	// BAYT tabanli oldugundan tampon da bayt tabanli sinirlanir; aksi halde
+	// kucuk cerceveler (chunked/SSE) cerceve-sayisi tavanini pencereden cok
+	// once doldurup buyuk yanitlari keserdi (FAZ 8 bug'i).
+	queued atomic.Int64
 }
 
+// exchangeBufferMinFrame, kanal kapasitesini (cerceve sayisi) hesaplarken
+// varsayilan asgari cerceve boyu. Asil sinir queued BAYT kontroludur; bu yalnizca
+// kanalin sayi-tavanina takilmamasi icin comert bir kapasite verir.
+const exchangeBufferMinFrame = 1024
+
 func newExchange(reqID uint64) *Exchange {
-	// Pencereye kac cerceve sigar: en kotu durumda her cerceve tam boy.
-	capFrames := protocol.InitialWindowBytes / protocol.BodyChunkSize
-	if capFrames < 1 {
-		capFrames = 1
+	// Kanal, pencere kadar BAYT'i kucuk cercevelerle bile tutabilmeli.
+	capFrames := protocol.InitialWindowBytes / exchangeBufferMinFrame
+	if capFrames < 32 {
+		capFrames = 32
 	}
 	return &Exchange{
 		reqID:  reqID,
@@ -118,6 +130,7 @@ func (e *Exchange) Read(p []byte) (int, error) {
 	}
 	n := copy(p, e.cur)
 	e.cur = e.cur[n:]
+	e.queued.Add(-int64(n)) // tampondan cikan bayt
 	if e.onDrain != nil {
 		e.onDrain(n)
 	}
@@ -140,13 +153,20 @@ func (e *Exchange) writeBody(p []byte) error {
 	if len(p) == 0 {
 		return nil
 	}
+	// BAYT tabanli sinir: bekleyen + yeni, akis-kontrolu penceresini asamaz.
+	// Dogru davranan istemci penceresini asmaz; asarsa protokol ihlalidir.
+	if int(e.queued.Load())+len(p) > protocol.InitialWindowBytes {
+		return ErrFlowControlViolation
+	}
 	select {
 	case e.chunks <- p:
+		e.queued.Add(int64(len(p)))
 		return nil
 	case <-e.done:
 		return ErrReaderGone
 	default:
-		// Kuyruk dolu => istemci penceresinden fazlasini gonderdi.
+		// Kanal sayi-tavanina takildi (asiri kucuk cerceveler). Byte siniri
+		// asilmadigi surece nadir; yine de ihlal say.
 		return ErrFlowControlViolation
 	}
 }

@@ -40,6 +40,40 @@ func (m *Middleware) isDefaultTenantOwner(ctx context.Context, userID string) bo
 	return err == nil && (role == "owner" || role == "admin")
 }
 
+// memberTenant, platform admin OLMAYAN bir oturumun hangi kiracida ve hangi
+// rolle calisacagini belirler. Oturumdaki aktif org'da gercek bir uyelik yoksa
+// (ekipten cikarilmis ama oturumu o org'da kalmis; ya da hic uyeligi olmayip
+// ten_default'a dusmus kullanici) o kiraciya ERISEMEZ: en eski uyeligine
+// dusurulur. Hic uyeligi yoksa ok=false (istek reddedilir).
+// NOT: sess onbellekteki paylasilan struct'tir; DEGISTIRILMEZ.
+func (m *Middleware) memberTenant(ctx context.Context, sess *auth.SessionUser) (tenant, role string, ok bool) {
+	if sess.Role != "" {
+		return sess.ActiveOrganizationID, sess.Role, true
+	}
+	if m.Store == nil {
+		return "", "", false
+	}
+	org, r, err := m.Store.FirstMembership(ctx, sess.UserID)
+	if err != nil || org == "" {
+		return "", "", false
+	}
+	return org, r, true
+}
+
+// unknownTenant, X-Tenant-ID ile secilen kiracinin varligini dogrular. Yoksa
+// 404 yazar ve true doner; onceden yazma uclari FK hatasiyla 500 donuyordu.
+// DB hatasinda istegi engellemez (asil uc hatayi zaten raporlar).
+func (m *Middleware) unknownTenant(w http.ResponseWriter, r *http.Request, id string) bool {
+	if m.Store == nil || id == store.DefaultTenantID {
+		return false
+	}
+	if _, err := m.Store.GetTenant(r.Context(), id); errors.Is(err, store.ErrTenantNotFound) || errors.Is(err, store.ErrNotFound) {
+		writeJSONError(w, http.StatusNotFound, "tenant_not_found", "X-Tenant-ID ile belirtilen kiraci bulunamadi")
+		return true
+	}
+	return false
+}
+
 // AdminKey, dogrulama icin gereken admin anahtari bilgisi.
 // Tam anahtar yalnizca uretildigi anda bilinir; sonrasinda sadece hash saklanir.
 type AdminKey struct {
@@ -127,6 +161,10 @@ type Middleware struct {
 
 	// PublicPaths, kimlik dogrulamasi istemeyen yollar (or. /api/v1/health).
 	PublicPaths map[string]bool
+
+	// TrustedHosts, cerezli yazma isteklerinde kabul edilen Origin host'lari
+	// (bkz. csrf.go TrustedOriginHosts). Ayni origin ve loopback her zaman gecer.
+	TrustedHosts []string
 }
 
 func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -179,6 +217,9 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// veritabanindaki session.token alaninda ise nokta oncesindeki token saklanir.
 			rawToken, _, _ := strings.Cut(token, ".")
 			if sess, err := m.BetterAuth.VerifySession(r.Context(), rawToken); err == nil && sess != nil {
+				if !m.csrfCheck(w, r) {
+					return
+				}
 				activeTenant := sess.ActiveOrganizationID
 				// Platform Admin YALNIZCA platform/default kiracisinda GERCEK bir
 				// owner/admin uyeligi olan kullanicidir. Onceki mantik "activeTenant
@@ -192,12 +233,25 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					// platform admindir; boylece impersonation geri donulebilir.
 					isPlat = m.isDefaultTenantOwner(r.Context(), sess.UserID)
 				}
+				role := sess.Role
 				if isPlat {
 					if reqTenant := r.Header.Get("X-Tenant-ID"); reqTenant != "" {
+						if m.unknownTenant(w, r, reqTenant) {
+							return
+						}
 						activeTenant = reqTenant
 					}
+				} else {
+					t, mr, ok := m.memberTenant(r.Context(), sess)
+					if !ok {
+						writeJSONError(w, http.StatusForbidden, "no_organization",
+							"hesabiniz hicbir organizasyonun uyesi degil")
+						return
+					}
+					activeTenant, role = t, mr
 				}
 				ctx := withTenant(r.Context(), activeTenant)
+				ctx = m.resolveProject(ctx, r, activeTenant)
 				if isPlat {
 					ctx = withPlatformAdmin(ctx)
 				}
@@ -206,7 +260,7 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					Email:    sess.Email,
 					Name:     sess.Name,
 					TenantID: activeTenant,
-					Role:     sess.Role,
+					Role:     role,
 				})
 				m.Next.ServeHTTP(w, r.WithContext(ctx))
 				return
@@ -218,7 +272,12 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if m.Sessions != nil {
 		if c, err := r.Cookie(session.CookieName); err == nil {
 			if sess, err := m.Sessions.Verify(c.Value); err == nil {
-				m.Next.ServeHTTP(w, r.WithContext(withTenant(r.Context(), sess.TenantID)))
+				if !m.csrfCheck(w, r) {
+					return
+				}
+				ctx := withTenant(r.Context(), sess.TenantID)
+				ctx = m.resolveProject(ctx, r, sess.TenantID)
+				m.Next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
 		}
@@ -255,10 +314,8 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// Plan yetki kontrolü: FeatureAPIAccess (Pro, Team, Enterprise)
 			if m.Entitlements != nil {
 				if err := m.Entitlements.CheckFeature(r.Context(), tok.TenantID, entitlements.FeatureAPIAccess); err != nil {
-					writeJSON(w, http.StatusForbidden, map[string]any{
-						"code":  "feature_not_available",
-						"error": "API erişim özelliği mevcut planınızda desteklenmiyor. Lütfen planınızı yükseltin.",
-					})
+					writeJSONError(w, http.StatusForbidden, "feature_not_available",
+						"API erişim özelliği mevcut planınızda desteklenmiyor. Lütfen planınızı yükseltin.")
 					return
 				}
 			}
@@ -290,6 +347,7 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 
 			ctx := withTenant(r.Context(), tok.TenantID)
+			ctx = m.resolveProject(ctx, r, tok.TenantID)
 			ctx = withAPIScopes(ctx, tok.Scopes)
 			if tok.UserID != nil {
 				ctx = withUser(ctx, &AuthUser{
@@ -319,12 +377,25 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					// platform admindir; boylece impersonation geri donulebilir.
 					isPlat = m.isDefaultTenantOwner(r.Context(), sess.UserID)
 				}
+				role := sess.Role
 				if isPlat {
 					if reqTenant := r.Header.Get("X-Tenant-ID"); reqTenant != "" {
+						if m.unknownTenant(w, r, reqTenant) {
+							return
+						}
 						activeTenant = reqTenant
 					}
+				} else {
+					t, mr, ok := m.memberTenant(r.Context(), sess)
+					if !ok {
+						writeJSONError(w, http.StatusForbidden, "no_organization",
+							"hesabiniz hicbir organizasyonun uyesi degil")
+						return
+					}
+					activeTenant, role = t, mr
 				}
 				ctx := withTenant(r.Context(), activeTenant)
+				ctx = m.resolveProject(ctx, r, activeTenant)
 				if isPlat {
 					ctx = withPlatformAdmin(ctx)
 				}
@@ -333,7 +404,7 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					Email:    sess.Email,
 					Name:     sess.Name,
 					TenantID: activeTenant,
-					Role:     sess.Role,
+					Role:     role,
 				})
 				m.Next.ServeHTTP(w, r.WithContext(ctx))
 				return
@@ -377,8 +448,35 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// eder. Ayrica /api/v1/admin/* uclarini acar (bkz. isPlatformAdmin).
 	adminTenant := store.DefaultTenantID
 	if reqTenant := r.Header.Get("X-Tenant-ID"); reqTenant != "" {
+		if m.unknownTenant(w, r, reqTenant) {
+			return
+		}
 		adminTenant = reqTenant
 	}
 	ctx := withPlatformAdmin(withTenant(r.Context(), adminTenant))
+	ctx = m.resolveProject(ctx, r, adminTenant)
 	m.Next.ServeHTTP(w, r.WithContext(ctx))
+}
+
+// resolveProject, kiracı için X-Zorven-Project başlığını çözümler veya default projeye düşer (FAZ 0 / F00).
+func (m *Middleware) resolveProject(ctx context.Context, r *http.Request, tenantID string) context.Context {
+	if m.Store == nil || tenantID == "" {
+		return ctx
+	}
+	targetProj := strings.TrimSpace(r.Header.Get("X-Zorven-Project"))
+	if targetProj != "" {
+		// Önce slug olarak dene
+		if p, err := m.Store.GetProjectBySlug(ctx, tenantID, targetProj); err == nil {
+			return withProject(ctx, p.ID)
+		}
+		// Ardından ID olarak dene
+		if p, err := m.Store.GetProjectByID(ctx, tenantID, targetProj); err == nil {
+			return withProject(ctx, p.ID)
+		}
+	}
+	// Fallback: default proje
+	if def, err := m.Store.GetDefaultProject(ctx, tenantID); err == nil {
+		return withProject(ctx, def.ID)
+	}
+	return ctx
 }

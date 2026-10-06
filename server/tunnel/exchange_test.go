@@ -50,6 +50,29 @@ func TestWriteBodyRejectsWindowOverflow(t *testing.T) {
 	}
 }
 
+// FAZ 8 regresyonu: KUCUK cerceveler (chunked/SSE) pencere kadar BAYT dolana
+// kadar reddedilmemeli. Eski tampon cerceve-SAYISI (32) tabanliydi; kucuk
+// cercevelerde pencereden cok once dolup buyuk chunked yanitlari kesiyordu.
+func TestWriteBodySmallFramesFillByteWindow(t *testing.T) {
+	e := newExchange(1)
+	small := make([]byte, 1024) // 1 KB — 32 cerceveden cok daha fazlasi sigmali
+	written := 0
+	for written+len(small) <= protocol.InitialWindowBytes {
+		if err := e.writeBody(small); err != nil {
+			t.Fatalf("kucuk cerceve pencere icinde reddedildi (%d bayt sonra): %v", written, err)
+		}
+		written += len(small)
+	}
+	// Pencere kadar BAYT yazildi; en az 2000 kucuk cerceve (eski 32 tavaninin cok ustu).
+	if frames := written / len(small); frames < 2000 {
+		t.Fatalf("yalnizca %d kucuk cerceve sigdi; byte-tabanli tampon beklenirdi", frames)
+	}
+	// Bir sonraki yazim pencereyi asar -> ihlal.
+	if err := e.writeBody(small); !errors.Is(err, ErrFlowControlViolation) {
+		t.Fatalf("pencere doldu; ErrFlowControlViolation bekleniyordu, geldi: %v", err)
+	}
+}
+
 // Tuketici okudukca kredi iadesi bildirilmeli (window_update'i bu tetikler).
 func TestDrainCallbackReportsConsumedBytes(t *testing.T) {
 	e := newExchange(1)

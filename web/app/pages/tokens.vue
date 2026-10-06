@@ -6,19 +6,28 @@ const toast = useToast()
 const route = useRoute()
 const router = useRouter()
 const { relativeTime } = useFormat()
-const { subscription, currentPlan, openUpgrade, loadBillingData, loading: billingLoading } = useBilling()
-const { platformAdmin } = useAuth()
+const { platformAdmin, user: currentUser } = useAuth()
 const { t } = useI18n()
 
-// Gating: Pro, Team, Enterprise plan check. Platform Admin her zaman erişir.
-const hasSecurityAccess = computed(() => {
+// Kisisel token rotate/iptal sahibi veya owner/admin (sunucu 403 verir, arayuz sadelestirilir).
+const canManage = computed(() => {
   if (platformAdmin.value) return true
-  const p = subscription.value?.plan
-  return p === 'pro' || p === 'team' || p === 'enterprise'
+  const r = (currentUser.value?.role || '').toLowerCase()
+  return r === 'owner' || r === 'admin'
 })
 
-// Tab state: 'tokens' or 'ip'
-const activeTab = ref<'tokens' | 'ip'>((route.query.tab as 'tokens' | 'ip') || 'tokens')
+function canChangeToken(tok: APIToken): boolean {
+  if (canManage.value) return true
+  return !!tok.user_id && tok.user_id === currentUser.value?.id
+}
+
+function errMsg(err: any, fallback: string): string {
+  const e = err?.data?.error
+  return (typeof e === 'string' ? e : e?.message) || err?.message || fallback
+}
+
+// Tab state: 'tokens' | 'ip'
+const activeTab = ref<'tokens' | 'ip'>((route.query.tab as any) || 'tokens')
 
 // Watch query param
 watch(() => route.query.tab, (tab) => {
@@ -48,6 +57,7 @@ const selectedScopes = ref<string[]>([
   'clients:read', 'clients:write'
 ])
 const creatingToken = ref(false)
+const rotatingTokenId = ref<string | null>(null)
 
 // Token Secret Display Modal
 const issuedSecret = ref<{ name: string; token: string; prefix: string } | null>(null)
@@ -80,13 +90,6 @@ const detectedIp = ref<string>('')
 const detectingIp = ref(false)
 
 onMounted(async () => {
-  await loadBillingData()
-  if (!hasSecurityAccess.value) {
-    openUpgrade(t('tokens.upgradeMsg'), 'api_access')
-    router.replace('/')
-    return
-  }
-
   await fetchData()
   detectClientIP()
 })
@@ -103,7 +106,7 @@ async function fetchData() {
     ipRules.value = rulesRes.rules || []
     tunnels.value = tunnelsRes || []
   } catch (err: any) {
-    toast.error(err?.data?.error?.message || err?.message || t('tokens.dataLoadFailed'))
+    toast.error(errMsg(err, t('tokens.dataLoadFailed')))
   } finally {
     loading.value = false
   }
@@ -159,9 +162,34 @@ async function handleCreateToken() {
     createTokenAllScopes.value = true
     toast.success(t('tokens.tokenCreated'))
   } catch (err: any) {
-    toast.error(err?.data?.error?.message || err?.message || t('tokens.tokenCreateFailed'))
+    toast.error(errMsg(err, t('tokens.tokenCreateFailed')))
   } finally {
     creatingToken.value = false
+  }
+}
+
+async function handleRotateToken(tokenItem: APIToken) {
+  if (!confirm(t('tokens.rotateConfirm', { name: tokenItem.name }))) {
+    return
+  }
+
+  rotatingTokenId.value = tokenItem.id
+  try {
+    const res = await api.rotateAPIToken(tokenItem.id)
+    const idx = tokens.value.findIndex(t => t.id === tokenItem.id)
+    if (idx !== -1) {
+      tokens.value[idx] = res.api_token
+    }
+    issuedSecret.value = {
+      name: res.api_token.name + ' (' + t('tokens.modalRotatedTitle') + ')',
+      token: res.token,
+      prefix: res.api_token.token_prefix,
+    }
+    toast.success(t('tokens.tokenRotated'))
+  } catch (err: any) {
+    toast.error(errMsg(err, t('tokens.tokenRotateFailed')))
+  } finally {
+    rotatingTokenId.value = null
   }
 }
 
@@ -176,7 +204,7 @@ async function handleRevokeToken(tokenItem: APIToken) {
     tokens.value = tokens.value.filter(t => t.id !== tokenItem.id)
     toast.success(t('tokens.tokenRevoked'))
   } catch (err: any) {
-    toast.error(err?.data?.error?.message || err?.message || t('tokens.tokenRevokeFailed'))
+    toast.error(errMsg(err, t('tokens.tokenRevokeFailed')))
   } finally {
     revokingTokenId.value = null
   }
@@ -217,7 +245,7 @@ async function handleCreateRule() {
     ruleCidr.value = ''
     ruleDescription.value = ''
   } catch (err: any) {
-    toast.error(err?.data?.error?.message || err?.message || t('tokens.ruleCreateFailed'))
+    toast.error(errMsg(err, t('tokens.ruleCreateFailed')))
   } finally {
     creatingRule.value = false
   }
@@ -230,7 +258,7 @@ async function handleToggleRule(rule: IPAllowlistRule) {
     rule.enabled = updated.enabled
     toast.success(t('tokens.ruleToggled', { state: rule.enabled ? t('tokens.ruleEnabled') : t('tokens.ruleDisabled') }))
   } catch (err: any) {
-    toast.error(err?.data?.error?.message || err?.message || t('tokens.ruleUpdateFailed'))
+    toast.error(errMsg(err, t('tokens.ruleUpdateFailed')))
   } finally {
     updatingRuleId.value = null
   }
@@ -247,7 +275,7 @@ async function handleDeleteRule(rule: IPAllowlistRule) {
     ipRules.value = ipRules.value.filter(r => r.id !== rule.id)
     toast.success(t('tokens.ruleDeleted'))
   } catch (err: any) {
-    toast.error(err?.data?.error?.message || err?.message || t('tokens.ruleDeleteFailed'))
+    toast.error(errMsg(err, t('tokens.ruleDeleteFailed')))
   } finally {
     deletingRuleId.value = null
   }
@@ -266,7 +294,7 @@ function isExpired(expiresAt?: string | null) {
 </script>
 
 <template>
-  <div v-if="hasSecurityAccess" class="space-y-6">
+  <div class="space-y-6">
     <!-- Sayfa Başlığı ve Sekmeler -->
     <div class="mb-6 flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
       <div>
@@ -300,7 +328,7 @@ function isExpired(expiresAt?: string | null) {
         </button>
 
         <button
-          v-else
+          v-else-if="activeTab === 'ip'"
           type="button"
           class="flex cursor-pointer items-center gap-1.5 rounded-lg bg-accent px-3.5 py-2 text-xs font-semibold text-on-accent transition-all duration-150 hover:opacity-90 active:scale-95 shadow-sm"
           @click="showCreateRuleModal = true"
@@ -343,7 +371,7 @@ function isExpired(expiresAt?: string | null) {
     <!-- TAB 1: REST API ANAHTARLARI -->
     <div v-if="activeTab === 'tokens'" class="space-y-6">
       <!-- Özet Kartları -->
-      <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
+      <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <div class="card-interactive rounded-xl border border-line bg-surface p-4">
           <div class="label-sys mb-1 flex items-center gap-1.5">
             <Icon name="lucide:key" class="size-3.5 text-accent" />
@@ -364,19 +392,6 @@ function isExpired(expiresAt?: string | null) {
           <p class="mt-1 text-[11px] text-fg-muted font-medium">{{ t('tokens.cryptoHint') }}</p>
         </div>
 
-        <div class="card-interactive rounded-xl border border-line bg-surface p-4">
-          <div class="label-sys mb-1 flex items-center gap-1.5">
-            <Icon name="lucide:badge-check" class="size-3.5 text-accent" />
-            <span>{{ t('tokens.planScope') }}</span>
-          </div>
-          <div class="flex items-center gap-2 mt-1">
-            <span class="rounded bg-accent/15 border border-accent/30 px-2 py-0.5 font-mono text-xs font-bold capitalize text-accent">
-              {{ currentPlan?.name || subscription?.plan }}
-            </span>
-            <span class="text-xs text-fg-muted font-mono font-medium">{{ t('tokens.fullAuth') }}</span>
-          </div>
-          <p class="mt-1 text-[11px] text-fg-muted font-medium">{{ t('tokens.planHint') }}</p>
-        </div>
       </div>
 
       <!-- Token Tablosu -->
@@ -423,7 +438,7 @@ function isExpired(expiresAt?: string | null) {
             <tbody class="divide-y divide-line">
               <tr v-for="tok in tokens" :key="tok.id" class="hover:bg-surface-2/60 transition-colors">
                 <td class="py-3 px-4">
-                  <div class="font-semibold text-fg flex items-center gap-2">
+                  <div class="font-semibold text-fg flex items-center gap-2 flex-wrap">
                     <Icon name="lucide:key" class="size-3.5 text-accent shrink-0" />
                     <span>{{ tok.name }}</span>
                     <span v-if="isExpired(tok.expires_at)" class="rounded bg-danger/15 text-danger border border-danger/40 px-1.5 py-0.2 text-[9px] font-mono font-bold">
@@ -460,17 +475,31 @@ function isExpired(expiresAt?: string | null) {
                   </span>
                   <span v-else class="text-emerald-700 dark:text-emerald-400 font-bold">{{ t('tokens.noExpiry') }}</span>
                 </td>
-                <td class="py-3 px-4 text-right">
+                <td class="py-3 px-4 text-right whitespace-nowrap">
+                  <span v-if="!canChangeToken(tok)" class="text-[11px] text-fg-subtle">—</span>
+                  <template v-else>
+                  <button
+                    type="button"
+                    class="cursor-pointer rounded-lg border border-line px-2.5 py-1 text-[11px] font-medium text-fg-muted hover:border-accent/40 hover:text-accent hover:bg-surface-2 transition-colors mr-1.5"
+                    :disabled="rotatingTokenId === tok.id || revokingTokenId === tok.id"
+                    :title="t('tokens.rotateTitle')"
+                    @click="handleRotateToken(tok)"
+                  >
+                    <Icon v-if="rotatingTokenId === tok.id" name="lucide:loader-2" class="size-3 animate-spin inline mr-1" />
+                    <Icon v-else name="lucide:rotate-cw" class="size-3 inline mr-1" />
+                    <span>{{ t('tokens.rotate') }}</span>
+                  </button>
                   <button
                     type="button"
                     class="cursor-pointer rounded-lg border border-line px-2.5 py-1 text-[11px] font-medium text-fg-muted hover:border-danger/40 hover:text-danger hover:bg-surface-2 transition-colors"
-                    :disabled="revokingTokenId === tok.id"
+                    :disabled="revokingTokenId === tok.id || rotatingTokenId === tok.id"
                     :title="t('tokens.revokeTitle')"
                     @click="handleRevokeToken(tok)"
                   >
                     <Icon v-if="revokingTokenId === tok.id" name="lucide:loader-2" class="size-3 animate-spin inline mr-1" />
                     <span>{{ t('tokens.revoke') }}</span>
                   </button>
+                  </template>
                 </td>
               </tr>
             </tbody>
@@ -479,7 +508,7 @@ function isExpired(expiresAt?: string | null) {
       </div>
     </div>
 
-    <!-- TAB 2: INGRESS IP FILTRELEME (ALLOWLIST) -->
+    <!-- TAB 3: INGRESS IP FILTRELEME (ALLOWLIST) -->
     <div v-else class="space-y-6">
       <!-- Bilgilendirme Bannerı -->
       <div class="rounded-xl border border-accent/30 bg-accent/5 p-4 flex items-start gap-3 shadow-sm">
@@ -661,6 +690,7 @@ function isExpired(expiresAt?: string | null) {
               v-model="createTokenExpiry"
               class="w-full rounded-lg border border-line bg-bg px-3 py-2 text-xs text-fg focus:border-accent focus:outline-none"
             >
+              <option :value="7">{{ t('tokens.days7') }}</option>
               <option :value="30">{{ t('tokens.days30') }}</option>
               <option :value="60">{{ t('tokens.days60') }}</option>
               <option :value="90">{{ t('tokens.days90') }}</option>
@@ -869,16 +899,6 @@ function isExpired(expiresAt?: string | null) {
         </form>
       </div>
     </div>
-  </div>
 
-  <!-- Loading State -->
-  <div v-else-if="billingLoading" class="flex min-h-[50vh] flex-col items-center justify-center gap-3">
-    <Icon name="lucide:loader-2" class="size-6 animate-spin text-accent" />
-    <span class="text-xs text-fg-subtle font-mono">{{ t('tokens.checkingAccess') }}</span>
-  </div>
-
-  <!-- Locked State (Non-eligible plan) -->
-  <div v-else class="flex min-h-[50vh] flex-col items-center justify-center gap-3">
-    <!-- UpgradeModal pop up triggered, router redirects to / -->
   </div>
 </template>

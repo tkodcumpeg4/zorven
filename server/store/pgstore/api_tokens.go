@@ -70,6 +70,25 @@ func (s *Store) ListAPITokens(ctx context.Context, tenantID string) ([]store.API
 	return tokens, rows.Err()
 }
 
+// GetAPIToken, kiraciya ait ve iptal edilmemis token'i id ile doner. Rotate /
+// iptal oncesi sahiplik kontrolu icin kullanilir.
+func (s *Store) GetAPIToken(ctx context.Context, tenantID, id string) (store.APIToken, error) {
+	var t store.APIToken
+	err := s.pool.QueryRow(ctx,
+		`SELECT `+apiTokenCols+`
+		 FROM api_tokens
+		 WHERE id = $1 AND tenant_id = $2 AND revoked_at IS NULL`, id, tenantID).
+		Scan(&t.ID, &t.TenantID, &t.UserID, &t.Name, &t.TokenID, &t.TokenHash,
+			&t.TokenPrefix, &t.Scopes, &t.LastUsedAt, &t.ExpiresAt, &t.RevokedAt, &t.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return store.APIToken{}, store.ErrNotFound
+	}
+	if err != nil {
+		return store.APIToken{}, err
+	}
+	return t, nil
+}
+
 func (s *Store) GetAPITokenByTokenID(ctx context.Context, tokenID string) (store.APIToken, error) {
 	var t store.APIToken
 	err := s.pool.QueryRow(ctx,
@@ -100,6 +119,25 @@ func (s *Store) RevokeAPIToken(ctx context.Context, tenantID, id string) error {
 		return store.ErrNotFound
 	}
 	return nil
+}
+
+func (s *Store) RotateAPIToken(ctx context.Context, tenantID, id, newTokenID, newTokenHash string) (store.APIToken, error) {
+	var t store.APIToken
+	err := s.pool.QueryRow(ctx,
+		`UPDATE api_tokens
+		 SET token_id = $1, token_hash = $2, last_used_at = NULL
+		 WHERE id = $3 AND tenant_id = $4 AND revoked_at IS NULL
+		 RETURNING `+apiTokenCols,
+		newTokenID, newTokenHash, id, tenantID).
+		Scan(&t.ID, &t.TenantID, &t.UserID, &t.Name, &t.TokenID, &t.TokenHash,
+			&t.TokenPrefix, &t.Scopes, &t.LastUsedAt, &t.ExpiresAt, &t.RevokedAt, &t.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return store.APIToken{}, store.ErrNotFound
+	}
+	if err != nil {
+		return store.APIToken{}, err
+	}
+	return t, nil
 }
 
 func (s *Store) TouchAPITokenLastUsed(ctx context.Context, id string) error {

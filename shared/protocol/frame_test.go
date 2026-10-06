@@ -15,6 +15,9 @@ func TestBodyFrameRoundTrip(t *testing.T) {
 		{"istek govdesi", BodyFrame{FrameRequestBody, 1042, 0, false, []byte("merhaba")}},
 		{"yanit govdesi EOF", BodyFrame{FrameResponseBody, 7, 3, true, []byte("son parca")}},
 		{"bos payload", BodyFrame{FrameResponseBody, 1, 0, true, []byte{}}},
+		{"ws data", BodyFrame{FrameWSData, 42, 0, false, []byte("ws")}},
+		{"stream data (tcp)", BodyFrame{FrameStreamData, 99, 5, false, []byte("raw tcp bytes")}},
+		{"datagram (udp)", BodyFrame{FrameDatagram, 100, 0, false, []byte{0x01, 0x02, 0x03}}},
 		{"maksimum degerler", BodyFrame{FrameRequestBody, math.MaxUint64, math.MaxUint32, true, []byte{0xFF, 0x00}}},
 	}
 

@@ -62,6 +62,10 @@ func (s *Server) inviteTeamMember(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "no_tenant", "istek kiraci kapsami olmadan ulasti")
 		return
 	}
+	// Ekip yonetimi yalnizca owner/admin (member kendini admin yapamasin).
+	if !s.requirePrivileged(w, r, tenantID) {
+		return
+	}
 
 	var body struct {
 		Email string `json:"email"`
@@ -108,6 +112,14 @@ func (s *Server) inviteTeamMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Davet e-postasi: uyelik ancak davetli linkten kabul edince olusur.
+	sent := false
+	if inv, ierr := s.Store.GetInvitation(r.Context(), m.ID); ierr == nil {
+		sent = s.sendInvitationEmail(inv)
+	}
+	m.EmailSent = &sent
+	s.audit(r, "team.invite", m.ID, m.Email)
+
 	writeJSON(w, http.StatusCreated, m)
 }
 
@@ -116,6 +128,10 @@ func (s *Server) updateMemberRole(w http.ResponseWriter, r *http.Request) {
 	tenantID, ok := s.tenantFor(r)
 	if !ok {
 		writeJSONError(w, http.StatusInternalServerError, "no_tenant", "istek kiraci kapsami olmadan ulasti")
+		return
+	}
+	// Ekip yonetimi yalnizca owner/admin (member kendini admin yapamasin).
+	if !s.requirePrivileged(w, r, tenantID) {
 		return
 	}
 
@@ -138,10 +154,20 @@ func (s *Server) updateMemberRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	target, ok := s.guardMemberTarget(w, r, tenantID, memberID, true)
+	if !ok {
+		return
+	}
+
 	if err := s.Store.UpdateTeamMemberRole(r.Context(), tenantID, memberID, role); err != nil {
 		s.fail(w, err)
 		return
 	}
+	// Go oturum onbellegi rolu ~30 sn tasir; yeni rol hemen gecerli olsun.
+	if s.BetterAuth != nil {
+		s.BetterAuth.InvalidateUser(target.UserID)
+	}
+	s.audit(r, "team.role", memberID, role)
 
 	writeJSON(w, http.StatusOK, map[string]any{"success": true})
 }
@@ -153,6 +179,10 @@ func (s *Server) removeTeamMember(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "no_tenant", "istek kiraci kapsami olmadan ulasti")
 		return
 	}
+	// Ekip yonetimi yalnizca owner/admin (member kendini admin yapamasin).
+	if !s.requirePrivileged(w, r, tenantID) {
+		return
+	}
 
 	memberID := r.PathValue("id")
 	if memberID == "" {
@@ -160,10 +190,33 @@ func (s *Server) removeTeamMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	target, ok := s.guardMemberTarget(w, r, tenantID, memberID, false)
+	if !ok {
+		return
+	}
+
+	// Cikarilan uyenin istemcileri silinecek; canli baglantilari da kapatilmali.
+	var memberClients []store.Client
+	if target.UserID != "" {
+		memberClients, _ = s.Store.ListMemberClients(r.Context(), tenantID, target.UserID)
+	}
+
 	if err := s.Store.RemoveTeamMember(r.Context(), tenantID, memberID); err != nil {
 		s.fail(w, err)
 		return
 	}
+	// Onbellekteki oturum eski uyeligi ~30 sn tasimasin.
+	if s.BetterAuth != nil {
+		s.BetterAuth.InvalidateUser(target.UserID)
+	}
+	if s.Hub != nil {
+		for _, c := range memberClients {
+			if sess, ok := s.Hub.Get(c.ID); ok {
+				sess.Close("member removed")
+			}
+		}
+	}
+	s.audit(r, "team.remove", memberID, target.Email)
 
 	writeJSON(w, http.StatusOK, map[string]any{"success": true})
 }
@@ -194,6 +247,10 @@ func (s *Server) listMemberTokens(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "no_tenant", "istek kiraci kapsami olmadan ulasti")
 		return
 	}
+	// Ekip yonetimi yalnizca owner/admin (member kendini admin yapamasin).
+	if !s.requirePrivileged(w, r, tenantID) {
+		return
+	}
 
 	memberID := r.PathValue("id")
 	userID, err := s.resolveUserIDForMember(r.Context(), tenantID, memberID)
@@ -222,6 +279,10 @@ func (s *Server) createMemberToken(w http.ResponseWriter, r *http.Request) {
 	tenantID, ok := s.tenantFor(r)
 	if !ok {
 		writeJSONError(w, http.StatusInternalServerError, "no_tenant", "istek kiraci kapsami olmadan ulasti")
+		return
+	}
+	// Ekip yonetimi yalnizca owner/admin (member kendini admin yapamasin).
+	if !s.requirePrivileged(w, r, tenantID) {
 		return
 	}
 
@@ -276,10 +337,26 @@ func (s *Server) revokeMemberToken(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "no_tenant", "istek kiraci kapsami olmadan ulasti")
 		return
 	}
+	// Ekip yonetimi yalnizca owner/admin (member kendini admin yapamasin).
+	if !s.requirePrivileged(w, r, tenantID) {
+		return
+	}
 
 	clientID := r.PathValue("client_id")
 	if clientID == "" {
 		writeJSONError(w, http.StatusBadRequest, "invalid_id", "istemci id belirtilmedi")
+		return
+	}
+
+	// Istemci gercekten {id} uyesine ait olmali; aksi halde bu uc kiracidaki
+	// HERHANGI bir istemciyi silmek icin kullanilabilirdi.
+	userID, err := s.resolveUserIDForMember(r.Context(), tenantID, r.PathValue("id"))
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	if c, err := s.Store.GetClient(r.Context(), tenantID, clientID); err != nil || c.UserID != userID {
+		writeJSONError(w, http.StatusNotFound, "not_found", "kayit bulunamadi")
 		return
 	}
 
@@ -294,4 +371,35 @@ func (s *Server) revokeMemberToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"success": true})
+}
+
+// guardMemberTarget, rol degistirme/cikarma hedefini dogrular: owner'a
+// dokunulamaz; selfForbidden ise kisi kendi uyeligini de degistiremez (bir
+// admin'in kendini dusurup org'u yoneticisiz birakmasini da onler). Bekleyen
+// davetler (pending) icin kural yok. Reddedilirse yanit yazilir ve false doner;
+// kabul edilirse hedef kayit (onbellek temizligi icin UserID) doner.
+func (s *Server) guardMemberTarget(w http.ResponseWriter, r *http.Request, tenantID, memberID string, selfForbidden bool) (store.TeamMember, bool) {
+	members, err := s.Store.ListTeamMembers(r.Context(), tenantID)
+	if err != nil {
+		s.fail(w, err)
+		return store.TeamMember{}, false
+	}
+	for _, m := range members {
+		if m.ID != memberID {
+			continue
+		}
+		if m.Role == "owner" {
+			writeJSONError(w, http.StatusForbidden, "owner_protected", "organizasyon sahibinin rolu degistirilemez veya sahip cikarilamaz")
+			return store.TeamMember{}, false
+		}
+		if selfForbidden && m.UserID != "" {
+			if u, ok := userFromContext(r.Context()); ok && u != nil && u.ID == m.UserID {
+				writeJSONError(w, http.StatusForbidden, "self_role_change", "kendi rolunuzu degistiremezsiniz")
+				return store.TeamMember{}, false
+			}
+		}
+		return m, true
+	}
+	writeJSONError(w, http.StatusNotFound, "not_found", "uye bulunamadi")
+	return store.TeamMember{}, false
 }

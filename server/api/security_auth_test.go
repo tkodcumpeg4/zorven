@@ -103,9 +103,16 @@ func TestSecurity_CSWSH_Origin_Validation(t *testing.T) {
 
 	// 2. Subdomain of platform domain -> ALLOW
 	req2 := httptest.NewRequest("GET", "https://sunucu:8443/api/v1/clients/c1/terminal", nil)
-	req2.Header.Set("Origin", "https://admin.rpshell.app")
+	req2.Header.Set("Origin", "https://panel.rpshell.app")
 	if !srv.isAllowedOrigin(req2) {
-		t.Errorf("expected platform subdomain origin to be allowed")
+		t.Errorf("expected panel host origin to be allowed")
+	}
+
+	// 2b. Kiraci tunel alt alani (ayni platform domaini) -> BLOCK
+	req2b := httptest.NewRequest("GET", "https://panel.rpshell.app/api/v1/clients/c1/terminal", nil)
+	req2b.Header.Set("Origin", "https://evil-acme.rpshell.app")
+	if srv.isAllowedOrigin(req2b) {
+		t.Errorf("CSWSH: tenant tunnel subdomain origin was allowed")
 	}
 
 	// 3. Localhost dev origin -> ALLOW
@@ -133,5 +140,26 @@ func TestSecurity_TimingAttack_DummyVerification(t *testing.T) {
 	// Argon2 with default parameters takes at least a few milliseconds
 	if dur < 1*time.Millisecond {
 		t.Errorf("VerifyDummy took %v, expected at least 1ms to prevent timing leak", dur)
+	}
+}
+
+// Yapilandirilmis panel hostlari varsa yalnizca onlar (ve ayni origin) gecer.
+func TestSecurity_CSWSH_PanelHostsConfigured(t *testing.T) {
+	srv := &Server{PlatformDomain: "zorven.app", PanelHosts: []string{"zorven.app", "panel.zorven.app:443", "[::1]"}}
+	cases := map[string]bool{
+		"https://panel.zorven.app":      true,
+		"https://zorven.app":            true,
+		"http://[::1]:3000":             true,
+		"https://app.zorven.app":        false, // listede yok
+		"https://shop-acme.zorven.app":  false, // kiraci tuneli
+		"http://localhost:3000":         false, // prod listesinde yok
+		"https://panel.zorven.app.evil": false,
+	}
+	for origin, want := range cases {
+		req := httptest.NewRequest("GET", "https://api.internal/api/v1/clients/c1/terminal", nil)
+		req.Header.Set("Origin", origin)
+		if got := srv.isAllowedOrigin(req); got != want {
+			t.Errorf("origin %s: got %v, want %v", origin, got, want)
+		}
 	}
 }

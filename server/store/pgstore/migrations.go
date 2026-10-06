@@ -12,11 +12,30 @@ import (
 //go:embed migrations/*.sql
 var migrationFS embed.FS
 
+// migrationLockKey, migration'lari siraya sokan advisory lock anahtari
+// (sabit, uygulamaya ozgu rastgele bir int64).
+const migrationLockKey int64 = 0x7a6f7276656e01 // "zorven" + 01
+
 // migrate, uygulanmamis migration'lari sirayla calistirir.
 //
 // Harici migration araci BILEREK kullanilmiyor: tek binary dagitimi hedefimiz,
 // gomulu SQL + kucuk bir runner bunu bozmuyor.
 func migrate(ctx context.Context, pool *pgxpool.Pool) error {
+	// Ayni veritabanina ayni anda baglanan birden cok surec (cluster'da iki dugum
+	// ayni anda acilirsa; paralel testler) migration'lari ESZAMANLI calistirirsa
+	// CREATE TABLE/TYPE yarisi "duplicate key ... pg_type_typname_nsp_index"
+	// hatasiyla acilisi bozar. Oturum seviyesinde advisory lock ile siraya sokulur:
+	// ikinci surec bekler, sonra zaten uygulanmis migration'lari atlar.
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("migration baglantisi alinamadi: %w", err)
+	}
+	defer conn.Release()
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock($1)`, migrationLockKey); err != nil {
+		return fmt.Errorf("migration kilidi alinamadi: %w", err)
+	}
+	defer conn.Exec(context.Background(), `SELECT pg_advisory_unlock($1)`, migrationLockKey) //nolint:errcheck
+
 	if _, err := pool.Exec(ctx,
 		`CREATE TABLE IF NOT EXISTS schema_migrations (
 			version int PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`); err != nil {

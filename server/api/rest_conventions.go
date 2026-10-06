@@ -128,6 +128,11 @@ var tokenPublicRoutes = []tokenRoute{
 	{"GET", "/api/v1/openapi.en.yaml"},
 	{"GET", "/api/v1/plans"},
 
+	{"GET", "/api/v1/projects"},
+	{"POST", "/api/v1/projects"},
+	{"DELETE", "/api/v1/projects/{id}"},
+	{"PATCH", "/api/v1/projects/{id}"},
+
 	{"GET", "/api/v1/clients"},
 	{"POST", "/api/v1/clients"},
 	{"GET", "/api/v1/clients/{id}"},
@@ -139,12 +144,20 @@ var tokenPublicRoutes = []tokenRoute{
 	{"GET", "/api/v1/tunnels/{id}"},
 	{"PATCH", "/api/v1/tunnels/{id}"},
 	{"DELETE", "/api/v1/tunnels/{id}"},
+	{"GET", "/api/v1/tunnels/{id}/access"},
+	{"PUT", "/api/v1/tunnels/{id}/access"},
+	{"GET", "/api/v1/tunnels/{id}/lb"},
+	{"PUT", "/api/v1/tunnels/{id}/lb"},
+	{"GET", "/api/v1/tunnels/{id}/udp"},
+	{"PUT", "/api/v1/tunnels/{id}/udp"},
+	{"GET", "/api/v1/tunnels/{id}/game-status"},
 
 	{"GET", "/api/v1/hostnames"},
 	{"POST", "/api/v1/hostnames"},
 	{"POST", "/api/v1/hostnames/custom"},
 	{"PATCH", "/api/v1/hostnames/{id}"},
 	{"POST", "/api/v1/hostnames/{id}/verify"},
+	{"POST", "/api/v1/hostnames/{id}/dns-check"},
 	{"DELETE", "/api/v1/hostnames/{id}"},
 
 	{"GET", "/api/v1/ip-allowlist"},
@@ -153,6 +166,24 @@ var tokenPublicRoutes = []tokenRoute{
 	{"DELETE", "/api/v1/ip-allowlist/{id}"},
 
 	{"GET", "/api/v1/requests"},
+	{"GET", "/api/v1/requests/capture"},
+	{"POST", "/api/v1/requests/capture"},
+	{"GET", "/api/v1/requests/{id}"},
+	{"POST", "/api/v1/requests/{id}/replay"},
+
+	// Zorven Network: "zorven connect" API token ile baglanir.
+	{"GET", "/api/v1/network/resources"},
+	{"POST", "/api/v1/network/resources"},
+	{"GET", "/api/v1/network/connect"},
+
+	// Cihazlar: envanter okuma otomasyonu token ile calisabilmeli.
+	{"GET", "/api/v1/devices"},
+	{"GET", "/api/v1/devices/{id}"},
+	{"GET", "/api/v1/devices/{id}/config"},
+	{"PUT", "/api/v1/devices/{id}/config"},
+	{"GET", "/api/v1/devices/{id}/tags"},
+	{"PUT", "/api/v1/devices/{id}/tags"},
+
 	{"GET", "/api/v1/subscription"},
 	{"GET", "/api/v1/events"},
 }

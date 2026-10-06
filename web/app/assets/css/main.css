@@ -3,7 +3,7 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 /* ---------------------------------------------------------------------------
-   Stil dili: finagent.tkod.tr (nötr siyah zemin, yıldız alanı, chip nav,
+   Stil dili: finagent.example.net (nötr siyah zemin, yıldız alanı, chip nav,
    yarı saydam katmanlı kartlar, canlı gradient vurgu bölümleri).
    Aydınlık mod (Light mode): Modern kağıt/kart nötr palet (#F8FAFC, #FFFFFF),
    yüksek kontrastlı tipografi (#0F172A), dengeli yeşil aksanlar.

@@ -13,16 +13,34 @@ import (
 type Config struct {
 	ServerAddr string `json:"server_addr"`
 	Token      string `json:"token"`
-	LocalURL   string `json:"local_url"`
+	// LocalURL, `zorven` komutu hedef verilmeden calistirildiginda KULLANILMAZ.
+	// Varsayilan BOS'tur: kullanici acikca bir hedef vermedikce hicbir yerel
+	// port icin tunel acilmaz. Alan yalnizca eski config dosyalariyla
+	// uyumluluk icin tutulur.
+	LocalURL   string `json:"local_url,omitempty"`
 	CACertPath string `json:"ca_cert_path,omitempty"`
 	Insecure   bool   `json:"insecure,omitempty"`
+}
+
+// legacyDefaultLocalURLs, eski surumlerin config dosyasina KENDILIGINDEN
+// yazdigi varsayilan hedeflerdir. Bunlar kullanicinin secimi degildi; yuklenirken
+// temizlenir ki eski kullanicilarda istenmeyen tunel acilmasin.
+var legacyDefaultLocalURLs = map[string]bool{
+	"http://localhost:8003": true,
+	"http://localhost:8000": true,
+	"http://localhost:3000": true,
+}
+
+// IsLegacyDefaultLocalURL, verilen hedefin eski otomatik varsayilanlardan
+// biri olup olmadigini soyler (masaustu uygulamasi da kullanir).
+func IsLegacyDefaultLocalURL(u string) bool {
+	return legacyDefaultLocalURLs[strings.TrimRight(strings.TrimSpace(u), "/")]
 }
 
 // DefaultConfig, varsayilan istemci ayarlarini doner.
 func DefaultConfig() Config {
 	return Config{
 		ServerAddr: "zorven.app:443",
-		LocalURL:   "http://localhost:8003",
 		Insecure:   false,
 	}
 }
@@ -79,6 +97,11 @@ func LoadFile(path string) (Config, error) {
 	if cfg.ServerAddr == "" || cfg.ServerAddr == "localhost:8443" {
 		cfg.ServerAddr = "zorven.app:443"
 	}
+	// Eski surumlerin otomatik yazdigi hedefi (or. localhost:8003) at: kullanici
+	// secimi degildi ve istemciyi o porta kendiliginden tunel acmaya iterdi.
+	if IsLegacyDefaultLocalURL(cfg.LocalURL) {
+		cfg.LocalURL = ""
+	}
 	return cfg, nil
 }
 
@@ -120,6 +143,9 @@ func SaveFile(path string, cfg Config) error {
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return fmt.Errorf("ayar dosyasina yazilamadi: %w", err)
 	}
+	// WriteFile mevcut dosyanin iznini DEGISTIRMEZ: eskiden gevsek izinle
+	// olusmus bir dosyada token herkese okunur kalirdi. Her yazimda daralt.
+	_ = os.Chmod(path, 0o600)
 	return nil
 }
 

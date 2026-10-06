@@ -9,6 +9,7 @@ import (
 
 	"github.com/tkodcumpeg4/zorven/server/bandwidth"
 	"github.com/tkodcumpeg4/zorven/server/ingress"
+	"github.com/tkodcumpeg4/zorven/server/internal/testdb"
 	"github.com/tkodcumpeg4/zorven/server/store"
 	"github.com/tkodcumpeg4/zorven/server/store/pgstore"
 	"github.com/tkodcumpeg4/zorven/server/tunnel"
@@ -16,9 +17,9 @@ import (
 
 func TestIngress_ThrottlingAndUsageRecording(t *testing.T) {
 	ctx := context.Background()
-	st, err := pgstore.Open(ctx, "postgres://rpshell:rpshell@localhost:5432/rpshell_test")
+	st, err := pgstore.Open(ctx, testdb.DSN(t))
 	if err != nil {
-		t.Skip("Postgres test DB baglanamadi, atlaniyor")
+		t.Fatalf("test veritabani acilamadi: %v", err)
 	}
 	defer st.Close()
 

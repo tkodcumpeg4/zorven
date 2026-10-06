@@ -1,0 +1,13 @@
+{
+  "name": "@zorven/sdk",
+  "version": "0.1.0",
+  "description": "Zorven tunnel SDK for Node.js — open a public tunnel to a local port programmatically (wraps the zorven CLI).",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "license": "AGPL-3.0-or-later",
+  "keywords": ["zorven", "tunnel", "ngrok", "reverse-proxy", "self-hosted"],
+  "homepage": "https://zorven.app",
+  "repository": { "type": "git", "url": "https://github.com/tkodcumpeg4/zorven" },
+  "engines": { "node": ">=16" },
+  "files": ["index.js", "index.d.ts", "README.md"]
+}

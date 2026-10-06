@@ -2,13 +2,12 @@ package auth
 
 import (
 	"context"
-	"net/url"
-	"os"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/tkodcumpeg4/zorven/server/internal/testdb"
+	"github.com/tkodcumpeg4/zorven/server/store/pgstore"
 )
 
 func TestBetterAuthVerifier_EmptyOrNil(t *testing.T) {
@@ -26,16 +25,17 @@ func TestBetterAuthVerifier_EmptyOrNil(t *testing.T) {
 
 func testPGPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	dsn := os.Getenv("ZORVEN_TEST_PG_DSN")
-	if dsn == "" {
-		t.Skip("ZORVEN_TEST_PG_DSN ayarli degil; BetterAuth Postgres testleri atlaniyor")
-	}
-	u, err := url.Parse(dsn)
-	if err != nil || !strings.Contains(strings.TrimPrefix(u.Path, "/"), "test") {
-		t.Fatalf("ZORVEN_TEST_PG_DSN bir test veritabanina isaret etmeli: %s", dsn)
-	}
+	dsn := testdb.DSN(t)
 
 	ctx := context.Background()
+	// Migration'lar (Better Auth tablolari dahil) pgstore.Open ile uygulanir;
+	// bos bir test veritabaninda aksi halde "user" tablosu yoktur.
+	st, err := pgstore.Open(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pgstore.Open: %v", err)
+	}
+	st.Close()
+
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
 		t.Fatalf("pgxpool.New: %v", err)

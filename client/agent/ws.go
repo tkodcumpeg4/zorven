@@ -19,6 +19,10 @@ const wsDialTimeout = 15 * time.Second
 // tekrarlar, 101 sonucunu sunucuya bildirir ve baglantiyi iki yonlu pipeler.
 func (cs *clientSession) handleWSOpen(m protocol.WSOpen) {
 	base := cs.targetFor(m.TunnelID)
+	if base == "" {
+		cs.sendWSAccept(m.ReqID, 0, nil, protocol.CodeLocalUnreachable, "bu tunel icin yerel hedef tanimli degil")
+		return
+	}
 	u, err := url.Parse(base)
 	if err != nil {
 		cs.sendWSAccept(m.ReqID, 0, nil, protocol.CodeLocalUnreachable, "gecersiz hedef: "+err.Error())

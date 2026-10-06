@@ -14,8 +14,91 @@ export interface Metrics {
   disk_percent?: number
 }
 
+export interface Project {
+  id: string
+  tenant_id: string
+  name: string
+  slug: string
+  created_at: string
+}
+
+// Secret Vault (FAZ 1 / F06). Deger yalnizca olusturma yanitinda doner.
+export interface Secret {
+  id: string
+  tenant_id: string
+  project_id: string
+  name: string
+  key_version: number
+  created_at: string
+  updated_at: string
+}
+
+// Birlesik Policy motoru (FAZ 1 / F04).
+export interface PolicyMatch {
+  path_prefix?: string
+  methods?: string[]
+  header?: Record<string, string>
+  // Geo (F03a) — boş bırakılanlar eşleşmede dikkate alınmaz.
+  country?: string[]      // ISO 3166-1 alpha-2
+  continent?: string[]    // kıta kodu
+  asn?: number[]
+  isp?: string[]          // ASN organizasyon adı
+  // Liste tabanlı (F03b-d). undefined = "belirtilmedi", false = "olmayan".
+  tor_exit?: boolean
+  hosting?: boolean
+  reputation?: string[]   // liste adları; herhangi biri tutarsa eşleşir
+}
+export type PolicyActionType =
+  | 'deny' | 'set_header' | 'redirect' | 'require_mtls' | 'rate_limit'
+  | 'verify_webhook' | 'waf'
+
+export interface PolicyAction {
+  type: PolicyActionType
+  status?: number
+  message?: string
+  location?: string
+  request?: { set?: Record<string, string>, remove?: string[] }
+  response?: { set?: Record<string, string>, remove?: string[] }
+  key?: string
+  requests?: number
+  window_sec?: number
+  burst?: number
+  // verify_webhook (F05)
+  provider?: 'github' | 'stripe' | 'gitlab' | 'shopify' | 'slack'
+  secret_ref?: string     // {{secret:ad}} veya düz değer
+  tolerance_sec?: number  // zaman damgalı sağlayıcılarda; 0 => 300
+  // waf (F02)
+  ruleset?: string        // '' | owasp-lite
+  patterns?: string[]     // kuruma özel ek regex'ler
+}
+export interface PolicyRule {
+  match: PolicyMatch
+  action: PolicyAction
+}
+export interface PolicyConfig {
+  rules: PolicyRule[]
+}
+export interface PolicyBinding {
+  policy_id: string
+  tunnel_id?: string
+  hostname?: string
+}
+export interface Policy {
+  id: string
+  tenant_id: string
+  project_id: string
+  name: string
+  config: PolicyConfig
+  enabled: boolean
+  priority: number
+  created_at: string
+  updated_at: string
+  bindings?: PolicyBinding[]
+}
+
 export interface Client {
   id: string                 // "cli_a1b2c3"
+  project_id?: string
   name: string               // "ev-pc"
   status: ClientStatus
   version?: string           // yalnızca bağlıyken
@@ -24,16 +107,42 @@ export interface Client {
   last_seen_at?: string
   is_service?: boolean
   metrics?: Metrics
+  // Cihaz alanları (F14) — bağlantı kopsa da kalıcıdır.
+  hostname?: string
+  os?: string                // "windows"
+  arch?: string              // "amd64"
+  ips?: string[]
+  agent_version?: string
+  last_metrics?: Metrics     // en son BİLİNEN metrikler (offline iken de dolu)
 }
+
+// Device, istemci kaydı + kalıcı cihaz bilgisi + canlı durum (F14).
+export interface Device extends Client {
+  tunnels?: Tunnel[]         // yalnızca tek cihaz detayında dolu
+  tags?: Record<string, string>  // F16, yalnızca detayda dolu
+}
+
+export type TunnelProto = 'http' | 'tcp' | 'udp'
+// 'private' (F17): internete hiç açılmaz; yalnızca `zorven connect` ile.
+export type TunnelExposure = 'auto' | 'port' | 'sni' | 'private'
 
 export interface Tunnel {
   id: string                 // "tun_x9y8z7"
+  project_id?: string
   client_id: string
   target: string             // "http://localhost:8000"
   enabled: boolean
   created_at: string
+  /** Taşınan protokol. http (varsayılan), tcp veya udp (FAZ 3 / D2). */
+  proto?: TunnelProto
+  /** Ziyaretçi maruziyeti. http→auto; tcp/udp→port (rezerve) veya sni (forwarder). */
+  exposure?: TunnelExposure
+  /** Mod A (rezerve-port) atanan TCP/UDP portu; 0/undefined ise atanmamış. */
+  public_port?: number
   /** Tünelin yayınlandığı adlar. Bir tünelin BİRDEN ÇOK adı olabilir. */
   hostnames?: Hostname[]
+  /** Özel kaynağın adı (F17), ör. "db.internal". Yalnızca exposure === 'private'. */
+  private_name?: string
 }
 
 /**
@@ -53,6 +162,7 @@ export interface VerificationInstructions {
 
 export interface Hostname {
   id: string                 // "hst_a1b2c3"
+  project_id?: string
   tunnel_id: string | null
   fqdn: string               // "api.rpshell.app"
   type: HostnameType
@@ -172,10 +282,284 @@ export interface PatchHostnamePayload {
 }
 
 export type CreateCustomHostnameResponse = Hostname & {
-  instructions: VerificationInstructions
+  instructions?: VerificationInstructions
+  // Üst zone (ör. example.net) zaten doğrulanmışsa alt alan adı (api.example.net)
+  // DNS doğrulaması olmadan otomatik aktif edilir.
+  auto_verified?: boolean
+  parent_zone?: string
+  // Otomatik doğrulanan adın DNS'i zaten platforma yönleniyor mu (CNAME).
+  dns_pointed?: boolean
+}
+
+export interface DNSCheckResult {
+  fqdn: string
+  pointed: boolean
+  cname_target: string
 }
 
 export type VerifyHostnameResponse = Hostname
+
+// --- FAZ 2: İstek inspector ---
+
+export interface RequestDetail {
+  id: string
+  tunnel_id: string
+  hostname?: string
+  client_ip?: string
+  ts: string
+  method: string
+  path: string
+  query?: string
+  status: number
+  duration_ms: number
+  req_headers?: Record<string, string[]>
+  req_body: string
+  req_body_truncated: boolean
+  resp_headers?: Record<string, string[]>
+  resp_body: string
+  resp_body_truncated: boolean
+}
+
+// F09 — orijinal yakalama ile replay yanıtının karşılaştırması.
+export interface FieldDiff {
+  path: string
+  old?: string
+  new?: string
+  kind: 'added' | 'removed' | 'changed'
+}
+export interface ReplayDiff {
+  status_changed: boolean
+  old_status: number
+  new_status: number
+  old_duration_ms: number
+  new_duration_ms: number
+  headers: FieldDiff[]
+  body_kind: 'json' | 'text'
+  body: FieldDiff[]
+  truncated: boolean
+}
+
+// F08 — replay öncesi düzenlemeler. Verilmeyen alan orijinalden gelir.
+export interface ReplayOverrides {
+  method?: string
+  path?: string
+  query?: string
+  headers?: Record<string, string>
+  remove_headers?: string[]
+  body?: string
+  tunnel_id?: string
+}
+
+export interface ReplayResult {
+  status: number
+  headers?: Record<string, string[]>
+  body: string
+  body_truncated: boolean
+  duration_ms?: number
+  diff?: ReplayDiff
+}
+
+// --- Tünel erişim denetimi ---
+
+export type TunnelAccessMode = 'none' | 'basic' | 'oauth'
+
+export interface TunnelAccess {
+  tunnel_id: string
+  mode: TunnelAccessMode
+  enabled: boolean
+  config: {
+    username?: string
+    has_password?: boolean
+    providers?: string[]
+    allowed_emails?: string[]
+  }
+}
+
+export interface TunnelAccessInput {
+  mode: TunnelAccessMode
+  enabled: boolean
+  config: {
+    // basic
+    username?: string
+    password?: string // düz metin; sunucu hash'ler. Boş bırakılırsa mevcut korunur.
+    // oauth
+    providers?: string[]
+    allowed_emails?: string[]
+  }
+}
+
+// FAZ 4 / F21 — yük dengeleme + sağlık kontrolü.
+export type LBStrategy = 'round_robin' | 'weighted' | 'least_connections' | 'latency'
+export interface TunnelLBConfig {
+  tunnel_id?: string
+  strategy: LBStrategy
+  weights: Record<string, number>
+  health_enabled: boolean
+  health_path: string
+  interval_sec: number
+  timeout_sec: number
+  unhealthy_threshold: number
+  healthy_threshold: number
+}
+export interface LBBackendStatus {
+  client_id: string
+  healthy: boolean
+  checked: boolean
+  latency_ms?: number
+  in_flight: number
+  last_check?: string
+  last_error?: string
+}
+// FAZ 4 / F24 — UDP ileri + oyun sunucusu durumu.
+export interface TunnelUDPConfig {
+  tunnel_id?: string
+  idle_timeout_sec: number
+  max_packet_bytes: number
+  max_pps: number
+  max_flow_pps: number
+  max_flows: number
+}
+export interface UDPLiveStats {
+  port: number
+  since: string
+  active_flows: number
+  pps_in: number
+  pps_out: number
+  packets_in: number
+  packets_out: number
+  bytes_in: number
+  bytes_out: number
+  flows_total: number
+  dropped_rate: number
+  dropped_size: number
+  dropped_flows: number
+}
+export interface UDPStatMinute {
+  minute: string
+  packets_in: number
+  packets_out: number
+  bytes_in: number
+  bytes_out: number
+  flows_new: number
+  flows_peak: number
+  dropped_rate: number
+  dropped_size: number
+  dropped_flows: number
+}
+export interface TunnelUDPResp {
+  config: TunnelUDPConfig
+  defaults: TunnelUDPConfig
+  live: UDPLiveStats | null
+  series: UDPStatMinute[]
+}
+export interface GameStatus {
+  kind: 'minecraft_java' | 'minecraft_bedrock'
+  online: boolean
+  version?: string
+  protocol?: number
+  players_online: number
+  players_max: number
+  players?: string[]
+  motd?: string
+  game_mode?: string
+  latency_ms: number
+  error?: string
+}
+
+export interface TunnelLBResp {
+  config: TunnelLBConfig
+  candidates: string[]
+  health: LBBackendStatus[] | null
+}
+
+export interface TunnelReplica {
+  client_id: string
+  name: string
+  online: boolean
+}
+
+// FAZ 6 — trafik politikası (header/redirect kuralları).
+export interface TrafficHeaderRules {
+  set?: Record<string, string>
+  remove?: string[]
+}
+export interface TrafficRedirect {
+  match_prefix: string
+  location: string
+  status: number // 301|302|307|308
+}
+export interface TrafficConfig {
+  request_headers?: TrafficHeaderRules
+  response_headers?: TrafficHeaderRules
+  redirects?: TrafficRedirect[]
+}
+export interface TrafficPolicy {
+  tunnel_id: string
+  enabled: boolean
+  config: TrafficConfig
+}
+
+// FAZ 6.3 — per-tünel metrikler.
+export interface MetricBucket {
+  bucket: string
+  count: number
+  error_count: number
+  avg_ms: number
+  max_ms: number
+  bytes_in: number
+  bytes_out: number
+}
+export interface TunnelMetricsSummary {
+  total_requests: number
+  error_count: number
+  error_rate_pct: number
+  avg_ms: number
+  max_ms: number
+}
+export interface TunnelMetricsResp {
+  window: string
+  bucket_sec: number
+  buckets: MetricBucket[]
+  summary: TunnelMetricsSummary
+}
+
+// FAZ 6.6 — mTLS / istemci sertifikası.
+export interface TunnelMTLS {
+  tunnel_id: string
+  enabled: boolean
+  ca_pem: string
+  has_ca: boolean
+}
+
+// FAZ 6.5 — yol tabanlı yönlendirme.
+export interface PathRoute {
+  id: string
+  fqdn: string
+  path_prefix: string
+  tunnel_id: string
+  created_at: string
+}
+
+// FAZ 6.4 — metrik uyarısı.
+export interface TunnelAlert {
+  tunnel_id: string
+  enabled: boolean
+  error_rate_pct: number
+  window_min: number
+  min_requests: number
+  notify_email: string
+  state: string // ok | firing
+  last_changed_at?: string | null
+}
+
+export interface AbuseReport {
+  id: string
+  fqdn: string
+  reason: string
+  reporter_ip?: string
+  handled: boolean
+  created_at: string
+}
 
 export interface RequestLog {
   id: string                 // "req_00f1"
@@ -277,6 +661,20 @@ export interface TeamMember {
   tokens_count: number
   /** "active" (kabul edilmiş üyelik) veya "pending" (bekleyen davet). */
   status?: 'active' | 'pending' | string
+  /** Yalnızca davet yanıtında: davet e-postası teslim edildi mi. */
+  email_sent?: boolean
+}
+
+/** Ekip daveti: davetli e-postadaki linkten kendi hesabıyla kabul eder. */
+export interface TeamInvitation {
+  id: string
+  organization_id: string
+  organization_name: string
+  email: string
+  role: 'admin' | 'member' | string
+  status: 'pending' | 'accepted' | 'rejected' | 'canceled' | string
+  inviter_name?: string
+  expires_at: string
 }
 
 export interface TeamOverview {
@@ -306,6 +704,11 @@ export interface APIToken {
 }
 
 export interface CreateAPITokenResponse {
+  token: string
+  api_token: APIToken
+}
+
+export interface RotateAPITokenResponse {
   token: string
   api_token: APIToken
 }

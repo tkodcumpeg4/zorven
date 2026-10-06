@@ -2,7 +2,7 @@
 #
 # Zorven veritabani yedekleme.
 #
-# postgres konteynerindeki her DB'yi (rpshell + umami) pg_dump ile alir,
+# postgres konteynerindeki her DB'yi (zorven DB) pg_dump ile alir,
 # gzip'ler ve retention gunu asilan eski yedekleri siler. Cron ile gunluk
 # calistirilmasi onerilir (kurulum: `deploy/backup.sh --install-cron`).
 #
@@ -10,14 +10,14 @@
 #   COMPOSE_DIR    (vars: /opt/zorven/deploy)
 #   BACKUP_DIR     (vars: /opt/zorven/backups)
 #   RETENTION_DAYS (vars: 14)
-#   DBS            (vars: "rpshell umami")
+#   DBS            (vars: "rpshell")
 #   PGUSER_DUMP    (vars: rpshell)  — postgres superuser (local trust)
 set -euo pipefail
 
 COMPOSE_DIR="${COMPOSE_DIR:-/opt/zorven/deploy}"
 BACKUP_DIR="${BACKUP_DIR:-/opt/zorven/backups}"
 RETENTION_DAYS="${RETENTION_DAYS:-14}"
-DBS="${DBS:-rpshell umami}"
+DBS="${DBS:-${POSTGRES_DB:-rpshell}}"
 PGUSER_DUMP="${PGUSER_DUMP:-rpshell}"
 
 # --install-cron: bu scripti her gun 03:30'da calistiracak bir cron satiri ekler.

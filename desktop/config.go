@@ -13,7 +13,9 @@ import (
 type Config struct {
 	ServerAddr string `json:"server_addr"`
 	Token      string `json:"token"`
-	LocalURL   string `json:"local_url"`
+	// LocalURL ARTIK tunel acmak icin kullanilmaz (yalnizca eski config'lerle
+	// uyumluluk). Hedef sadece SharePort ile, o oturum icin ve acikca verilir.
+	LocalURL   string `json:"local_url,omitempty"`
 	CACertPath string `json:"ca_cert_path,omitempty"`
 	Insecure   bool   `json:"insecure,omitempty"`
 
@@ -34,14 +36,16 @@ type Config struct {
 
 func defaultConfig() Config {
 	return Config{
-		ServerAddr:  "zorven.app:443",
-		LocalURL:    "http://localhost:8003",
-		AutoConnect: true,
+		ServerAddr: "zorven.app:443",
+		// AutoConnect VARSAYILAN KAPALI. Açıksa uygulama açılışta yalnızca
+		// sunucuda tanımlı tünellere bağlanır; hiçbir yerel port kendiliğinden
+		// tünellenmez (LocalURL boş, RequestedTarget gönderilmez).
+		AutoConnect: false,
 		NoTerminal:  false,
 		NoScreen:    false,
 		HideToTray:  true,
-		LastPort:    8003,
-		RecentPorts: []int{8003, 3000, 5173, 8080},
+		// Port geçmişi yalnızca arayüzde öneri içindir; tünel açmaz.
+		RecentPorts: []int{3000, 5173, 8080},
 	}
 }
 
@@ -96,13 +100,13 @@ func loadConfig() (Config, error) {
 		}
 	}
 	if len(cfg.RecentPorts) == 0 {
-		cfg.RecentPorts = []int{8003, 3000, 5173, 8080}
+		cfg.RecentPorts = []int{3000, 5173, 8080}
 	}
-	if cfg.LastPort == 0 || cfg.LastPort == 3000 {
-		cfg.LastPort = 8003
-	}
-	if cfg.LocalURL == "" || cfg.LocalURL == "http://localhost:3000" {
-		cfg.LocalURL = "http://localhost:8003"
+	// Migrasyon: eski surumler config'e kendiliginden "http://localhost:8003"
+	// yaziyor ve her Baglan'da bu porta tunel actiriyordu. Kullanici secimi
+	// olmadigi icin temizle; artik hedef yalnizca SharePort ile acikca verilir.
+	if clientcfg.IsLegacyDefaultLocalURL(cfg.LocalURL) {
+		cfg.LocalURL = ""
 	}
 	if cfg.ServerAddr == "" || cfg.ServerAddr == "localhost:8443" {
 		cfg.ServerAddr = "zorven.app:443"

@@ -1,11 +1,23 @@
 import type {
   Client, Tunnel, Hostname, RequestLog, LogFilter, CreateClientResponse,
-  CreateCustomHostnameResponse, VerifyHostnameResponse,
+  CreateCustomHostnameResponse, VerifyHostnameResponse, DNSCheckResult,
   Subscription, Plan, SubscriptionResponse, PlansResponse,
   AdminGlobalStats, TenantWithCounts, ClientWithTenant, HostnameWithTenant,
   TeamMember, TeamOverview, CreateMemberTokenResponse,
-  APIToken, CreateAPITokenResponse, IPAllowlistRule,
+  APIToken, CreateAPITokenResponse, RotateAPITokenResponse, IPAllowlistRule,
   MailInfo, MailMessage,
+  TunnelAccess, TunnelAccessInput,
+  RequestDetail, ReplayResult, ReplayOverrides, Device,
+  AbuseReport,
+  TunnelReplica, TunnelLBConfig, TunnelLBResp, TunnelUDPConfig, TunnelUDPResp, GameStatus,
+  TrafficPolicy, TrafficConfig,
+  TunnelMetricsResp,
+  TunnelAlert,
+  PathRoute,
+  TunnelMTLS,
+  Project,
+  Secret, Policy, PolicyConfig,
+  TeamInvitation,
 } from '~/types/api'
 
 /**
@@ -88,6 +100,7 @@ const delay = (ms = 220) => new Promise(r => setTimeout(r, ms))
 
 export function useApi() {
   const { key } = useAdminKey()
+  const { adminTenant } = useAdminTenant()
 
   /** Kimlik dogrulamali istek. Tum gercek cagrilar bundan gecer. */
   function req<T>(path: string, opts: Record<string, unknown> = {}): Promise<T> {
@@ -96,11 +109,51 @@ export function useApi() {
     }
     if (key.value) {
       headers.Authorization = `Bearer ${key.value}`
+      // Admin anahtari modunda "Yonetime Gec" ile secilen kiraci.
+      if (adminTenant.value) headers['X-Tenant-ID'] = adminTenant.value
+    }
+    const { activeProject } = useActiveProject()
+    if (activeProject.value) {
+      headers['X-Zorven-Project'] = activeProject.value
     }
     return $fetch(`${BASE}${path}`, {
       ...opts,
       headers,
     }) as Promise<T>
+  }
+
+  // --- Projeler (FAZ 0 / F00) ---
+  async function listProjects(): Promise<Project[]> {
+    if (USE_MOCK) {
+      await delay()
+      return [{ id: 'prj_default', tenant_id: 'ten_default', name: 'Default', slug: 'default', created_at: new Date().toISOString() }]
+    }
+    const res = await req<Project[]>('/projects')
+    return res ?? []
+  }
+
+  async function createProject(payload: { name: string; slug: string }): Promise<Project> {
+    if (USE_MOCK) {
+      await delay()
+      return { id: `prj_${Math.random().toString(36).slice(2, 8)}`, tenant_id: 'ten_default', name: payload.name, slug: payload.slug, created_at: new Date().toISOString() }
+    }
+    return req<Project>('/projects', { method: 'POST', body: payload })
+  }
+
+  async function deleteProject(id: string): Promise<void> {
+    if (USE_MOCK) { await delay(); return }
+    await req(`/projects/${id}`, { method: 'DELETE' })
+  }
+
+  // Yalnızca görünen ad değişir; slug sabittir (aktif proje seçimi slug'a bakar).
+  async function renameProject(id: string, name: string): Promise<Project> {
+    return req<Project>(`/projects/${id}`, { method: 'PATCH', body: { name } })
+  }
+
+  // Aktif organizasyonu ve TÜM verisini siler. Yalnızca oturum açmış owner/admin;
+  // onay için organizasyonun kısa adı (slug) birebir gönderilmeli.
+  async function deleteOrganization(confirmSlug: string): Promise<void> {
+    await req('/organization', { method: 'DELETE', body: { confirm_slug: confirmSlug } })
   }
 
   async function listClients(): Promise<Client[]> {
@@ -143,7 +196,7 @@ export function useApi() {
    * (ör. "api"); sunucu bunu platform domainiyle birleştirip kiracı kapsamlı
    * adı otomatik verir.
    */
-  async function createTunnel(input: { name: string, client_id: string, target: string, hostname_id?: string }): Promise<Tunnel> {
+  async function createTunnel(input: { name: string, client_id: string, target: string, hostname_id?: string, no_domain?: boolean }): Promise<Tunnel> {
     if (USE_MOCK) {
       await delay(400)
       const id = `tun_${Math.random().toString(36).slice(2, 8)}`
@@ -158,7 +211,7 @@ export function useApi() {
     return req<Tunnel>(`/tunnels`, { method: 'POST', body: input })
   }
 
-  async function updateTunnel(id: string, patch: Partial<Pick<Tunnel, 'target' | 'enabled'>>): Promise<Tunnel> {
+  async function updateTunnel(id: string, patch: Partial<Pick<Tunnel, 'target' | 'enabled' | 'proto' | 'exposure' | 'client_id'>>): Promise<Tunnel> {
     if (USE_MOCK) {
       await delay()
       const t = mockTunnels.find(x => x.id === id)
@@ -178,6 +231,138 @@ export function useApi() {
     }
     await req(`/tunnels/${id}`, { method: 'DELETE' })
   }
+
+  // --- Tünel erişim denetimi (Basic Auth / OAuth) ---
+
+  async function getTunnelAccess(id: string): Promise<TunnelAccess> {
+    if (USE_MOCK) { await delay(); return { tunnel_id: id, mode: 'none', enabled: false, config: {} } }
+    return req<TunnelAccess>(`/tunnels/${id}/access`)
+  }
+
+  async function setTunnelAccess(id: string, payload: TunnelAccessInput): Promise<TunnelAccess> {
+    if (USE_MOCK) { await delay(); return { tunnel_id: id, mode: payload.mode, enabled: payload.enabled, config: {} } }
+    return req<TunnelAccess>(`/tunnels/${id}/access`, { method: 'PUT', body: payload })
+  }
+
+  // --- Tünel replikaları (FAZ 5 / HA) ---
+
+  async function getTunnelReplicas(id: string): Promise<TunnelReplica[]> {
+    if (USE_MOCK) { await delay(); return [] }
+    const r = await req<{ replicas: TunnelReplica[], count: number }>(`/tunnels/${id}/replicas`)
+    return r?.replicas ?? []
+  }
+
+  async function addTunnelReplica(id: string, clientID: string): Promise<void> {
+    if (USE_MOCK) { await delay(); return }
+    await req(`/tunnels/${id}/replicas`, { method: 'POST', body: { client_id: clientID } })
+  }
+
+  async function getTunnelLB(id: string): Promise<TunnelLBResp> {
+    if (USE_MOCK) {
+      await delay()
+      return {
+        config: { tunnel_id: id, strategy: 'round_robin', weights: {}, health_enabled: false, health_path: '/', interval_sec: 10, timeout_sec: 3, unhealthy_threshold: 3, healthy_threshold: 2 },
+        candidates: [],
+        health: [],
+      }
+    }
+    return req<TunnelLBResp>(`/tunnels/${id}/lb`)
+  }
+
+  async function setTunnelLB(id: string, payload: TunnelLBConfig): Promise<TunnelLBConfig> {
+    if (USE_MOCK) { await delay(); return payload }
+    return req<TunnelLBConfig>(`/tunnels/${id}/lb`, { method: 'PUT', body: payload })
+  }
+
+  async function getTunnelUDP(id: string): Promise<TunnelUDPResp> {
+    if (USE_MOCK) {
+      await delay()
+      const d = { tunnel_id: id, idle_timeout_sec: 90, max_packet_bytes: 65507, max_pps: 0, max_flow_pps: 0, max_flows: 1024 }
+      return { config: d, defaults: d, live: null, series: [] }
+    }
+    return req<TunnelUDPResp>(`/tunnels/${id}/udp`)
+  }
+
+  async function setTunnelUDP(id: string, payload: TunnelUDPConfig): Promise<TunnelUDPConfig> {
+    if (USE_MOCK) { await delay(); return payload }
+    return req<TunnelUDPConfig>(`/tunnels/${id}/udp`, { method: 'PUT', body: payload })
+  }
+
+  async function getGameStatus(id: string): Promise<GameStatus> {
+    if (USE_MOCK) { await delay(); return { kind: 'minecraft_java', online: false, players_online: 0, players_max: 0, latency_ms: 0, error: 'mock' } }
+    return req<GameStatus>(`/tunnels/${id}/game-status`)
+  }
+
+  async function removeTunnelReplica(id: string, clientID: string): Promise<void> {
+    if (USE_MOCK) { await delay(); return }
+    await req(`/tunnels/${id}/replicas/${clientID}`, { method: 'DELETE' })
+  }
+
+  // --- Trafik politikası (FAZ 6) ---
+
+  async function getTunnelTraffic(id: string): Promise<TrafficPolicy> {
+    if (USE_MOCK) { await delay(); return { tunnel_id: id, enabled: false, config: {} } }
+    return req<TrafficPolicy>(`/tunnels/${id}/traffic`)
+  }
+
+  async function setTunnelTraffic(id: string, payload: { enabled: boolean, config: TrafficConfig }): Promise<void> {
+    if (USE_MOCK) { await delay(); return }
+    await req(`/tunnels/${id}/traffic`, { method: 'PUT', body: payload })
+  }
+
+  // --- Per-tünel metrikler (FAZ 6.3) ---
+
+  async function getTunnelMetrics(id: string, window: string): Promise<TunnelMetricsResp> {
+    if (USE_MOCK) {
+      await delay()
+      return { window, bucket_sec: 60, buckets: [], summary: { total_requests: 0, error_count: 0, error_rate_pct: 0, avg_ms: 0, max_ms: 0 } }
+    }
+    return req<TunnelMetricsResp>(`/tunnels/${id}/metrics?window=${encodeURIComponent(window)}`)
+  }
+
+  // --- Metrik uyarıları (FAZ 6.4) ---
+
+  async function getTunnelAlert(id: string): Promise<TunnelAlert> {
+    if (USE_MOCK) { await delay(); return { tunnel_id: id, enabled: false, error_rate_pct: 10, window_min: 5, min_requests: 20, notify_email: '', state: 'ok' } }
+    return req<TunnelAlert>(`/tunnels/${id}/alert`)
+  }
+
+  async function setTunnelAlert(id: string, payload: { enabled: boolean, error_rate_pct: number, window_min: number, min_requests: number, notify_email: string }): Promise<void> {
+    if (USE_MOCK) { await delay(); return }
+    await req(`/tunnels/${id}/alert`, { method: 'PUT', body: payload })
+  }
+
+  // --- Yol tabanlı yönlendirme (FAZ 6.5) ---
+
+  async function listPathRoutes(hostnameID: string): Promise<PathRoute[]> {
+    if (USE_MOCK) { await delay(); return [] }
+    const r = await req<{ fqdn: string, routes: PathRoute[] }>(`/hostnames/${hostnameID}/paths`)
+    return r?.routes ?? []
+  }
+
+  async function addPathRoute(hostnameID: string, body: { path_prefix: string, tunnel_id: string }): Promise<PathRoute> {
+    return req<PathRoute>(`/hostnames/${hostnameID}/paths`, { method: 'POST', body })
+  }
+
+  async function deletePathRoute(hostnameID: string, routeID: string): Promise<void> {
+    if (USE_MOCK) { await delay(); return }
+    await req(`/hostnames/${hostnameID}/paths/${routeID}`, { method: 'DELETE' })
+  }
+
+  // --- mTLS / istemci sertifikası (FAZ 6.6) ---
+
+  async function getTunnelMTLS(id: string): Promise<TunnelMTLS> {
+    if (USE_MOCK) { await delay(); return { tunnel_id: id, enabled: false, ca_pem: '', has_ca: false } }
+    return req<TunnelMTLS>(`/tunnels/${id}/mtls`)
+  }
+
+  async function setTunnelMTLS(id: string, payload: { enabled: boolean, ca_pem: string }): Promise<void> {
+    if (USE_MOCK) { await delay(); return }
+    await req(`/tunnels/${id}/mtls`, { method: 'PUT', body: payload })
+  }
+
+
+  // --- Denetim günlüğü (FAZ 6.8) ---
 
   // --- Hostnames ---
 
@@ -253,6 +438,11 @@ export function useApi() {
     })
   }
 
+  async function dnsCheckHostname(id: string): Promise<DNSCheckResult> {
+    if (USE_MOCK) { await delay(300); return { fqdn: '', pointed: false, cname_target: 'cname.zorven.app' } }
+    return req<DNSCheckResult>(`/hostnames/${id}/dns-check`, { method: 'POST' })
+  }
+
   async function verifyHostname(id: string): Promise<VerifyHostnameResponse> {
     if (USE_MOCK) {
       await delay(500)
@@ -297,6 +487,54 @@ export function useApi() {
     for (const [k, v] of Object.entries(f)) if (v !== undefined && v !== '' && v !== null) query[k] = v as string | number
     const res = await req<RequestLog[]>(`/requests`, { query })
     return res ?? []
+  }
+
+  // --- FAZ 2: İstek inspector (opt-in yakalama + detay + replay) ---
+
+  async function getCaptureEnabled(): Promise<boolean> {
+    if (USE_MOCK) { await delay(); return false }
+    const r = await req<{ enabled: boolean }>(`/requests/capture`)
+    return !!r?.enabled
+  }
+  async function setCaptureEnabled(enabled: boolean): Promise<boolean> {
+    if (USE_MOCK) { await delay(); return enabled }
+    const r = await req<{ enabled: boolean }>(`/requests/capture`, { method: 'POST', body: { enabled } })
+    return !!r?.enabled
+  }
+  async function getRequestDetail(id: string): Promise<RequestDetail> {
+    return req<RequestDetail>(`/requests/${id}`)
+  }
+  // --- FAZ 3 / F14: Cihazlar ---
+  async function listDevices(): Promise<Device[]> {
+    return req<Device[]>('/devices')
+  }
+  async function getDevice(id: string): Promise<Device> {
+    return req<Device>(`/devices/${id}`)
+  }
+
+  // --- FAZ 3 / F17: Zorven Network (özel kaynaklar) ---
+  async function listNetworkResources(): Promise<Tunnel[]> {
+    const r = await req<{ resources: Tunnel[] }>('/network/resources')
+    return r.resources || []
+  }
+  async function createNetworkResource(p: { name: string, client_id: string, target?: string, subnet?: string }): Promise<Tunnel> {
+    return req<Tunnel>('/network/resources', { method: 'POST', body: p })
+  }
+
+  // --- FAZ 3 / F16: cihaz etiketleri + kaynak politikaları ---
+  async function getDeviceTags(id: string): Promise<Record<string, string>> {
+    const r = await req<{ tags: Record<string, string> }>(`/devices/${id}/tags`)
+    return r.tags || {}
+  }
+  async function setDeviceTags(id: string, tags: Record<string, string>): Promise<Record<string, string>> {
+    const r = await req<{ tags: Record<string, string> }>(`/devices/${id}/tags`, { method: 'PUT', body: { tags } })
+    return r.tags || {}
+  }
+  async function replayRequest(id: string, overrides?: ReplayOverrides): Promise<ReplayResult> {
+    // Düzenleme yoksa gövde HİÇ gönderilmez: sunucu tarafında gövdesiz çağrı
+    // "orijinali aynen gönder" anlamına gelir.
+    const body = overrides ? { overrides } : undefined
+    return req<ReplayResult>(`/requests/${id}/replay`, { method: 'POST', body })
   }
 
   /** Masaüstü "tarayıcıdan giriş": kullanıcı kodunu onaylar, cihaza token bağlanır. */
@@ -421,6 +659,17 @@ export function useApi() {
     return req<HostnameWithTenant[]>(`/admin/hostnames`)
   }
 
+  async function adminListAbuseReports(): Promise<AbuseReport[]> {
+    if (USE_MOCK) { await delay(); return [] }
+    const r = await req<{ reports: AbuseReport[], count: number }>(`/admin/abuse-reports`)
+    return r?.reports ?? []
+  }
+
+  async function adminFreeze(opts: { fqdn?: string, tunnel_id?: string, frozen: boolean }): Promise<void> {
+    if (USE_MOCK) { await delay(); return }
+    await req(`/admin/abuse/freeze`, { method: 'POST', body: opts })
+  }
+
   async function adminSwitchTenant(tenantId: string): Promise<{ success: boolean, tenant: { id: string, slug: string } }> {
     if (USE_MOCK) {
       await delay()
@@ -514,6 +763,8 @@ export function useApi() {
     })
   }
 
+  // --- Team ek cihaz / ek trafik talepleri ---
+
   // --- Ekip ve Uye Yonetimi (Team Management) ---
 
   async function listTeamMembers(): Promise<TeamOverview> {
@@ -540,7 +791,7 @@ export function useApi() {
         id: 'mem_' + Date.now(),
         user_id: 'usr_' + Date.now(),
         email,
-        name: name || email.split('@')[0],
+        name: name || email.split('@')[0] || '',
         role,
         created_at: new Date().toISOString(),
         tokens_count: 0,
@@ -638,9 +889,30 @@ export function useApi() {
         },
       }
     }
-    return req<CreateAPITokenResponse>('/api-tokens', {
+    return req<CreateAPITokenResponse>('/tokens', {
       method: 'POST',
       body: { name, scopes, expires_in_days: expiresInDays },
+    })
+  }
+
+  async function rotateAPIToken(id: string): Promise<RotateAPITokenResponse> {
+    if (USE_MOCK) {
+      await delay()
+      return {
+        token: 'zrv_api_mockrot' + Date.now(),
+        api_token: {
+          id,
+          tenant_id: 'ten_mock',
+          name: 'Rotated Token',
+          token_id: 'mockrot' + Date.now(),
+          token_prefix: 'mockrot',
+          scopes: ['*'],
+          created_at: new Date().toISOString(),
+        },
+      }
+    }
+    return req<RotateAPITokenResponse>(`/tokens/${id}/rotate`, {
+      method: 'POST',
     })
   }
 
@@ -649,10 +921,12 @@ export function useApi() {
       await delay()
       return { success: true }
     }
-    return req<{ success: boolean }>(`/api-tokens/${id}`, {
+    return req<{ success: boolean }>(`/tokens/${id}`, {
       method: 'DELETE',
     })
   }
+
+  // --- Servis Hesapları (FAZ 0 / F0A) ---
 
   async function listIPRules(tunnelId?: string): Promise<{ rules: IPAllowlistRule[], count: number }> {
     if (USE_MOCK) {
@@ -725,7 +999,7 @@ export function useApi() {
     return req<MailMessage>(`/mail/messages/${id}`)
   }
   async function sendMail(payload: {
-    to: string; subject: string; body: string; in_reply_to?: string; from?: string
+    to: string; subject: string; body: string; in_reply_to?: string; from?: string; template?: string
     attachments?: { filename: string; content_type: string; content_base64: string }[]
   }): Promise<MailMessage> {
     return req<MailMessage>('/mail/send', { method: 'POST', body: payload })
@@ -738,19 +1012,98 @@ export function useApi() {
     return req<{ success: boolean }>(`/mail/messages/${id}`, { method: 'DELETE' })
   }
 
+  // --- Ekip davetleri (e-postadaki linkten kabul) ---
+  async function resendInvitation(id: string): Promise<{ success: boolean, email_sent: boolean }> {
+    return req<{ success: boolean, email_sent: boolean }>(`/team/members/${id}/resend`, { method: 'POST' })
+  }
+  async function listMyInvitations(): Promise<TeamInvitation[]> {
+    const res = await req<{ invitations: TeamInvitation[] }>('/invitations')
+    return res?.invitations ?? []
+  }
+  async function getInvitation(id: string): Promise<TeamInvitation> {
+    return req<TeamInvitation>(`/invitations/${encodeURIComponent(id)}`)
+  }
+  async function acceptInvitation(id: string): Promise<TeamInvitation> {
+    return req<TeamInvitation>(`/invitations/${encodeURIComponent(id)}/accept`, { method: 'POST' })
+  }
+  async function declineInvitation(id: string): Promise<void> {
+    await req(`/invitations/${encodeURIComponent(id)}/decline`, { method: 'POST' })
+  }
+
+  // --- Secret Vault (FAZ 1 / F06) ---
+  async function listSecrets(): Promise<{ secrets: Secret[], count: number }> {
+    if (USE_MOCK) { await delay(); return { secrets: [], count: 0 } }
+    return req<{ secrets: Secret[], count: number }>('/secrets')
+  }
+  async function createSecret(name: string, value: string): Promise<{ secret: Secret, value: string }> {
+    if (USE_MOCK) {
+      await delay()
+      return { secret: { id: 'sec_' + Date.now(), tenant_id: 'ten_mock', project_id: 'prj_default', name, key_version: 1, created_at: new Date().toISOString(), updated_at: new Date().toISOString() }, value }
+    }
+    return req<{ secret: Secret, value: string }>('/secrets', { method: 'POST', body: { name, value } })
+  }
+  async function deleteSecret(id: string): Promise<void> {
+    if (USE_MOCK) { await delay(); return }
+    await req(`/secrets/${id}`, { method: 'DELETE' })
+  }
+
+  // --- Birlesik Policy motoru (FAZ 1 / F04) ---
+  async function listPolicies(): Promise<{ policies: Policy[], count: number }> {
+    if (USE_MOCK) { await delay(); return { policies: [], count: 0 } }
+    return req<{ policies: Policy[], count: number }>('/policies')
+  }
+  async function getPolicy(id: string): Promise<Policy> {
+    return req<Policy>(`/policies/${id}`)
+  }
+  async function createPolicy(payload: { name: string, config: PolicyConfig, priority?: number }): Promise<Policy> {
+    if (USE_MOCK) {
+      await delay()
+      return { id: 'pol_' + Date.now(), tenant_id: 'ten_mock', project_id: 'prj_default', name: payload.name, config: payload.config, enabled: true, priority: payload.priority ?? 100, created_at: new Date().toISOString(), updated_at: new Date().toISOString(), bindings: [] }
+    }
+    return req<Policy>('/policies', { method: 'POST', body: payload })
+  }
+  async function updatePolicy(id: string, payload: { name: string, config: PolicyConfig, enabled: boolean, priority: number }): Promise<Policy> {
+    return req<Policy>(`/policies/${id}`, { method: 'PUT', body: payload })
+  }
+  async function deletePolicy(id: string): Promise<void> {
+    if (USE_MOCK) { await delay(); return }
+    await req(`/policies/${id}`, { method: 'DELETE' })
+  }
+  async function bindPolicy(id: string, binding: { tunnel_id?: string, hostname?: string }): Promise<void> {
+    await req(`/policies/${id}/bind`, { method: 'POST', body: binding })
+  }
+  async function unbindPolicy(id: string, binding: { tunnel_id?: string, hostname?: string }): Promise<void> {
+    await req(`/policies/${id}/unbind`, { method: 'POST', body: binding })
+  }
+
   return {
     terminalWSURL,
+    listProjects, createProject, deleteProject, renameProject, deleteOrganization,
     listClients, createClient, deleteClient,
-    listTunnels, createTunnel, updateTunnel, deleteTunnel,
-    listHostnames, createHostname, createCustomHostname, updateHostname, verifyHostname, deleteHostname,
+    listTunnels, createTunnel, updateTunnel, deleteTunnel, getTunnelAccess, setTunnelAccess,
+    getTunnelReplicas, addTunnelReplica, removeTunnelReplica, getTunnelLB, setTunnelLB,
+    getTunnelUDP, setTunnelUDP, getGameStatus,
+    getTunnelTraffic, setTunnelTraffic,
+    getTunnelMetrics,
+    getTunnelAlert, setTunnelAlert,
+    listPathRoutes, addPathRoute, deletePathRoute,
+    getTunnelMTLS, setTunnelMTLS,
+    listHostnames, createHostname, createCustomHostname, updateHostname, verifyHostname, dnsCheckHostname, deleteHostname,
     listRequests, streamRequests, deviceApprove,
+    getCaptureEnabled, setCaptureEnabled, getRequestDetail, replayRequest,
+    listDevices, getDevice, listNetworkResources, createNetworkResource,
+    getDeviceTags, setDeviceTags,
     adminGetStats, adminListTenants, adminListClients, adminListHostnames, adminSwitchTenant,
+    adminListAbuseReports, adminFreeze,
     getSubscription, listPlans, adminUpdateTenantPlan,
     listTeamMembers, inviteTeamMember, updateMemberRole, removeTeamMember,
     listMemberTokens, createMemberToken, revokeMemberToken,
-    listAPITokens, createAPIToken, revokeAPIToken,
+    resendInvitation, listMyInvitations, getInvitation, acceptInvitation, declineInvitation,
+    listAPITokens, createAPIToken, rotateAPIToken, revokeAPIToken,
     listIPRules, createIPRule, updateIPRule, deleteIPRule,
     mailInfo, listMail, getMail, sendMail, deleteMail, mailAttachmentUrl,
+    listSecrets, createSecret, deleteSecret,
+    listPolicies, getPolicy, createPolicy, updatePolicy, deletePolicy, bindPolicy, unbindPolicy,
   }
 }
 

@@ -26,6 +26,11 @@ type Store struct {
 // veya imza kayarsa build kirilir, testlerin kosmasini beklemeye gerek kalmaz.
 var _ store.Store = (*Store)(nil)
 
+// Ping, veritabani baglantisinin canli olup olmadigini kontrol eder (status page).
+func (s *Store) Ping(ctx context.Context) error {
+	return s.pool.Ping(ctx)
+}
+
 // Open, baglanti havuzunu acar ve bekleyen migration'lari uygular.
 func Open(ctx context.Context, dsn string) (*Store, error) {
 	pool, err := pgxpool.New(ctx, dsn)

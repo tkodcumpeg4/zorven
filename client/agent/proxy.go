@@ -53,6 +53,10 @@ type clientSession struct {
 	wsMu    sync.Mutex
 	wsConns map[uint64]net.Conn
 
+	// streamConns, aktif ham TCP/UDP tunel akislari: req_id -> yerel conn (FAZ 3 / D2).
+	streamMu    sync.Mutex
+	streamConns map[uint64]net.Conn
+
 	onRequest func(method, path string, status int, duration time.Duration)
 }
 
@@ -75,7 +79,10 @@ func (cs *clientSession) targetFor(tunnelID string) string {
 	if ok && target != "" {
 		return strings.TrimSuffix(target, "/")
 	}
-	// Sunucu bu tunel icin hedef bildirmediyse yedege dus.
+	// Sunucu bu tunel icin hedef bildirmediyse yedege dus. Yedek yalnizca
+	// kullanici acikca bir hedef verdiyse (RequestedTarget) dolu olur; aksi
+	// halde "" doner ve cagiranlar istegi acik bir hatayla reddeder (bos hedef
+	// kendiliginden bir yerel porta yonlenmez).
 	return cs.localURL
 }
 
@@ -103,9 +110,10 @@ func newClientSession(conn *websocket.Conn, localURL string, log *slog.Logger) *
 		log:      log,
 		localURL: strings.TrimSuffix(localURL, "/"),
 		inflight: make(map[uint64]*inflight),
-		targets:  make(map[string]string),
-		wsConns:  make(map[uint64]net.Conn),
-		windows:  newWindowTable(),
+		targets:     make(map[string]string),
+		wsConns:     make(map[uint64]net.Conn),
+		streamConns: make(map[uint64]net.Conn),
+		windows:     newWindowTable(),
 		http: &http.Client{
 			// Yonlendirmeleri TAKIP ETME: 301/302 oldugu gibi tarayiciya
 			// donmeli, yoksa yerel servisin yonlendirme mantigi bozulur.
@@ -182,7 +190,12 @@ func (cs *clientSession) forget(reqID uint64) {
 
 func (cs *clientSession) doLocal(ctx context.Context, req protocol.HTTPRequest, fl *inflight) {
 	start := time.Now()
-	target := cs.targetFor(req.TunnelID) + req.Path
+	base := cs.targetFor(req.TunnelID)
+	if base == "" {
+		cs.sendError(ctx, req.ReqID, protocol.CodeLocalUnreachable, "bu tunel icin yerel hedef tanimli degil")
+		return
+	}
+	target := base + req.Path
 	if req.Query != "" {
 		target += "?" + req.Query
 	}
@@ -211,6 +224,15 @@ func (cs *clientSession) doLocal(ctx context.Context, req protocol.HTTPRequest, 
 		for _, v := range vals {
 			hreq.Header.Add(k, v)
 		}
+	}
+	// Govde uzunlugu biliniyorsa Content-Length ile gonder (chunked yerine).
+	// Aksi halde bilinmeyen-uzunlukta io.Reader Go'yu Transfer-Encoding: chunked'a
+	// zorlar ve Content-Length bekleyen backend'ler bos govde gorur.
+	// http.Client, Content-Length'i Header'dan degil hreq.ContentLength alanindan
+	// yazar; bu yuzden alani acikca ayarliyoruz ve olasi cift basligi temizliyoruz.
+	if req.HasBody && req.ContentLength > 0 {
+		hreq.ContentLength = req.ContentLength
+		hreq.Header.Del("Content-Length")
 	}
 	// Host basligini yerel servise oldugu gibi tasima: yerel servis kendi
 	// adresini beklemeli. Orijinal hostname X-Forwarded-Host'ta zaten var.
@@ -364,6 +386,7 @@ func (cs *clientSession) closeAll() {
 		fl.closeBody(errors.New("baglanti koptu"))
 	}
 	cs.closeAllWS()
+	cs.closeAllStreams()
 }
 
 // classifyLocalError, yerel servis hatasini kontrat hata koduna cevirir.

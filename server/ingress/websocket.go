@@ -20,7 +20,20 @@ const wsAcceptTimeout = 20 * time.Second
 //
 // Cagrilmadan once ServeHTTP tum kontrolleri (tunel aktif mi, IP izin listesi,
 // hiz siniri, istemci cevrimici mi) yapmis olmalidir.
-func (h *Handler) serveWebSocket(w http.ResponseWriter, r *http.Request, sess *tunnel.Session, tunnelID string) {
+func (h *Handler) serveWebSocket(w http.ResponseWriter, r *http.Request, sess *tunnel.Session, tunnelID, tenantID string) {
+	// El sikismasi istek loguna yazilir (panel "Canli Istekler"): durum 101 ya da
+	// yerel servisin/aginin hata durumu. Baglanti suresince akan veri loglanmaz.
+	started := time.Now()
+	logRec := &recorder{ResponseWriter: w, status: http.StatusSwitchingProtocols}
+	logged := false
+	logOnce := func() {
+		if !logged {
+			logged = true
+			h.recordWithID(tunnelID, tenantID, r, logRec, started, "")
+		}
+	}
+	defer logOnce() // hata yollari; basarili el sikismasi asagida hemen yazilir
+
 	hj, ok := w.(http.Hijacker)
 	if !ok {
 		writeError(w, r, http.StatusInternalServerError, protocol.CodeWebSocketUnsup,
@@ -33,6 +46,7 @@ func (h *Handler) serveWebSocket(w http.ResponseWriter, r *http.Request, sess *t
 	// ajan bu el sikismasini yerel servise aynen tekrarlar.
 	stream, err := sess.OpenWS(ctx, tunnelID, r.URL.Path, r.URL.RawQuery, map[string][]string(r.Header))
 	if err != nil {
+		logRec.status = http.StatusBadGateway
 		writeError(w, r, http.StatusBadGateway, protocol.CodeClientOffline,
 			"WebSocket akisi acilamadi: "+err.Error())
 		return
@@ -44,6 +58,7 @@ func (h *Handler) serveWebSocket(w http.ResponseWriter, r *http.Request, sess *t
 	case acc = <-stream.Accept():
 	case <-time.After(wsAcceptTimeout):
 		stream.Close("accept timeout")
+		logRec.status = http.StatusGatewayTimeout
 		writeError(w, r, http.StatusGatewayTimeout, protocol.CodeUpstreamTimeout,
 			"Yerel servis WebSocket yukseltmesini zamaninda yanitlamadi.")
 		return
@@ -67,6 +82,7 @@ func (h *Handler) serveWebSocket(w http.ResponseWriter, r *http.Request, sess *t
 		if status == 0 {
 			status = http.StatusBadGateway
 		}
+		logRec.status = status
 		fmt.Fprintf(conn, "HTTP/1.1 %d %s\r\nConnection: close\r\n\r\n",
 			status, http.StatusText(status))
 		return
@@ -87,6 +103,7 @@ func (h *Handler) serveWebSocket(w http.ResponseWriter, r *http.Request, sess *t
 	if _, err := conn.Write([]byte(sb.String())); err != nil {
 		return
 	}
+	logOnce() // el sikismasi tamam: baglanti kapanmasini beklemeden logla
 
 	// tarayici -> yerel: hijack edilen baglantidan oku, ajana ilet.
 	go func() {

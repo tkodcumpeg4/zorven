@@ -24,6 +24,21 @@ const compose = reactive({
 })
 const MAX_ATTACH_TOTAL = 20 * 1024 * 1024 // 20 MB toplam sınır
 
+// mailFrameDoc, e-posta HTML'ini iframe icin makul bir VARSAYILAN fontla sarar.
+// Gövde kendi font stilini belirtmediyse tarayicinin serif varsayilani yerine
+// temiz bir sans-serif kullanilir; e-postanin kendi inline/style'lari gecerli kalir.
+function mailFrameDoc(html: string): string {
+  return `<!doctype html><html><head><meta charset="utf-8">`
+    + `<meta name="viewport" content="width=device-width, initial-scale=1">`
+    + `<style>`
+    + `html,body{margin:0;padding:8px 10px;background:#fff;}`
+    + `body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;`
+    + `font-size:14px;line-height:1.6;color:#1f2937;-webkit-text-size-adjust:100%;word-break:break-word;}`
+    + `a{color:#2563eb;}img{max-width:100%;height:auto;}`
+    + `table{max-width:100%;}pre{white-space:pre-wrap;word-break:break-word;}`
+    + `</style></head><body>${html}</body></html>`
+}
+
 function fmtSize(n: number): string {
   if (n < 1024) return `${n} B`
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`
@@ -104,7 +119,7 @@ async function load() {
     info.value = await api.mailInfo()
     if (info.value?.enabled) await loadBox()
   } catch (e: any) {
-    toast.error(e?.data?.error?.error || e?.message || t('mail.loadFailed'))
+    toast.error(e?.data?.error?.message || (typeof e?.data?.error === 'string' ? e.data.error : '') || e?.message || t('mail.loadFailed'))
   } finally {
     loading.value = false
   }
@@ -116,7 +131,7 @@ async function loadBox() {
   try {
     messages.value = await api.listMail(box.value)
   } catch (e: any) {
-    toast.error(e?.data?.error?.error || e?.message || t('mail.loadFailed'))
+    toast.error(e?.data?.error?.message || (typeof e?.data?.error === 'string' ? e.data.error : '') || e?.message || t('mail.loadFailed'))
   } finally {
     loadingMsg.value = false
   }
@@ -135,7 +150,7 @@ async function openMessage(m: MailMessage) {
     m.seen = true
     if (wasUnseen && info.value) info.value.unseen = Math.max(0, (info.value.unseen || 0) - 1)
   } catch (e: any) {
-    toast.error(e?.data?.error?.error || e?.message || t('mail.loadFailed'))
+    toast.error(e?.data?.error?.message || (typeof e?.data?.error === 'string' ? e.data.error : '') || e?.message || t('mail.loadFailed'))
   }
 }
 
@@ -147,7 +162,7 @@ async function removeMessage(m: MailMessage) {
     if (selected.value?.id === m.id) selected.value = null
     toast.info(t('mail.deleted'))
   } catch (e: any) {
-    toast.error(e?.data?.error?.error || e?.message || t('mail.deleteFailed'))
+    toast.error(e?.data?.error?.message || (typeof e?.data?.error === 'string' ? e.data.error : '') || e?.message || t('mail.deleteFailed'))
   }
 }
 
@@ -197,7 +212,7 @@ async function send() {
     showCompose.value = false
     if (box.value === 'sent') loadBox()
   } catch (e: any) {
-    toast.error(e?.data?.error?.error || e?.message || t('mail.sendFailed'))
+    toast.error(e?.data?.error?.message || (typeof e?.data?.error === 'string' ? e.data.error : '') || e?.message || t('mail.sendFailed'))
   } finally {
     sending.value = false
   }
@@ -421,7 +436,7 @@ async function copyAddress() {
             <div class="flex-1 overflow-auto p-4">
               <iframe
                 v-if="selected.html_body"
-                :srcdoc="selected.html_body"
+                :srcdoc="mailFrameDoc(selected.html_body)"
                 sandbox=""
                 class="h-[55vh] w-full rounded border border-line bg-white"
               />

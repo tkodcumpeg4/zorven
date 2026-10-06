@@ -18,7 +18,7 @@ export function useTheme() {
   function applyTheme(newTheme: ThemeMode) {
     theme.value = newTheme
     if (typeof window !== 'undefined') {
-      localStorage.setItem('zorven_theme', newTheme)
+      try { localStorage.setItem('zorven_theme', newTheme) } catch { /* depolama engelli: tercih kalici olmaz */ }
       if (newTheme === 'light') {
         document.documentElement.classList.add('light')
         document.documentElement.classList.remove('dark')
@@ -37,7 +37,8 @@ export function useTheme() {
     if (initialized.value || typeof window === 'undefined') return
     initialized.value = true
 
-    const saved = localStorage.getItem('zorven_theme') as ThemeMode | null
+    let saved: ThemeMode | null = null
+    try { saved = localStorage.getItem('zorven_theme') as ThemeMode | null } catch { /* depolama engelli */ }
     if (saved === 'light' || saved === 'dark') {
       applyTheme(saved)
       return

@@ -173,10 +173,119 @@ func TestTeam_API_Lifecycle(t *testing.T) {
 		if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
 			t.Fatalf("decode: %v", err)
 		}
-		if created.Email != "developer@team.corp" || created.Role != "member" {
+		if created.Email != "developer@team.corp" || created.Role != "member" || created.Status != "pending" {
 			t.Fatalf("unexpected created member: %+v", created)
 		}
 		invitedMemberID = created.ID
+	})
+
+	// Test 2b: Davet edilen kisi kendi hesabiyla kabul eder; ancak o zaman uye olur.
+	t.Run("Accept invitation", func(t *testing.T) {
+		devUserID := "usr_team_test_dev"
+		devToken := "tok_team_test_dev_session"
+		_, _ = pool.Exec(ctx, `DELETE FROM "session" WHERE "token" = $1`, devToken)
+		if _, err := pool.Exec(ctx, `INSERT INTO "user" ("id", "name", "email", "createdAt", "updatedAt")
+			VALUES ($1, 'Alice Dev', 'developer@team.corp', now(), now())`, devUserID); err != nil {
+			t.Fatalf("insert dev user: %v", err)
+		}
+		// Kendi kisisel org'u (davet kabulunden once uyeligi olmali).
+		_, _ = pool.Exec(ctx, `INSERT INTO "organization" ("id","name","slug","createdAt") VALUES ('org_team_test_dev','Dev','dev-team-test',now()) ON CONFLICT DO NOTHING`)
+		_, _ = pool.Exec(ctx, `INSERT INTO "member" ("id","organizationId","userId","role","createdAt") VALUES ('mem_team_test_dev','org_team_test_dev',$1,'owner',now()) ON CONFLICT DO NOTHING`, devUserID)
+		if _, err := pool.Exec(ctx, `INSERT INTO "session" ("id","token","userId","activeOrganizationId","expiresAt","createdAt","updatedAt")
+			VALUES ('sess_team_test_dev', $1, $2, 'org_team_test_dev', now() + interval '1 day', now(), now())`, devToken, devUserID); err != nil {
+			t.Fatalf("insert dev session: %v", err)
+		}
+		defer func() {
+			_, _ = pool.Exec(ctx, `DELETE FROM "session" WHERE "token" = $1`, devToken)
+			_, _ = pool.Exec(ctx, `DELETE FROM "member" WHERE "organizationId" = 'org_team_test_dev'`)
+			_, _ = pool.Exec(ctx, `DELETE FROM "organization" WHERE "id" = 'org_team_test_dev'`)
+		}()
+
+		// Sahip (owner) daveti KABUL EDEMEZ: davet onun e-postasina degil.
+		resp, err := client.Do(authReq("POST", "/api/v1/invitations/"+invitedMemberID+"/accept", nil))
+		if err != nil {
+			t.Fatalf("Do: %v", err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("owner accepting someone else's invite: status=%d, want 403", resp.StatusCode)
+		}
+
+		r, _ := http.NewRequest("POST", ts.URL+"/api/v1/invitations/"+invitedMemberID+"/accept", nil)
+		r.Header.Set("Authorization", "Bearer "+devToken)
+		resp, err = client.Do(r)
+		if err != nil {
+			t.Fatalf("Do: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("accept status=%d", resp.StatusCode)
+		}
+
+		// Uye listesinde artik aktif uye olarak gorunmeli; sonraki adimlar
+		// davet id'si yerine gercek member id'siyle devam eder.
+		resp2, err := client.Do(authReq("GET", "/api/v1/team/members", nil))
+		if err != nil {
+			t.Fatalf("Do: %v", err)
+		}
+		defer resp2.Body.Close()
+		var res struct {
+			Members []store.TeamMember `json:"members"`
+		}
+		_ = json.NewDecoder(resp2.Body).Decode(&res)
+		invitedMemberID = ""
+		for _, m := range res.Members {
+			if m.Email == "developer@team.corp" && m.Status == "active" {
+				invitedMemberID = m.ID
+			}
+		}
+		if invitedMemberID == "" {
+			t.Fatalf("accepted member not active in list: %+v", res.Members)
+		}
+
+		// Regresyon: 'member' rolundeki kullanici ekip yonetemez (davet, kendi
+		// rolunu admin yapma). Onceden bu uclarda rol denetimi yoktu.
+		devReq := func(method, path string, body any) *http.Request {
+			var buf bytes.Buffer
+			if body != nil {
+				_ = json.NewEncoder(&buf).Encode(body)
+			}
+			r, _ := http.NewRequest(method, ts.URL+path, &buf)
+			r.Header.Set("Authorization", "Bearer "+devToken)
+			r.Header.Set("Content-Type", "application/json")
+			r.Header.Set("X-Tenant-ID", tenantID)
+			return r
+		}
+		// Uye, uye oldugu org'a gecmis olsun (oturumun aktif org'u).
+		if _, err := pool.Exec(ctx, `UPDATE "session" SET "activeOrganizationId" = $1 WHERE "token" = $2`, tenantID, devToken); err != nil {
+			t.Fatalf("switch dev session: %v", err)
+		}
+		for _, c := range []struct {
+			method, path string
+			body         any
+		}{
+			{"POST", "/api/v1/team/members/invite", map[string]string{"email": "x@team.corp", "role": "member"}},
+			{"PATCH", "/api/v1/team/members/" + invitedMemberID + "/role", map[string]string{"role": "admin"}},
+		} {
+			resp, err := client.Do(devReq(c.method, c.path, c.body))
+			if err != nil {
+				t.Fatalf("Do: %v", err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusForbidden {
+				t.Fatalf("member %s %s: status=%d, want 403", c.method, c.path, resp.StatusCode)
+			}
+		}
+
+		// Sahibin rolu degistirilemez (owner korumasi).
+		resp3, err := client.Do(authReq("PATCH", "/api/v1/team/members/"+ownerMemberID+"/role", map[string]string{"role": "member"}))
+		if err != nil {
+			t.Fatalf("Do: %v", err)
+		}
+		resp3.Body.Close()
+		if resp3.StatusCode != http.StatusForbidden {
+			t.Fatalf("owner role change: status=%d, want 403", resp3.StatusCode)
+		}
 	})
 
 	// Test 3: Update role to admin

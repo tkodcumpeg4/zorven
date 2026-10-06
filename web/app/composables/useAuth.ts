@@ -37,6 +37,9 @@ const tenant = ref<AuthTenantInfo | null>(null)
 const organizations = ref<OrganizationItem[]>([])
 const platformAdmin = ref(false)
 const githubEnabled = ref(false)
+const googleEnabled = ref(false)
+// Sunucunun platform domaini (auth/config); rezerve-port adresi icin.
+const platformDomain = ref('')
 const ready = ref(false)
 // Giriste sifre dogru ama 2FA gerekiyorsa true: arayuz ikinci adim ekranini gosterir.
 const needs2FA = ref(false)
@@ -73,7 +76,11 @@ export function useAuth() {
   async function check(): Promise<boolean> {
     try {
       const headers: Record<string, string> = {}
-      if (key.value) headers.Authorization = `Bearer ${key.value}`
+      if (key.value) {
+        headers.Authorization = `Bearer ${key.value}`
+        const { adminTenant } = useAdminTenant()
+        if (adminTenant.value) headers['X-Tenant-ID'] = adminTenant.value
+      }
       const me = await $fetch<{
         authenticated: boolean
         method?: Exclude<AuthMethod, null>
@@ -103,7 +110,13 @@ export function useAuth() {
       }
 
       return authed.value
-    } catch {
+    } catch (e: any) {
+      // Saklanan admin kiracisi artik yok (404): secimi temizleyip varsayilanla dene.
+      const { adminTenant, clearAdminTenant } = useAdminTenant()
+      if (key.value && adminTenant.value && e?.statusCode === 404 && e?.data?.error?.code === 'tenant_not_found') {
+        clearAdminTenant()
+        return check()
+      }
       authed.value = false
       method.value = null
       user.value = null
@@ -119,8 +132,10 @@ export function useAuth() {
     if (initPromise) return initPromise
     initPromise = (async () => {
       try {
-        const c = await $fetch<{ github_enabled: boolean }>('/api/v1/auth/config')
+        const c = await $fetch<{ github_enabled: boolean, google_enabled?: boolean, platform_domain?: string }>('/api/v1/auth/config')
         githubEnabled.value = !!c.github_enabled
+        googleEnabled.value = !!c.google_enabled
+        platformDomain.value = c.platform_domain || ''
       } catch {
         // Config alınamazsa buton gizli kalır
       }
@@ -259,7 +274,10 @@ export function useAuth() {
    * AÇILMAZ, kullanıcı e-postasındaki linke tıklamalı. Aksi halde oturum açılır.
    */
   async function signUpWithEmail(email: string, password: string, name: string): Promise<{ needsVerification: boolean }> {
-    const res = await authClient.signUp.email({ email, password, name })
+    // Doğrulama linki kullanıcıyı kayıt olduğu sayfaya geri getirsin: ör. ekip
+    // davetinden (/invite?id=...) gelen kişi doğrulamadan sonra davete döner.
+    const callbackURL = import.meta.client ? window.location.pathname + window.location.search : '/'
+    const res = await authClient.signUp.email({ email, password, name, callbackURL })
     if (res?.error) {
       throw new Error(res.error.message || gt('auth.thrownSignup'))
     }
@@ -279,6 +297,14 @@ export function useAuth() {
     })
   }
 
+  /** Better Auth Google ile giriş */
+  async function loginWithBetterAuthGoogle(): Promise<void> {
+    await authClient.signIn.social({
+      provider: 'google',
+      callbackURL: window.location.origin,
+    })
+  }
+
   /** Admin anahtarıyla giriş: önce sunucuya doğrulat, sonra sakla. */
   async function loginWithKey(value: string): Promise<boolean> {
     try {
@@ -287,6 +313,7 @@ export function useAuth() {
       return false
     }
     setKey(value)
+    useAdminTenant().clearAdminTenant()
     authed.value = true
     method.value = 'key'
     platformAdmin.value = true
@@ -303,10 +330,27 @@ export function useAuth() {
     await check()
   }
 
+  /**
+   * Organizasyonun GÖRÜNEN adını değiştirir. Slug değiştirilmez: slug kiracı
+   * kimliğidir ve tünel adlarında (ad--slug.zorven.app) kullanılır; değişirse
+   * yayındaki adresler bozulurdu. Yetki Better Auth'ta (owner/admin) denetlenir.
+   */
+  async function renameOrganization(orgId: string, name: string): Promise<void> {
+    const res = await (authClient.organization as any).update({ organizationId: orgId, data: { name } })
+    if (res?.error) {
+      throw new Error(res.error.message || gt('auth.thrownOrgRename'))
+    }
+    await loadOrganizations()
+  }
+
   /** Yeni bir organizasyon oluşturur */
   async function createOrganization(name: string, slug: string): Promise<void> {
     const res = await authClient.organization.create({ name, slug })
     if (res?.error) {
+      // FAZ 3.5: plan siniri — Better Auth'un Ingilizce mesaji yerine acik bir aciklama.
+      if ((res.error as any).code === 'YOU_HAVE_REACHED_THE_MAXIMUM_NUMBER_OF_ORGANIZATIONS') {
+        throw new Error(gt('auth.orgLimitReached'))
+      }
       throw new Error(res.error.message || gt('auth.thrownOrgCreate'))
     }
     if (res?.data?.id) {
@@ -318,13 +362,14 @@ export function useAuth() {
 
   /** Şifre sıfırlama e-postası gönder (linkteki token /reset-password'a taşınır). */
   async function requestPasswordReset(email: string): Promise<void> {
-    const res = await (authClient as any).forgetPassword({ email, redirectTo: '/reset-password' })
+    // Better Auth 1.7.3: uc /request-password-reset (eski /forget-password YOK; 404 donuyordu).
+    const res = await authClient.requestPasswordReset({ email, redirectTo: '/reset-password' })
     if (res?.error) throw new Error(res.error.message || gt('auth.thrownResetSend'))
   }
 
   /** Yeni şifreyi ayarla (e-postadaki token ile). */
   async function resetPassword(token: string, newPassword: string): Promise<void> {
-    const res = await (authClient as any).resetPassword({ token, newPassword })
+    const res = await authClient.resetPassword({ token, newPassword })
     if (res?.error) throw new Error(res.error.message || gt('auth.thrownResetFail'))
   }
 
@@ -337,6 +382,9 @@ export function useAuth() {
       await $fetch('/api/v1/auth/logout', { method: 'POST' })
     } catch {}
     clearKey()
+    useAdminTenant().clearAdminTenant()
+    // Proje secimi kiraciya ozeldir; ayni tarayicida baska hesap acilabilir.
+    useActiveProject().clearActiveProject()
     authed.value = false
     method.value = null
     user.value = null
@@ -357,6 +405,8 @@ export function useAuth() {
     tenantSlug: readonly(tenantSlug),
     userLogin: readonly(userLogin),
     githubEnabled: readonly(githubEnabled),
+    platformDomain: readonly(platformDomain),
+    googleEnabled: readonly(googleEnabled),
     ready: readonly(ready),
     needs2FA: readonly(needs2FA),
     twoFactorEnabled: readonly(twoFactorEnabled),
@@ -365,10 +415,12 @@ export function useAuth() {
     loginWithEmail,
     signUpWithEmail,
     loginWithBetterAuthGithub,
+    loginWithBetterAuthGoogle,
     loginWithKey,
     loadOrganizations,
     switchOrganization,
     createOrganization,
+    renameOrganization,
     logout,
     // 2FA
     verifyTotp,

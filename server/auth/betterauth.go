@@ -4,6 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -48,12 +51,71 @@ func NewBetterAuthVerifier(pool *pgxpool.Pool, ttl time.Duration) *BetterAuthVer
 	}
 }
 
+// InvalidateUser, bir kullanicinin TUM onbellekteki oturumlarini siler
+// (uyelik/rol degisince eski kiraci-rol bilgisi 30 sn boyunca kullanilmasin).
+func (v *BetterAuthVerifier) InvalidateUser(userID string) {
+	if userID == "" {
+		return
+	}
+	v.cache.Range(func(key, value any) bool {
+		if c, ok := value.(cachedSession); ok && c.user != nil && c.user.UserID == userID {
+			v.cache.Delete(key)
+		}
+		return true
+	})
+}
+
+// RequestSessionToken, istekteki Better Auth oturum token'ini (imzasiz kisim)
+// cerezden veya Bearer basligindan cikarir. Yoksa "".
+func RequestSessionToken(r *http.Request) string {
+	raw := ""
+	for _, name := range []string{"better-auth.session_token", "__Secure-better-auth.session_token"} {
+		if c, err := r.Cookie(name); err == nil && c.Value != "" {
+			raw = c.Value
+			break
+		}
+	}
+	if raw == "" {
+		if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
+			raw = strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
+		}
+	}
+	if v, err := url.QueryUnescape(raw); err == nil {
+		raw = v
+	}
+	tok, _, _ := strings.Cut(raw, ".")
+	return tok
+}
+
 // InvalidateAll, onbellegi tamamen temizler.
 func (v *BetterAuthVerifier) InvalidateAll() {
 	v.cache.Range(func(key, value any) bool {
 		v.cache.Delete(key)
 		return true
 	})
+}
+
+// UserIDForToken, oturum token'inin kullanicisini doner (once onbellek, sonra
+// DB; suresi dolmus oturumlar da sayilir). Bulunamazsa "". Auth proxy'si
+// hesap degisikliklerinde kullanicinin TUM onbellekli oturumlarini temizlemek
+// icin kullanir.
+func (v *BetterAuthVerifier) UserIDForToken(ctx context.Context, token string) string {
+	if token == "" {
+		return ""
+	}
+	if val, ok := v.cache.Load(token); ok {
+		if c, ok := val.(cachedSession); ok && c.user != nil {
+			return c.user.UserID
+		}
+	}
+	if v.pool == nil {
+		return ""
+	}
+	var uid string
+	if err := v.pool.QueryRow(ctx, `SELECT "userId" FROM "session" WHERE "token" = $1`, token).Scan(&uid); err != nil {
+		return ""
+	}
+	return uid
 }
 
 // InvalidateSession, belirli bir token'i onbellekten siler.

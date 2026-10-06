@@ -38,7 +38,7 @@ type tray struct {
 	mSessionAlert *systray.MenuItem
 	mCloseSession *systray.MenuItem
 	mQuickShare   *systray.MenuItem
-	mPort8003     *systray.MenuItem
+	mPort3000     *systray.MenuItem
 	mPort8080     *systray.MenuItem
 	mPort5173     *systray.MenuItem
 	mStatus       *systray.MenuItem
@@ -84,7 +84,7 @@ func (t *tray) onReady() {
 
 	// Hızlı port paylaşımı
 	t.mQuickShare = systray.AddMenuItem("Hızlı Port Paylaş", "Sık kullanılan bir yerel portu hemen tünelle")
-	t.mPort8003 = t.mQuickShare.AddSubMenuItem("Port 8003 (Yerel Servis)", "localhost:8003 tünelle")
+	t.mPort3000 = t.mQuickShare.AddSubMenuItem("Port 3000 (Node / React)", "localhost:3000 tünelle")
 	t.mPort5173 = t.mQuickShare.AddSubMenuItem("Port 5173 (Vite / Nuxt)", "localhost:5173 tünelle")
 	t.mPort8080 = t.mQuickShare.AddSubMenuItem("Port 8080 (Backend / API)", "localhost:8080 tünelle")
 
@@ -132,8 +132,8 @@ func (t *tray) onReady() {
 		case <-t.mCloseSession.ClickedCh:
 			t.app.CloseSessions()
 
-		case <-t.mPort8003.ClickedCh:
-			go t.app.SharePort(8003, false)
+		case <-t.mPort3000.ClickedCh:
+			go t.app.SharePort(3000, false)
 
 		case <-t.mPort5173.ClickedCh:
 			go t.app.SharePort(5173, false)

@@ -88,6 +88,10 @@ type Session struct {
 	// Aktif WebSocket passthrough akislari: req_id -> koprü.
 	wsMu      sync.Mutex
 	wsBridges map[uint64]*wsBridge
+
+	// Aktif ham TCP/UDP tunel akislari: req_id -> koprü (FAZ 3 / D2).
+	rawMu      sync.Mutex
+	rawBridges map[uint64]*rawBridge
 }
 
 func NewSession(id, clientID, clientName, remoteAddr string, conn *websocket.Conn, log *slog.Logger) *Session {
@@ -183,6 +187,7 @@ func (s *Session) Run(ctx context.Context) error {
 	defer s.failAllPending()
 	// Ayni sekilde acik WebSocket akislarini da serbest birak.
 	defer s.closeAllWS()
+	defer s.closeAllRaw()
 
 	go s.heartbeat(ctx, cancel)
 
@@ -269,6 +274,20 @@ func (s *Session) handleControl(ctx context.Context, data []byte) error {
 		}
 		s.routeWSClose(wc.ReqID)
 
+	case protocol.TypeStreamAck:
+		var ack protocol.StreamAck
+		if err := json.Unmarshal(data, &ack); err != nil {
+			return err
+		}
+		s.routeStreamAck(ack)
+
+	case protocol.TypeStreamClose:
+		var sc protocol.StreamClose
+		if err := json.Unmarshal(data, &sc); err != nil {
+			return err
+		}
+		s.routeStreamClose(sc.ReqID)
+
 	case protocol.TypeHTTPResponse:
 		var msg protocol.HTTPResponse
 		if err := json.Unmarshal(data, &msg); err != nil {
@@ -322,11 +341,32 @@ func (s *Session) handleControl(ctx context.Context, data []byte) error {
 		}
 		s.scrMu.Lock()
 		ch := s.scrSubs[m.SessionID]
+		errCh := s.scrErr[m.SessionID]
 		s.scrMu.Unlock()
 		if ch != nil {
 			select {
 			case ch <- m:
-			default: // yavas dashboard kareyi bloklamamali; kare dusurulur
+			default:
+				// Kuyruk dolu: yavas dashboard okuma dongusunu bloklamamali.
+				//
+				// MJPEG'de kareyi DUSURMEK dogrudur — her kare bagimsizdir,
+				// bir sonraki zaten tam goruntuyu tasir.
+				//
+				// H.264'te DUSURULEMEZ: Data, fragmented-MP4 akisinin sirali
+				// bir parcasidir. Bir parca eksilirse MSE SourceBuffer bunu
+				// KURTARAMAZ; goruntu donar veya bozulur ve akis bir daha
+				// duzelmez. Sessizce bozuk bir goruntu gostermektense oturumu
+				// acik bir hatayla kapatiyoruz; dashboard yeniden baglanir.
+				if m.Codec == "h264" && errCh != nil {
+					select {
+					case errCh <- protocol.ScreenError{
+						Type:      protocol.TypeScreenError,
+						SessionID: m.SessionID,
+						Message:   "video akisi yetisemedi (ag yavas); yeniden baglanin veya daha dusuk cozunurluk secin",
+					}:
+					default:
+					}
+				}
 			}
 		}
 
@@ -409,6 +449,11 @@ func (s *Session) routeBodyFrame(frame protocol.BodyFrame) {
 	if frame.FrameType == protocol.FrameWSData {
 		// Yukseltilmis WebSocket akisi: yerel -> tarayici ham baytlari.
 		s.routeWSData(frame.ReqID, frame.Payload)
+		return
+	}
+	if frame.FrameType == protocol.FrameStreamData || frame.FrameType == protocol.FrameDatagram {
+		// Ham TCP/UDP tunel: yerel -> ziyaretci baytlari/datagrami.
+		s.routeStreamData(frame.ReqID, frame.Payload)
 		return
 	}
 	if frame.FrameType != protocol.FrameResponseBody {

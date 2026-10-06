@@ -51,6 +51,7 @@ func (a *App) hideToTrayEnabled() bool {
 // yeni yetki ayari hemen gecerli olsun.
 func (a *App) UpdateBehavior(noTerminal, noScreen, hideToTray bool) string {
 	a.mu.Lock()
+	prevTarget := a.target
 	permsChanged := a.cfg.NoTerminal != noTerminal || a.cfg.NoScreen != noScreen
 	wasConnected := a.ag != nil
 	a.cfg.NoTerminal = noTerminal
@@ -63,7 +64,7 @@ func (a *App) UpdateBehavior(noTerminal, noScreen, hideToTray bool) string {
 		return "Ayarlar kaydedilemedi: " + err.Error()
 	}
 	if permsChanged && wasConnected && cfg.Token != "" {
-		go func() { a.Disconnect(); a.Connect() }()
+		go func() { a.Disconnect(); a.connect(prevTarget) }()
 	}
 	return ""
 }

@@ -3,11 +3,13 @@ const {
   authed,
   ready,
   githubEnabled,
+  googleEnabled,
   needs2FA,
   init,
   loginWithEmail,
   signUpWithEmail,
   loginWithBetterAuthGithub,
+  loginWithBetterAuthGoogle,
   loginWithKey,
   verifyTotp,
   sendEmailOtp,
@@ -163,6 +165,15 @@ async function handleSocialGithub() {
   } catch {
     // Fallback to legacy server route if Better Auth social redirect fails
     window.location.href = '/api/v1/auth/github/login'
+  }
+}
+
+async function handleSocialGoogle() {
+  error.value = ''
+  try {
+    await loginWithBetterAuthGoogle()
+  } catch (e: any) {
+    error.value = e?.message || t('auth.errSigninFailed')
   }
 }
 
@@ -368,21 +379,46 @@ async function handleKeySubmit() {
           </button>
         </div>
 
-        <!-- GitHub Social Button -->
-        <div v-if="githubEnabled" class="pt-2">
+        <!-- Sosyal Giriş (GitHub / Google) -->
+        <div v-if="githubEnabled || googleEnabled" class="pt-2">
           <div class="relative my-3 text-center">
             <span class="absolute inset-0 flex items-center"><span class="w-full border-t border-line" /></span>
             <span class="relative bg-surface/80 px-2 text-[11px] text-fg-subtle">{{ t('auth.orContinue') }}</span>
           </div>
-          <button
-            type="button"
-            class="flex w-full cursor-pointer items-center justify-center gap-2 rounded-md border border-line bg-bg px-4 py-2 text-xs font-medium text-fg transition-colors hover:bg-surface"
-            @click="handleSocialGithub"
-          >
-            <Icon name="lucide:github" class="size-4" />
-            {{ t('auth.githubContinue') }}
-          </button>
+          <div class="space-y-2">
+            <button
+              v-if="githubEnabled"
+              type="button"
+              class="flex w-full cursor-pointer items-center justify-center gap-2 rounded-md border border-line bg-bg px-4 py-2 text-xs font-medium text-fg transition-colors hover:bg-surface"
+              @click="handleSocialGithub"
+            >
+              <Icon name="lucide:github" class="size-4" />
+              {{ t('auth.githubContinue') }}
+            </button>
+            <button
+              v-if="googleEnabled"
+              type="button"
+              class="flex w-full cursor-pointer items-center justify-center gap-2 rounded-md border border-line bg-bg px-4 py-2 text-xs font-medium text-fg transition-colors hover:bg-surface"
+              @click="handleSocialGoogle"
+            >
+              <svg class="size-4" viewBox="0 0 24 24" aria-hidden="true">
+                <path fill="currentColor" d="M23.06 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h6.19a5.29 5.29 0 0 1-2.3 3.47v2.88h3.72c2.18-2 3.45-4.96 3.45-8.36Z"/>
+                <path fill="currentColor" d="M12 24c3.11 0 5.72-1.03 7.62-2.79l-3.72-2.88c-1.03.69-2.35 1.1-3.9 1.1-3 0-5.54-2.03-6.45-4.75H1.7v2.98A11.5 11.5 0 0 0 12 24Z"/>
+                <path fill="currentColor" d="M5.55 14.68a6.9 6.9 0 0 1 0-4.36V7.34H1.7a11.5 11.5 0 0 0 0 10.32l3.85-2.98Z"/>
+                <path fill="currentColor" d="M12 4.75c1.69 0 3.21.58 4.4 1.72l3.3-3.3C17.72 1.25 15.11 0 12 0A11.5 11.5 0 0 0 1.7 6.34l3.85 2.98C6.46 6.78 9 4.75 12 4.75Z"/>
+              </svg>
+              {{ t('auth.googleContinue') }}
+            </button>
+          </div>
         </div>
+
+        <!-- Sözleşme onayı -->
+        <p class="pt-1 text-center text-[11px] leading-relaxed text-fg-subtle">
+          {{ t('auth.termsPrefixSignin') }}
+          <a href="https://zorven.app/legal/terms" target="_blank" rel="noopener" class="text-accent hover:underline">{{ t('auth.termsAgreement') }}</a>
+          {{ t('auth.termsAnd') }}
+          <a href="https://zorven.app/legal/privacy" target="_blank" rel="noopener" class="text-accent hover:underline">{{ t('auth.termsPrivacy') }}</a>{{ t('auth.termsSuffix') }}
+        </p>
       </form>
 
       <!-- Tab: Kayıt Ol -->
@@ -439,14 +475,18 @@ async function handleKeySubmit() {
         <p class="pt-1 text-center text-[11px] text-fg-subtle">
           {{ t('auth.signupNote') }}
         </p>
+
+        <!-- Sözleşme onayı -->
+        <p class="text-center text-[11px] leading-relaxed text-fg-subtle">
+          {{ t('auth.termsPrefixSignup') }}
+          <a href="https://zorven.app/legal/terms" target="_blank" rel="noopener" class="text-accent hover:underline">{{ t('auth.termsAgreement') }}</a>
+          {{ t('auth.termsAnd') }}
+          <a href="https://zorven.app/legal/privacy" target="_blank" rel="noopener" class="text-accent hover:underline">{{ t('auth.termsPrivacy') }}</a>{{ t('auth.termsSuffix') }}
+        </p>
       </form>
 
       <!-- Tab: Admin Anahtarı -->
       <form v-else-if="activeTab === 'key'" class="mt-4 space-y-3.5" @submit.prevent="handleKeySubmit">
-        <p class="text-xs text-fg-muted">
-          {{ t('auth.keyHint') }}
-        </p>
-
         <div>
           <label for="adminkey" class="mb-1 block font-mono text-xs text-fg-muted">{{ t('auth.keyLabel') }}</label>
           <input
