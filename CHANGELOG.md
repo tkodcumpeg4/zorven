@@ -22,6 +22,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Panel: billing, plan-upgrade, and throttle screens removed; dashboard shows unlimited usage.
 - `deploy/docker-compose.yml` and `.env.example` simplified for self-hosting (no cluster or analytics services, placeholders only).
 - Test fixtures no longer contain real hosts or addresses.
+- Webmail: sending to external addresses is no longer limited to a paid plan.
 
 ### Removed
-- Clustering flags and services, service accounts, SSO, audit log, log sinks, zero-trust conditions, add-on requests, Pro trial.
+- Clustering flags and services, service accounts, SSO, audit log, log sinks, zero-trust conditions, add-on requests, Pro trial, device tags, platform plan-change endpoint and plan labels.

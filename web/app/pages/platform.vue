@@ -67,55 +67,6 @@ async function handleSwitchToTenant(ten: TenantWithCounts) {
   }
 }
 
-const showPlanModal = ref(false)
-const selectedTenant = ref<TenantWithCounts | null>(null)
-const selectedPlan = ref('free')
-const updatingPlan = ref(false)
-
-const PLAN_OPTIONS = [
-  { id: 'free', label: t('platform.planFree') },
-  { id: 'hobby', label: t('platform.planHobby') },
-  { id: 'pro', label: t('platform.planPro') },
-  { id: 'team', label: t('platform.planTeam') },
-  { id: 'enterprise', label: t('platform.planEnterprise') },
-]
-
-function openChangePlan(ten: TenantWithCounts) {
-  selectedTenant.value = ten
-  selectedPlan.value = ten.plan || 'free'
-  showPlanModal.value = true
-}
-
-async function handleSavePlan() {
-  if (!selectedTenant.value) return
-  updatingPlan.value = true
-  try {
-    await api.adminUpdateTenantPlan(selectedTenant.value.id, selectedPlan.value)
-    selectedTenant.value.plan = selectedPlan.value
-    toast.success(t('platform.planUpdated', { slug: selectedTenant.value.slug, plan: selectedPlan.value }))
-    showPlanModal.value = false
-  } catch (err: any) {
-    toast.error(err?.data?.error?.message || err?.message || t('platform.planUpdateFailed'))
-  } finally {
-    updatingPlan.value = false
-  }
-}
-
-function getPlanBadgeClass(plan?: string) {
-  switch (plan) {
-    case 'enterprise':
-      return 'border border-amber-300 bg-amber-50 text-amber-800 dark:bg-amber-500/20 dark:text-amber-300 dark:border-amber-500/30 font-semibold'
-    case 'team':
-      return 'border border-blue-300 bg-blue-50 text-blue-800 dark:bg-blue-500/20 dark:text-blue-300 dark:border-blue-500/30 font-semibold'
-    case 'pro':
-      return 'border border-purple-300 bg-purple-50 text-purple-800 dark:bg-purple-500/20 dark:text-purple-300 dark:border-purple-500/30 font-semibold'
-    case 'hobby':
-      return 'border border-emerald-300 bg-emerald-50 text-emerald-800 dark:bg-emerald-500/20 dark:text-emerald-300 dark:border-emerald-500/30 font-semibold'
-    default:
-      return 'bg-surface-2 text-fg-muted border border-line font-medium'
-  }
-}
-
 async function handleFreeze(fqdn: string, frozen: boolean) {
   freezing.value = fqdn
   try {
@@ -261,7 +212,6 @@ onMounted(() => {
               <th class="label-sys px-4 py-2 font-normal text-center">{{ t('platform.colClient') }}</th>
               <th class="label-sys px-4 py-2 font-normal text-center">{{ t('platform.colTunnel') }}</th>
               <th class="label-sys px-4 py-2 font-normal text-center">{{ t('platform.colDomain') }}</th>
-              <th class="label-sys px-4 py-2 font-normal text-center">{{ t('platform.colPlan') }}</th>
               <th class="label-sys px-4 py-2 font-normal">{{ t('platform.colRegDate') }}</th>
               <th class="px-4 py-2 text-right"><span class="sr-only">{{ t('platform.colAction') }}</span></th>
             </tr>
@@ -278,18 +228,6 @@ onMounted(() => {
               <td class="px-4 py-2.5 text-center font-mono text-xs">{{ ten.clients_count }}</td>
               <td class="px-4 py-2.5 text-center font-mono text-xs">{{ ten.tunnels_count }}</td>
               <td class="px-4 py-2.5 text-center font-mono text-xs">{{ ten.hostnames_count }}</td>
-              <td class="px-4 py-2.5 text-center">
-                <button
-                  type="button"
-                  class="cursor-pointer inline-flex items-center gap-1 rounded-full px-2 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wider transition-colors hover:opacity-80"
-                  :class="getPlanBadgeClass(ten.plan)"
-                  :title="t('platform.changePlanTitle')"
-                  @click="openChangePlan(ten)"
-                >
-                  <span>{{ ten.plan || 'free' }}</span>
-                  <Icon name="lucide:pencil" class="size-2.5 opacity-60" />
-                </button>
-              </td>
               <td class="px-4 py-2.5 text-xs text-fg-muted">{{ relativeTime(ten.created_at) }}</td>
               <td class="px-4 py-2.5 text-right">
                 <button
@@ -473,59 +411,5 @@ onMounted(() => {
         </table>
       </div>
     </PanelFrame>
-
-    <!-- Modal: Kiracı Planını Değiştir -->
-    <div
-      v-if="showPlanModal && selectedTenant"
-      class="fixed inset-0 z-50 grid place-items-center bg-black/60 p-4 backdrop-blur-sm"
-      @click.self="showPlanModal = false"
-    >
-      <div class="w-full max-w-sm rounded-xl border border-line bg-surface p-5 shadow-2xl">
-        <div class="flex items-center justify-between pb-3 border-b border-line">
-          <h3 class="text-sm font-semibold text-fg">{{ t('platform.modalChangePlan') }}</h3>
-          <button type="button" class="text-fg-muted hover:text-fg" @click="showPlanModal = false">
-            <Icon name="lucide:x" class="size-4" />
-          </button>
-        </div>
-
-        <div class="mt-4 space-y-3 text-xs">
-          <div>
-            <span class="text-fg-subtle">{{ t('platform.tenantLabel') }}</span>
-            <span class="ml-1 font-mono font-medium text-fg">{{ selectedTenant.slug }} ({{ selectedTenant.id }})</span>
-          </div>
-
-          <div>
-            <label class="block text-xs font-medium text-fg-muted mb-1.5">{{ t('platform.selectNewPlan') }}</label>
-            <select
-              v-model="selectedPlan"
-              class="w-full rounded border border-line bg-bg px-3 py-2 text-xs font-medium text-fg focus:border-accent focus:outline-none"
-            >
-              <option v-for="opt in PLAN_OPTIONS" :key="opt.id" :value="opt.id">
-                {{ opt.label }}
-              </option>
-            </select>
-          </div>
-
-        </div>
-
-        <div class="flex justify-end gap-2 pt-4 border-t border-line mt-4">
-          <button
-            type="button"
-            class="rounded px-3 py-1.5 text-xs text-fg-muted hover:bg-bg"
-            @click="showPlanModal = false"
-          >
-            {{ t('common.cancel') }}
-          </button>
-          <button
-            type="button"
-            :disabled="updatingPlan"
-            class="rounded bg-accent px-3 py-1.5 text-xs font-medium text-on-accent hover:opacity-90 disabled:opacity-50"
-            @click="handleSavePlan"
-          >
-            {{ updatingPlan ? t('platform.savingPlan') : t('platform.updatePlan') }}
-          </button>
-        </div>
-      </div>
-    </div>
   </div>
 </template>

@@ -119,7 +119,6 @@ export interface Client {
 // Device, istemci kaydı + kalıcı cihaz bilgisi + canlı durum (F14).
 export interface Device extends Client {
   tunnels?: Tunnel[]         // yalnızca tek cihaz detayında dolu
-  tags?: Record<string, string>  // F16, yalnızca detayda dolu
 }
 
 export type TunnelProto = 'http' | 'tcp' | 'udp'
@@ -619,7 +618,7 @@ export interface MailInfo {
   address: string
   domain?: string
   unseen: number
-  /** Harici (mail.<domain> dışı) adrese gönderebilir mi — yalnızca Enterprise. */
+  /** Harici (mail.<domain> dışı) adrese gönderebilir mi — açık sürümde her zaman true. */
   can_send_external?: boolean
   /** Site sistem posta kutuları (info@, sales@ …) — yalnızca owner/platform admin. */
   system_addresses?: string[]

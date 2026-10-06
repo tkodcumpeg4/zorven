@@ -41,7 +41,7 @@ func TestSubscriptions_LifecycleAndLimits(t *testing.T) {
 	}
 
 	// 3. Plan Hobby'ye yukseltilsin ($5 / ay, 5 client, 1 domain, 5 tunnel, 20GB)
-	if err := s.UpdateTenantPlan(ctx, ten.ID, store.PlanHobby, store.SubStatusActive, nil); err != nil {
+	if err := setTestPlan(ctx, s, ten.ID, store.PlanHobby, nil); err != nil {
 		t.Fatalf("UpdateTenantPlan to hobby: %v", err)
 	}
 	hobbySub, err := s.GetSubscription(ctx, ten.ID)
@@ -57,7 +57,7 @@ func TestSubscriptions_LifecycleAndLimits(t *testing.T) {
 
 	// 4. Plan Pro'ya yukseltilsin ($12 / ay, 15 client, 5 domain, 20 tunnel, 100GB)
 	end := time.Now().Add(30 * 24 * time.Hour).UTC()
-	if err := s.UpdateTenantPlan(ctx, ten.ID, store.PlanPro, store.SubStatusActive, &end); err != nil {
+	if err := setTestPlan(ctx, s, ten.ID, store.PlanPro, &end); err != nil {
 		t.Fatalf("UpdateTenantPlan: %v", err)
 	}
 
@@ -116,7 +116,7 @@ func TestSubscriptions_LifecycleAndLimits(t *testing.T) {
 	}
 
 	// 6. Team planina gecis testi (50 client, 50 domain, 50 tunnel, 250GB)
-	if err := s.UpdateTenantPlan(ctx, ten.ID, store.PlanTeam, store.SubStatusActive, nil); err != nil {
+	if err := setTestPlan(ctx, s, ten.ID, store.PlanTeam, nil); err != nil {
 		t.Fatalf("UpdateTenantPlan to team: %v", err)
 	}
 	teamSub, err := s.GetSubscription(ctx, ten.ID)
@@ -149,4 +149,12 @@ func TestSubscriptions_LifecycleAndLimits(t *testing.T) {
 	if proPlan.PriceMonthly != 1200 || !proPlan.HasAPIAccess || !proPlan.HasIPAllowlist {
 		t.Errorf("Pro plan detaylari hatali: %+v", proPlan)
 	}
+}
+
+// setTestPlan, testte bir kiracinin planini plan varsayilan limitleriyle ayarlar
+// (acik surumde plan degistirme API'si yoktur; abonelik dogrudan upsert edilir).
+func setTestPlan(ctx context.Context, s *Store, tenantID, plan string, periodEnd *time.Time) error {
+	sub := DefaultSubscriptionForPlan(tenantID, plan)
+	sub.CurrentPeriodEnd = periodEnd
+	return s.UpsertSubscription(ctx, sub)
 }

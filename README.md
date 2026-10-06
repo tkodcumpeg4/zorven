@@ -189,6 +189,8 @@ repository:
 - Zero-trust access conditions (2FA and source-network conditions)
 - Service accounts (machine identities)
 - Plan-based log retention
+- Device tags (metadata labels on devices)
+- Platform plan management (changing a tenant's plan; plan labels in the platform console)
 - Hosted marketing site and billing screens
 
 The core defines the integration seams as interfaces; without the commercial

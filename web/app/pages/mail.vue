@@ -509,10 +509,6 @@ async function copyAddress() {
               placeholder="ornek@alanadi.com"
               class="w-full rounded-md border border-line bg-bg px-3 py-2 text-sm text-fg placeholder:text-fg-subtle focus:border-accent focus:outline-none"
             >
-            <p v-if="info && info.can_send_external === false" class="mt-1 flex items-center gap-1 text-[11px] text-fg-subtle">
-              <Icon name="lucide:info" class="size-3 shrink-0" />
-              {{ t('mail.internalOnly', { domain: '@' + (info.domain || 'mail.zorven.app') }) }}
-            </p>
           </div>
           <div>
             <label class="mb-1 block text-xs font-medium text-fg-muted">{{ t('mail.subject') }}</label>

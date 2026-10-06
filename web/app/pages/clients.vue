@@ -9,48 +9,6 @@ const { openUpgrade, loadBillingData } = useBilling()
 
 const clients = ref<Client[]>([])
 
-// --- F16: cihaz etiketleri (yalnızca owner/admin düzenler; sunucu da zorlar) ---
-const { user, platformAdmin } = useAuth()
-const canEditTags = computed(() => {
-  if (platformAdmin.value) return true
-  const r = (user.value?.role || '').toLowerCase()
-  return r === 'owner' || r === 'admin'
-})
-const tagClient = ref<Client | null>(null)
-const tagText = ref('')
-const tagSaving = ref(false)
-
-async function openTags(c: Client) {
-  tagClient.value = c
-  tagText.value = ''
-  try {
-    const tags = await api.getDeviceTags(c.id)
-    tagText.value = Object.entries(tags).map(([k, v]) => `${k}=${v}`).join('\n')
-  } catch (e: any) {
-    toast.error(e?.data?.error?.message || e?.data?.error || t('clients.tagsError'))
-  }
-}
-
-async function saveTags() {
-  if (!tagClient.value) return
-  const tags: Record<string, string> = {}
-  for (const raw of tagText.value.split(/[\n,]/)) {
-    const i = raw.indexOf('=')
-    if (i <= 0) continue
-    const k = raw.slice(0, i).trim().toLowerCase()
-    if (k) tags[k] = raw.slice(i + 1).trim()
-  }
-  tagSaving.value = true
-  try {
-    await api.setDeviceTags(tagClient.value.id, tags)
-    tagClient.value = null
-    toast.success(t('clients.tagsSaved'))
-  } catch (e: any) {
-    toast.error(e?.data?.error?.message || e?.data?.error || t('clients.tagsError'))
-  } finally {
-    tagSaving.value = false
-  }
-}
 const pending = ref(true)
 const saving = ref(false)
 const newName = ref('')
@@ -400,14 +358,6 @@ const currentCmd = computed(() => {
               <td class="px-4 py-3 text-xs text-fg-muted">{{ relativeTime(c.last_seen_at) }}</td>
               <td class="px-4 py-3">
                 <div class="flex justify-end gap-1">
-                  <button
-                    v-if="canEditTags"
-                    class="rounded-md px-2 py-1 text-xs text-fg-muted hover:text-fg"
-                    :title="t('clients.editTags')"
-                    @click="openTags(c)"
-                  >
-                    <Icon name="lucide:tags" class="size-3.5" />
-                  </button>
                   <NuxtLink
                     v-if="c.status === 'online'"
                     :to="`/terminal/${c.id}`"
@@ -440,21 +390,5 @@ const currentCmd = computed(() => {
         </table>
       </div>
     </PanelFrame>
-
-    <!-- F16: cihaz etiketleri -->
-    <div v-if="tagClient" class="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4" @click.self="tagClient = null">
-      <div class="w-full max-w-md rounded-xl border border-line bg-surface p-5 shadow-lg">
-        <h2 class="text-lg font-semibold text-fg">{{ t('clients.editTags') }} — {{ tagClient.name }}</h2>
-        <textarea v-model="tagText" rows="5" :placeholder="t('clients.tagsPh')" class="mt-3 w-full rounded-lg border border-line bg-bg px-3 py-2 font-mono text-xs text-fg outline-none focus:border-accent" />
-        <p class="mt-1 text-[11px] leading-relaxed text-fg-subtle">{{ t('clients.tagsHint') }}</p>
-        <div class="mt-4 flex justify-end gap-2">
-          <button class="rounded-lg border border-line px-3 py-2 text-sm text-fg-muted hover:text-fg" @click="tagClient = null">{{ t('common.cancel') }}</button>
-          <button class="inline-flex items-center gap-1.5 rounded-lg bg-accent px-3 py-2 text-sm font-medium text-white disabled:opacity-50" :disabled="tagSaving" @click="saveTags">
-            <Icon v-if="tagSaving" name="lucide:loader-circle" class="size-4 animate-spin" />
-            {{ t('common.save') }}
-          </button>
-        </div>
-      </div>
-    </div>
   </div>
 </template>

@@ -729,10 +729,6 @@ type Store interface {
 	GetDeviceConfigByClient(ctx context.Context, clientID string) (*protocol.AgentSettings, error)
 	SetDeviceConfig(ctx context.Context, tenantID, clientID string, cfg protocol.AgentSettings) error
 
-	// Cihaz etiketleri (FAZ 3 / F16).
-	GetDeviceTags(ctx context.Context, tenantID, clientID string) (map[string]string, error)
-	ListDeviceTagsByTenant(ctx context.Context, tenantID string) (map[string]map[string]string, error)
-	SetDeviceTags(ctx context.Context, tenantID, clientID string, tags map[string]string) error
 	// GetMemberRole, kullanicinin kiracidaki gercek rolu; uyelik yoksa "".
 	GetMemberRole(ctx context.Context, tenantID, userID string) (string, error)
 
@@ -809,7 +805,6 @@ type Store interface {
 	ListPlans(ctx context.Context) ([]Plan, error)
 	GetSubscription(ctx context.Context, tenantID string) (Subscription, error)
 	UpsertSubscription(ctx context.Context, sub Subscription) error
-	UpdateTenantPlan(ctx context.Context, tenantID, plan, status string, periodEnd *time.Time) error
 	GetTenantUsage(ctx context.Context, tenantID string) (TenantUsage, error)
 	CountClients(ctx context.Context, tenantID string) (int, error)
 	CountCustomDomains(ctx context.Context, tenantID string) (int, error)

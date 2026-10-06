@@ -19,15 +19,10 @@ import (
 // mailStore, sendMail'in ihtiyac duydugu store cagrilarini taklit eder.
 type mailStore struct {
 	store.Store
-	plan string
 }
 
 func (m *mailStore) GetTenant(ctx context.Context, id string) (store.Tenant, error) {
 	return store.Tenant{ID: id, Slug: "acme"}, nil
-}
-
-func (m *mailStore) GetSubscription(ctx context.Context, tenantID string) (store.Subscription, error) {
-	return store.Subscription{TenantID: tenantID, Plan: m.plan, Status: "active"}, nil
 }
 
 func (m *mailStore) InsertMailMessage(ctx context.Context, msg store.MailMessage) (store.MailMessage, error) {
@@ -113,10 +108,10 @@ func (f *fakeSMTP) serve(c net.Conn) {
 	}
 }
 
-func TestSendMail_ExternalRestrictionUsesEnvelopeAddress(t *testing.T) {
+func TestSendMail_ExternalAllowedUsesEnvelopeAddress(t *testing.T) {
 	smtpSrv, addr := startFakeSMTP(t)
 	s := &Server{
-		Store:      &mailStore{plan: "pro"},
+		Store:      &mailStore{},
 		MailDomain: "mail.zorven.app",
 		MailSender: mail.NewSender(addr, "mail.zorven.app"),
 	}
@@ -139,17 +134,6 @@ func TestSendMail_ExternalRestrictionUsesEnvelopeAddress(t *testing.T) {
 		return out.Error.Code
 	}
 
-	// Harici alici, gorunen adda ic adres olsa da: 403 ve SMTP'ye hic gitmez.
-	for _, to := range []string{
-		"victim@example.org",
-		`"x@mail.zorven.app" <victim@example.org>`,
-		"Victim@GMAIL.com",
-	} {
-		rec := send(map[string]any{"to": to, "subject": "s", "body": "b"})
-		if rec.Code != http.StatusForbidden || errCode(rec) != "external_mail_not_allowed" {
-			t.Fatalf("to=%q: 403 external_mail_not_allowed bekleniyordu, alinan %d %s", to, rec.Code, rec.Body.String())
-		}
-	}
 	// Belirsiz / coklu / enjeksiyonlu alicilar: 422.
 	for _, to := range []string{
 		"bob@mail.zorven.app, victim@example.org",
@@ -175,6 +159,28 @@ func TestSendMail_ExternalRestrictionUsesEnvelopeAddress(t *testing.T) {
 	}
 	smtpSrv.mu.Unlock()
 
+	// Harici alici (acik surumde serbest): 201, zarf alicisi gercek adres;
+	// gorunen addaki ic adres zarfa girmez.
+	for to, want := range map[string]string{
+		"victim@example.org":                   "<victim@example.org>",
+		`"x@mail.zorven.app" <victim@example.org>`: "<victim@example.org>",
+		"Victim@GMAIL.com":                     "<Victim@gmail.com>",
+	} {
+		rec := send(map[string]any{"to": to, "subject": "s", "body": "b"})
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("to=%q: harici gonderim 201 olmaliydi: %d %s", to, rec.Code, rec.Body.String())
+		}
+		smtpSrv.mu.Lock()
+		got := smtpSrv.rcpts[len(smtpSrv.rcpts)-1]
+		smtpSrv.mu.Unlock()
+		if got != want {
+			t.Fatalf("to=%q: RCPT %q, beklenen %q", to, got, want)
+		}
+	}
+	smtpSrv.mu.Lock()
+	smtpSrv.rcpts, smtpSrv.data = nil, nil
+	smtpSrv.mu.Unlock()
+
 	// Ic alici: 201, zarf alicisi tam olarak dogrulanan adres.
 	rec := send(map[string]any{"to": "Bob <bob@Mail.Zorven.App>", "subject": "merhaba", "body": "b", "in_reply_to": "<x@y>"})
 	if rec.Code != http.StatusCreated {
@@ -187,27 +193,5 @@ func TestSendMail_ExternalRestrictionUsesEnvelopeAddress(t *testing.T) {
 	}
 	if len(smtpSrv.data) != 1 || !strings.Contains(smtpSrv.data[0], "To: bob@mail.zorven.app\r\n") {
 		t.Fatalf("To basligi dogrulanan adres olmaliydi: %v", smtpSrv.data)
-	}
-}
-
-func TestSendMail_EnterpriseMayGoExternal(t *testing.T) {
-	smtpSrv, addr := startFakeSMTP(t)
-	s := &Server{
-		Store:      &mailStore{plan: "enterprise"},
-		MailDomain: "mail.zorven.app",
-		MailSender: mail.NewSender(addr, "mail.zorven.app"),
-	}
-	b, _ := json.Marshal(map[string]any{"to": "Victim <victim@example.org>", "body": "b"})
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/mail/send", bytes.NewReader(b))
-	req = req.WithContext(withTenant(req.Context(), "ten_acme"))
-	rec := httptest.NewRecorder()
-	s.sendMail(rec, req)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("enterprise harici gonderim 201 olmaliydi: %d %s", rec.Code, rec.Body.String())
-	}
-	smtpSrv.mu.Lock()
-	defer smtpSrv.mu.Unlock()
-	if len(smtpSrv.rcpts) != 1 || smtpSrv.rcpts[0] != "<victim@example.org>" {
-		t.Fatalf("RCPT TO: %v", smtpSrv.rcpts)
 	}
 }

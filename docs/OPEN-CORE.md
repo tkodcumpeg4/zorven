@@ -18,7 +18,7 @@ separate, private codebase.
 | Private network (`zorven connect`, `zorven forward`, subnets) | yes | |
 | Request inspector, replay, replay diff, metrics, alerts, abuse reports | yes | |
 | Multi-tenant model: organizations, projects, members, invitations, API tokens | yes | |
-| Webmail (inbound + outbound, DKIM/SPF/DMARC), remote terminal, screen sharing | yes | |
+| Webmail (inbound + outbound, DKIM/SPF/DMARC; external sending is open to every tenant), remote terminal, screen sharing | yes | |
 | CLI, desktop app, Go / Node.js / Python SDKs, REST API | yes | |
 | Dashboard (English + Turkish) | yes | billing and plan screens |
 | Self-hosting stack (Docker Compose, install scripts) | yes | |
@@ -30,6 +30,8 @@ separate, private codebase.
 | Zero-trust access conditions (2FA, source-network conditions) | | yes |
 | Service accounts | | yes |
 | Plan-based log retention | | yes |
+| Device tags | | yes |
+| Platform plan management (plan-change endpoint and plan labels in the platform console) | | yes |
 
 Email/password and GitHub/Google sign-in are part of the open core.
 
@@ -49,11 +51,12 @@ Other commercial seams are likewise replaced by simple defaults in the open buil
 
 - **Audit sink:** audit calls are a no-op.
 - **Clustering:** the server runs as a single node.
+- **Webmail:** sending to external addresses is not gated by a plan; any tenant can send.
 - **Log retention:** a fixed, configurable period. Set `ZORVEN_LOG_RETENTION_DAYS`
   (default `30`; `0` disables pruning). Request logs older than that are deleted
   in the background.
 - **Device access:** every member of an organization can reach the organization's
-  devices; owners and admins manage tags and sensitive settings.
+  devices; owners and admins manage sensitive settings.
 
 A commercial deployment replaces the no-op entitlements with a real implementation
 and adds the extra services; the open code paths are identical.

@@ -240,7 +240,6 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("GET /api/v1/admin/clients", s.adminListClients)
 	mux.HandleFunc("GET /api/v1/admin/hostnames", s.adminListHostnames)
 	mux.HandleFunc("POST /api/v1/admin/switch-tenant", s.adminSwitchTenant)
-	mux.HandleFunc("PUT /api/v1/admin/tenants/{id}/plan", s.adminUpdateTenantPlan)
 
 	// Kötüye kullanım (FAZ 4). Rapor ucu PUBLIC (main.go public dalinda);
 	// dondurma + liste PLATFORM ADMIN.
@@ -315,8 +314,6 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("PUT /api/v1/devices/{id}/config", s.setDeviceConfig)
 
 	// Cihaz etiketleri (FAZ 3 / F16). Yazma islemleri yalnizca owner/admin.
-	mux.HandleFunc("GET /api/v1/devices/{id}/tags", s.getDeviceTags)
-	mux.HandleFunc("PUT /api/v1/devices/{id}/tags", s.setDeviceTags)
 
 	// Birlesik Policy motoru (FAZ 1 / F04)
 	mux.HandleFunc("GET /api/v1/policies", s.listPolicies)

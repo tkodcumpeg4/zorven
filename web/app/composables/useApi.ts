@@ -521,15 +521,6 @@ export function useApi() {
     return req<Tunnel>('/network/resources', { method: 'POST', body: p })
   }
 
-  // --- FAZ 3 / F16: cihaz etiketleri + kaynak politikaları ---
-  async function getDeviceTags(id: string): Promise<Record<string, string>> {
-    const r = await req<{ tags: Record<string, string> }>(`/devices/${id}/tags`)
-    return r.tags || {}
-  }
-  async function setDeviceTags(id: string, tags: Record<string, string>): Promise<Record<string, string>> {
-    const r = await req<{ tags: Record<string, string> }>(`/devices/${id}/tags`, { method: 'PUT', body: { tags } })
-    return r.tags || {}
-  }
   async function replayRequest(id: string, overrides?: ReplayOverrides): Promise<ReplayResult> {
     // Düzenleme yoksa gövde HİÇ gönderilmez: sunucu tarafında gövdesiz çağrı
     // "orijinali aynen gönder" anlamına gelir.
@@ -740,27 +731,6 @@ export function useApi() {
     }
     const res = await req<PlansResponse>(`/plans`)
     return res?.plans ?? []
-  }
-
-  async function adminUpdateTenantPlan(tenantId: string, plan: string, status = 'active'): Promise<Subscription> {
-    if (USE_MOCK) {
-      await delay()
-      return {
-        tenant_id: tenantId,
-        plan,
-        status,
-        max_clients: 15,
-        max_custom_domains: 5,
-        max_tunnels: 20,
-        bandwidth_limit_bytes: 100 * 1024 * 1024 * 1024,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      }
-    }
-    return req<Subscription>(`/admin/tenants/${tenantId}/plan`, {
-      method: 'PUT',
-      body: { plan, status },
-    })
   }
 
   // --- Team ek cihaz / ek trafik talepleri ---
@@ -1092,10 +1062,9 @@ export function useApi() {
     listRequests, streamRequests, deviceApprove,
     getCaptureEnabled, setCaptureEnabled, getRequestDetail, replayRequest,
     listDevices, getDevice, listNetworkResources, createNetworkResource,
-    getDeviceTags, setDeviceTags,
     adminGetStats, adminListTenants, adminListClients, adminListHostnames, adminSwitchTenant,
     adminListAbuseReports, adminFreeze,
-    getSubscription, listPlans, adminUpdateTenantPlan,
+    getSubscription, listPlans,
     listTeamMembers, inviteTeamMember, updateMemberRole, removeTeamMember,
     listMemberTokens, createMemberToken, revokeMemberToken,
     resendInvitation, listMyInvitations, getInvitation, acceptInvitation, declineInvitation,

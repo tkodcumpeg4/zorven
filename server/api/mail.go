@@ -44,14 +44,6 @@ func (s *Server) mailInfo(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	// Harici gonderim yalnizca Enterprise (veya platform admin). Digerleri ic
-	// (@mail.<domain>) adreslere gonderebilir.
-	canExternal := isPlatformAdmin(r.Context())
-	if !canExternal {
-		if sub, e := s.Store.GetSubscription(r.Context(), tenantID); e == nil {
-			canExternal = strings.ToLower(strings.TrimSpace(sub.Plan)) == "enterprise"
-		}
-	}
 	// Sistem posta kutulari YALNIZCA platform admin'e (owner) gosterilir.
 	var systemAddrs []string
 	if isPlatformAdmin(r.Context()) {
@@ -62,7 +54,7 @@ func (s *Server) mailInfo(w http.ResponseWriter, r *http.Request) {
 		"address":           addr,
 		"domain":            s.MailDomain,
 		"unseen":            unseen,
-		"can_send_external": canExternal,
+		"can_send_external": true,
 		"system_addresses":  systemAddrs,
 	})
 }
@@ -225,21 +217,8 @@ func (s *Server) sendMail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Plan siniri: Enterprise OLMAYAN kiracilar YALNIZCA ic adreslere
-	// (@mail.<domain>) gonderebilir. Harici (or. gmail.com) gonderim yalnizca
-	// Enterprise planinda; platform admin (super-admin) her zaman gonderebilir.
-	recipientDomain := mail.AddressDomain(to)
-	if recipientDomain != strings.ToLower(strings.TrimSpace(s.MailDomain)) && !isPlatformAdmin(r.Context()) {
-		plan := ""
-		if sub, err := s.Store.GetSubscription(r.Context(), tenantID); err == nil {
-			plan = strings.ToLower(strings.TrimSpace(sub.Plan))
-		}
-		if plan != "enterprise" {
-			writeJSONError(w, http.StatusForbidden, "external_mail_not_allowed",
-				"Harici e-posta gonderimi yalnizca Enterprise planinda kullanilabilir. Mevcut planinizda yalnizca @"+s.MailDomain+" adreslerine gonderebilirsiniz.")
-			return
-		}
-	}
+	// Acik surumde harici alicilara gonderim serbesttir (plan siniri yok).
+	// Zarf alicisi ayrisan/dogrulanan adrestir (to, yukarida dogrulandi).
 
 	from, okAddr := s.mailAddressFor(r, tenantID)
 	if !okAddr {

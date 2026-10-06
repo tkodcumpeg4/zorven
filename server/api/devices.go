@@ -22,8 +22,6 @@ type Device struct {
 	// Tunnels yalnizca TEK cihaz detayinda doldurulur; listede N+1 sorgu
 	// yapmamak icin bos birakilir.
 	Tunnels []store.Tunnel `json:"tunnels,omitempty"`
-	// Tags (F16), yalnizca detayda doldurulur.
-	Tags map[string]string `json:"tags,omitempty"`
 }
 
 // deviceOut, istemci kaydini cihaz goruntusune cevirir.
@@ -118,9 +116,6 @@ func (s *Server) getDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d := deviceOut(s.enrich(c))
-	if tags, err := s.Store.GetDeviceTags(r.Context(), tenantID, c.ID); err == nil {
-		d.Tags = tags
-	}
 
 	// Tunel listesi YALNIZCA detayda: listede her cihaz icin sorgu yapmak
 	// N+1 olurdu.

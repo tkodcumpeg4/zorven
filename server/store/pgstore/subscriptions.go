@@ -176,32 +176,6 @@ func (s *Store) UpsertSubscription(ctx context.Context, sub store.Subscription) 
 	return err
 }
 
-// UpdateTenantPlan, kiracinin planini degistirir ve planin standart limitlerini uygular.
-func (s *Store) UpdateTenantPlan(ctx context.Context, tenantID, plan, status string, periodEnd *time.Time) error {
-	defaults := DefaultSubscriptionForPlan(tenantID, plan)
-	now := time.Now().UTC()
-
-	_, err := s.pool.Exec(ctx,
-		`INSERT INTO subscriptions (
-			tenant_id, plan, status, current_period_end,
-			max_clients, max_custom_domains, max_tunnels, bandwidth_limit_bytes,
-			created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
-		ON CONFLICT (tenant_id) DO UPDATE SET
-			plan = EXCLUDED.plan,
-			status = EXCLUDED.status,
-			current_period_end = EXCLUDED.current_period_end,
-			max_clients = EXCLUDED.max_clients,
-			max_custom_domains = EXCLUDED.max_custom_domains,
-			max_tunnels = EXCLUDED.max_tunnels,
-			bandwidth_limit_bytes = EXCLUDED.bandwidth_limit_bytes,
-			updated_at = EXCLUDED.updated_at`,
-		tenantID, plan, status, periodEnd,
-		defaults.MaxClients, defaults.MaxCustomDomains, defaults.MaxTunnels, defaults.BandwidthLimitBytes,
-		now)
-	return err
-}
-
 // CountClients, kiracinin kayitli istemci sayisini doner.
 func (s *Store) CountClients(ctx context.Context, tenantID string) (int, error) {
 	var count int
