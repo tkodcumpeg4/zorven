@@ -4,10 +4,23 @@ import type { MailInfo, MailMessage } from '~/types/api'
 const api = useApi()
 const toast = useToast()
 const { t } = useI18n()
+const { platformDomain } = useAuth()
 const { relativeTime } = useFormat()
 
 const info = ref<MailInfo | null>(null)
-const box = ref<'inbox' | 'sent'>('inbox')
+// Gercek posta alan adi: API'den; yuklenene kadar platform domainine gore.
+const mailDomain = computed(() => info.value?.domain || (platformDomain.value ? `mail.${platformDomain.value}` : 'mail'))
+// inbox | sent | trash veya kullanıcı klasörü adı ('/' ayraçlı, IMAP ile oluşturulan)
+const box = ref<string>('inbox')
+const folders = ref<string[]>([])
+const moveOpen = ref(false)
+const boxLabel = computed(() =>
+  box.value === 'inbox' ? t('mail.inbox') : box.value === 'sent' ? t('mail.sent') : box.value === 'trash' ? t('mail.trash') : box.value,
+)
+function folderDepth(n: string) { return n.split('/').length - 1 }
+function folderLeaf(n: string) { return n.split('/').pop() || n }
+// 'mail' = webmail; 'apps' = "Mail uygulamalarında kullan" (IMAP/SMTP kurulum)
+const view = ref<'mail' | 'apps'>('mail')
 const messages = ref<MailMessage[]>([])
 const selected = ref<MailMessage | null>(null)
 const loading = ref(true)
@@ -90,9 +103,11 @@ const visibleMessages = computed(() => {
   if (mailbox.value === 'all') return messages.value
   const mb = mailbox.value.toLowerCase()
   return messages.value.filter(m =>
-    box.value === 'inbox'
-      ? (m.to || '').toLowerCase() === mb
-      : (m.from || '').toLowerCase() === mb,
+    box.value === 'sent'
+      ? (m.from || '').toLowerCase() === mb
+      : box.value !== 'inbox'
+        ? (m.to || '').toLowerCase() === mb || (m.from || '').toLowerCase() === mb
+        : (m.to || '').toLowerCase() === mb,
   )
 })
 
@@ -117,11 +132,33 @@ async function load() {
   loading.value = true
   try {
     info.value = await api.mailInfo()
-    if (info.value?.enabled) await loadBox()
+    if (info.value?.enabled) {
+      await Promise.all([loadBox(), loadFolders()])
+    }
   } catch (e: any) {
     toast.error(e?.data?.error?.message || (typeof e?.data?.error === 'string' ? e.data.error : '') || e?.message || t('mail.loadFailed'))
   } finally {
     loading.value = false
+  }
+}
+
+async function loadFolders() {
+  try {
+    folders.value = (await api.listMailFolders()).folders || []
+  } catch {
+    folders.value = []
+  }
+}
+
+async function moveTo(m: MailMessage, folder: string) {
+  moveOpen.value = false
+  try {
+    await api.moveMail(m.id, folder)
+    messages.value = messages.value.filter(x => x.id !== m.id)
+    if (selected.value?.id === m.id) selected.value = null
+    toast.info(t('mail.moved', { folder: folder === 'inbox' ? t('mail.inbox') : folder }))
+  } catch (e: any) {
+    toast.error(e?.data?.error?.message || (typeof e?.data?.error === 'string' ? e.data.error : '') || e?.message || t('mail.moveFailed'))
   }
 }
 
@@ -137,14 +174,15 @@ async function loadBox() {
   }
 }
 
-function switchBox(b: 'inbox' | 'sent') {
+function switchBox(b: string) {
   if (box.value === b) return
   box.value = b
+  moveOpen.value = false
   loadBox()
 }
 
 async function openMessage(m: MailMessage) {
-  const wasUnseen = m.direction === 'inbound' && !m.seen
+  const wasUnseen = !m.seen
   try {
     selected.value = await api.getMail(m.id)
     m.seen = true
@@ -168,7 +206,7 @@ async function removeMessage(m: MailMessage) {
 
 function addrOnly(s: string): string {
   const m = s.match(/<([^>]+)>/)
-  return m ? m[1] : s.trim()
+  return m ? (m[1] ?? s.trim()) : s.trim()
 }
 
 function openCompose() {
@@ -234,17 +272,27 @@ async function copyAddress() {
     <header class="flex flex-wrap items-end justify-between gap-3">
       <div>
         <h1 class="text-xl font-semibold tracking-tight">{{ t('mail.title') }}</h1>
-        <p class="mt-0.5 text-sm text-fg-muted">{{ t('mail.subtitle') }}</p>
+        <p class="mt-0.5 text-sm text-fg-muted">{{ t('mail.subtitle', { domain: mailDomain }) }}</p>
       </div>
-      <button
-        v-if="info?.enabled"
-        type="button"
-        class="flex cursor-pointer items-center gap-1.5 rounded-lg bg-accent px-3.5 py-2 text-xs font-semibold text-on-accent transition-all hover:opacity-90 active:scale-95"
-        @click="openCompose"
-      >
-        <Icon name="lucide:pencil" class="size-4" />
-        <span>{{ t('mail.compose') }}</span>
-      </button>
+      <div v-if="info?.enabled" class="flex items-center gap-2">
+        <button
+          type="button"
+          class="flex cursor-pointer items-center gap-1.5 rounded-lg border px-3.5 py-2 text-xs font-medium transition-colors"
+          :class="view === 'apps' ? 'border-accent bg-accent/10 text-accent' : 'border-line text-fg-muted hover:border-accent/40 hover:text-accent'"
+          @click="view = view === 'apps' ? 'mail' : 'apps'"
+        >
+          <Icon :name="view === 'apps' ? 'lucide:inbox' : 'lucide:smartphone'" class="size-4" />
+          <span>{{ view === 'apps' ? t('mailApps.backToMail') : t('mailApps.useInApps') }}</span>
+        </button>
+        <button
+          type="button"
+          class="flex cursor-pointer items-center gap-1.5 rounded-lg bg-accent px-3.5 py-2 text-xs font-semibold text-on-accent transition-all hover:opacity-90 active:scale-95"
+          @click="openCompose"
+        >
+          <Icon name="lucide:pencil" class="size-4" />
+          <span>{{ t('mail.compose') }}</span>
+        </button>
+      </div>
     </header>
 
     <p v-if="loading" class="rounded-lg border border-line bg-surface px-4 py-6 text-sm text-fg-muted">
@@ -255,7 +303,7 @@ async function copyAddress() {
     <div v-else-if="!info?.enabled" class="rounded-xl border border-line bg-surface/60 p-5 text-sm text-fg-muted">
       <div class="flex items-start gap-2.5">
         <Icon name="lucide:mail-x" class="size-5 shrink-0 text-fg-subtle" />
-        <p>{{ t('mail.disabled') }}</p>
+        <p>{{ t('mail.disabled', { domain: mailDomain }) }}</p>
       </div>
     </div>
 
@@ -277,8 +325,12 @@ async function copyAddress() {
         </button>
       </div>
 
+      <!-- Mail uygulamalarinda kullan (IMAP/SMTP, uygulama parolalari, rehberler) -->
+      <MailClientSetup v-if="view === 'apps'" :info="info" />
+
+      <template v-else>
       <!-- Kutu sekmeleri -->
-      <div class="flex gap-2 border-b border-line pb-3">
+      <div class="flex flex-wrap gap-2 border-b border-line pb-3">
         <button
           type="button"
           class="flex cursor-pointer items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors"
@@ -297,6 +349,29 @@ async function copyAddress() {
         >
           <Icon name="lucide:send" class="size-3.5" />
           <span>{{ t('mail.sent') }}</span>
+        </button>
+        <button
+          type="button"
+          class="flex cursor-pointer items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors"
+          :class="box === 'trash' ? 'bg-surface-2 text-fg border border-line' : 'text-fg-muted hover:text-fg'"
+          @click="switchBox('trash')"
+        >
+          <Icon name="lucide:trash-2" class="size-3.5" />
+          <span>{{ t('mail.trash') }}</span>
+        </button>
+        <!-- Kullanıcı klasörleri (IMAP ile oluşturulanlar) -->
+        <button
+          v-for="f in folders"
+          :key="f"
+          type="button"
+          class="flex cursor-pointer items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors"
+          :class="box === f ? 'bg-surface-2 text-fg border border-line' : 'text-fg-muted hover:text-fg'"
+          :style="{ marginLeft: folderDepth(f) * 10 + 'px' }"
+          :title="f"
+          @click="switchBox(f)"
+        >
+          <Icon name="lucide:folder" class="size-3.5" />
+          <span class="max-w-[160px] truncate">{{ folderLeaf(f) }}</span>
         </button>
       </div>
 
@@ -351,7 +426,7 @@ async function copyAddress() {
 
       <div class="grid gap-4 lg:grid-cols-[minmax(0,360px)_1fr]">
         <!-- Liste -->
-        <PanelFrame :label="box === 'inbox' ? t('mail.inbox') : t('mail.sent')" :meta="String(visibleMessages.length)">
+        <PanelFrame :label="boxLabel" :meta="String(visibleMessages.length)">
           <p v-if="loadingMsg" class="px-4 py-6 text-sm text-fg-muted">{{ t('common.loading') }}</p>
           <p v-else-if="!visibleMessages.length" class="px-4 py-8 text-center text-sm text-fg-muted">{{ t('mail.empty') }}</p>
           <div v-else class="max-h-[70vh] divide-y divide-line overflow-auto">
@@ -362,16 +437,16 @@ async function copyAddress() {
               class="flex w-full cursor-pointer flex-col gap-0.5 px-4 py-3 text-left transition-colors"
               :class="[
                 selected?.id === m.id ? 'bg-accent/10' : 'hover:bg-surface-2/40',
-                m.direction === 'inbound' && !m.seen ? 'font-semibold' : '',
+                !m.seen ? 'font-semibold' : '',
               ]"
               @click="openMessage(m)"
             >
               <div class="flex items-center justify-between gap-2">
-                <span class="truncate text-sm text-fg">{{ box === 'inbox' ? (m.from || '—') : (m.to || '—') }}</span>
+                <span class="truncate text-sm text-fg">{{ box === 'sent' ? (m.to || '—') : (m.from || '—') }}</span>
                 <span class="shrink-0 font-mono text-[10px] text-fg-subtle">{{ relativeTime(m.received_at) }}</span>
               </div>
               <div class="flex items-center gap-1.5">
-                <span v-if="m.direction === 'inbound' && !m.seen" class="size-1.5 shrink-0 rounded-full bg-accent" />
+                <span v-if="!m.seen" class="size-1.5 shrink-0 rounded-full bg-accent" />
                 <span class="truncate text-xs text-fg-muted">{{ m.subject || t('mail.noSubject') }}</span>
                 <span
                   v-if="box === 'inbox' && m.to && info && m.to.toLowerCase() !== (info.address || '').toLowerCase()"
@@ -395,7 +470,7 @@ async function copyAddress() {
                 <h2 class="text-base font-semibold text-fg">{{ selected.subject || t('mail.noSubject') }}</h2>
                 <div class="flex shrink-0 items-center gap-1.5">
                   <button
-                    v-if="selected.direction === 'inbound'"
+                    v-if="box !== 'sent'"
                     type="button"
                     class="flex cursor-pointer items-center gap-1 rounded-lg border border-line px-2.5 py-1 text-xs text-fg-muted transition-colors hover:border-accent/40 hover:text-accent"
                     @click="replyTo(selected)"
@@ -403,6 +478,41 @@ async function copyAddress() {
                     <Icon name="lucide:reply" class="size-3.5" />
                     {{ t('mail.reply') }}
                   </button>
+                  <div v-if="folders.length || box !== 'inbox'" class="relative">
+                    <button
+                      type="button"
+                      class="flex cursor-pointer items-center gap-1 rounded-lg border border-line px-2.5 py-1 text-xs text-fg-muted transition-colors hover:border-accent/40 hover:text-accent"
+                      @click="moveOpen = !moveOpen"
+                    >
+                      <Icon name="lucide:folder-input" class="size-3.5" />
+                      {{ t('mail.moveToFolder') }}
+                    </button>
+                    <template v-if="moveOpen">
+                      <div class="fixed inset-0 z-10" @click="moveOpen = false" />
+                      <div class="absolute right-0 z-20 mt-1 max-h-64 min-w-44 overflow-auto rounded-lg border border-line bg-surface p-1 shadow-lg">
+                        <button
+                          v-if="box !== 'inbox'"
+                          type="button"
+                          class="flex w-full cursor-pointer items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-xs text-fg hover:bg-surface-2"
+                          @click="moveTo(selected, 'inbox')"
+                        >
+                          <Icon name="lucide:inbox" class="size-3.5 shrink-0 text-fg-muted" />
+                          <span>{{ t('mail.inbox') }}</span>
+                        </button>
+                        <button
+                          v-for="f in folders.filter(x => x !== box)"
+                          :key="f"
+                          type="button"
+                          class="flex w-full cursor-pointer items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-xs text-fg hover:bg-surface-2"
+                          :style="{ paddingLeft: 10 + folderDepth(f) * 10 + 'px' }"
+                          @click="moveTo(selected, f)"
+                        >
+                          <Icon name="lucide:folder" class="size-3.5 shrink-0 text-fg-muted" />
+                          <span class="truncate">{{ folderLeaf(f) }}</span>
+                        </button>
+                      </div>
+                    </template>
+                  </div>
                   <button
                     type="button"
                     class="cursor-pointer rounded-lg border border-line p-1.5 text-fg-muted transition-colors hover:border-danger/40 hover:text-danger"
@@ -445,6 +555,7 @@ async function copyAddress() {
           </div>
         </PanelFrame>
       </div>
+      </template>
     </template>
 
     <!-- Yeni mesaj / yanit modali -->

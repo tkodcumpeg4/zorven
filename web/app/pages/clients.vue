@@ -353,6 +353,14 @@ const currentCmd = computed(() => {
                   <!-- Offline iken gosterilen surum CANLI degil, son bilinendir. -->
                   <span v-if="!c.version && c.agent_version" class="text-[10px] text-fg-subtle">({{ t('clients.lastKnown') }})</span>
                 </div>
+                <span
+                  v-if="c.update_available"
+                  class="mt-0.5 inline-flex items-center gap-1 rounded bg-warning/15 px-1.5 py-0.5 text-[10px] font-medium text-warning"
+                  :title="t('clients.updateAvailableTitle', { version: c.latest_version ?? '' })"
+                >
+                  <svg class="size-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg>
+                  {{ t('clients.updateAvailable') }}
+                </span>
                 <div class="font-mono text-xs text-fg-subtle">{{ c.remote_addr ?? '—' }}</div>
               </td>
               <td class="px-4 py-3 text-xs text-fg-muted">{{ relativeTime(c.last_seen_at) }}</td>

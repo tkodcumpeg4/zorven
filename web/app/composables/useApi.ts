@@ -1,12 +1,13 @@
 import type {
+  AccessEvent, AccessEventSummary, AccessEventsPage,
   Client, Tunnel, Hostname, RequestLog, LogFilter, CreateClientResponse,
   CreateCustomHostnameResponse, VerifyHostnameResponse, DNSCheckResult,
   Subscription, Plan, SubscriptionResponse, PlansResponse,
   AdminGlobalStats, TenantWithCounts, ClientWithTenant, HostnameWithTenant,
   TeamMember, TeamOverview, CreateMemberTokenResponse,
   APIToken, CreateAPITokenResponse, RotateAPITokenResponse, IPAllowlistRule,
-  MailInfo, MailMessage,
-  TunnelAccess, TunnelAccessInput,
+  MailInfo, MailMessage, MailAppPassword, MailAppPasswordCreated,
+  TunnelAccess, TunnelAccessInput, TunnelDoor, DoorGrant,
   RequestDetail, ReplayResult, ReplayOverrides, Device,
   AbuseReport,
   TunnelReplica, TunnelLBConfig, TunnelLBResp, TunnelUDPConfig, TunnelUDPResp, GameStatus,
@@ -103,7 +104,7 @@ export function useApi() {
   const { adminTenant } = useAdminTenant()
 
   /** Kimlik dogrulamali istek. Tum gercek cagrilar bundan gecer. */
-  function req<T>(path: string, opts: Record<string, unknown> = {}): Promise<T> {
+  function buildHeaders(opts: Record<string, unknown>): Record<string, string> {
     const headers: Record<string, string> = {
       ...(opts.headers as Record<string, string> | undefined),
     }
@@ -116,10 +117,23 @@ export function useApi() {
     if (activeProject.value) {
       headers['X-Zorven-Project'] = activeProject.value
     }
+    return headers
+  }
+
+  function req<T>(path: string, opts: Record<string, unknown> = {}): Promise<T> {
     return $fetch(`${BASE}${path}`, {
       ...opts,
-      headers,
+      headers: buildHeaders(opts),
     }) as Promise<T>
+  }
+
+  /** req ile ayni, ama yanit basliklarina (sayfalama) da erisim verir. */
+  async function reqWithHeaders<T>(path: string, opts: Record<string, unknown> = {}): Promise<{ data: T, headers: Headers }> {
+    const res = await $fetch.raw(`${BASE}${path}`, {
+      ...opts,
+      headers: buildHeaders(opts),
+    })
+    return { data: res._data as T, headers: res.headers }
   }
 
   // --- Projeler (FAZ 0 / F00) ---
@@ -244,6 +258,31 @@ export function useApi() {
     return req<TunnelAccess>(`/tunnels/${id}/access`, { method: 'PUT', body: payload })
   }
 
+  // --- Web ile kapı açma (ham TCP/UDP) ---
+
+  async function getTunnelDoor(id: string): Promise<TunnelDoor> {
+    if (USE_MOCK) {
+      await delay()
+      return { tunnel_id: id, enabled: false, duration_sec: 43200, durations: [3600, 43200, 86400, 604800], available: true, host: '', url: '', connect_address: '', proto: 'tcp', exposure: 'port', access_mode: 'none', access_ready: false }
+    }
+    return req<TunnelDoor>(`/tunnels/${id}/door`)
+  }
+
+  async function setTunnelDoor(id: string, payload: { enabled: boolean, duration_sec: number }): Promise<TunnelDoor> {
+    if (USE_MOCK) { await delay(); return { ...(await getTunnelDoor(id)), ...payload } }
+    return req<TunnelDoor>(`/tunnels/${id}/door`, { method: 'PUT', body: payload })
+  }
+
+  async function listDoorGrants(id: string): Promise<DoorGrant[]> {
+    if (USE_MOCK) { await delay(); return [] }
+    return (await req<DoorGrant[]>(`/tunnels/${id}/door/grants`)) ?? []
+  }
+
+  async function revokeDoorGrant(id: string, grantId: string): Promise<void> {
+    if (USE_MOCK) { await delay(); return }
+    await req(`/tunnels/${id}/door/grants/${grantId}`, { method: 'DELETE' })
+  }
+
   // --- Tünel replikaları (FAZ 5 / HA) ---
 
   async function getTunnelReplicas(id: string): Promise<TunnelReplica[]> {
@@ -320,6 +359,28 @@ export function useApi() {
     return req<TunnelMetricsResp>(`/tunnels/${id}/metrics?window=${encodeURIComponent(window)}`)
   }
 
+  // --- Erisim istatistikleri (Basic/OAuth giris olaylari) ---
+
+  async function getAccessEventsSummary(id: string, window: string): Promise<AccessEventSummary> {
+    if (USE_MOCK) {
+      await delay()
+      return { window, since: new Date().toISOString(), total: 0, success: 0, failure: 0, by_method: {}, by_provider: {}, by_reason: {}, unique_identities: 0, unique_ips: 0, door_grants: 0, door_blocked: 0, door_blocked_ips: 0 }
+    }
+    return req<AccessEventSummary>(`/tunnels/${id}/access-events/summary?window=${encodeURIComponent(window)}`)
+  }
+
+  async function listAccessEvents(id: string, limit = 25, cursor = ''): Promise<AccessEventsPage> {
+    if (USE_MOCK) { await delay(); return { items: [], nextCursor: '', hasMore: false } }
+    const q = new URLSearchParams({ limit: String(limit) })
+    if (cursor) q.set('cursor', cursor)
+    const { data, headers } = await reqWithHeaders<AccessEvent[]>(`/tunnels/${id}/access-events?${q.toString()}`)
+    return {
+      items: data ?? [],
+      nextCursor: headers.get('X-Next-Cursor') ?? '',
+      hasMore: headers.get('X-Has-More') === 'true',
+    }
+  }
+
   // --- Metrik uyarıları (FAZ 6.4) ---
 
   async function getTunnelAlert(id: string): Promise<TunnelAlert> {
@@ -375,19 +436,22 @@ export function useApi() {
     return res ?? []
   }
 
-  /** `name` tek bir DNS etiketidir; sunucu platform domainiyle birleştirir. tunnelID opsiyoneldir. */
-  async function createHostname(name: string, tunnelID?: string): Promise<Hostname> {
+  /**
+   * `name` tek bir DNS etiketidir; sunucu platform domainiyle birleştirir. tunnelID opsiyoneldir.
+   * kind: 'scoped' (varsayılan) -> ad--kiracı.platform; 'short' -> ad.platform.
+   */
+  async function createHostname(name: string, tunnelID?: string, kind: 'scoped' | 'short' = 'scoped'): Promise<Hostname> {
     if (USE_MOCK) {
       await delay(400)
       const id = `hst_${Math.random().toString(36).slice(2, 8)}`
-      const h = mockHost(id, tunnelID ?? '', `${name}.example.com`)
+      const h = mockHost(id, tunnelID ?? '', kind === 'short' ? `${name}.example.com` : `${name}--demo.example.com`)
       if (tunnelID) {
         const t = mockTunnels.find(x => x.id === tunnelID)
         if (t) t.hostnames = [...(t.hostnames ?? []), h]
       }
       return h
     }
-    return req<Hostname>(`/hostnames`, { method: 'POST', body: { name, tunnel_id: tunnelID || undefined } })
+    return req<Hostname>(`/hostnames`, { method: 'POST', body: { name, kind, tunnel_id: tunnelID || undefined } })
   }
 
   async function createCustomHostname(fqdn: string, tunnelID?: string): Promise<CreateCustomHostnameResponse> {
@@ -962,8 +1026,15 @@ export function useApi() {
   async function mailInfo(): Promise<MailInfo> {
     return req<MailInfo>('/mail/info')
   }
-  async function listMail(box: 'inbox' | 'sent' = 'inbox'): Promise<MailMessage[]> {
-    return req<MailMessage[]>(`/mail/messages?box=${box}`)
+  // box: inbox | sent | trash | drafts veya kullanıcı klasörü adı (IMAP ile oluşturulan).
+  async function listMail(box: string = 'inbox'): Promise<MailMessage[]> {
+    return req<MailMessage[]>(`/mail/messages?box=${encodeURIComponent(box)}`)
+  }
+  async function listMailFolders(): Promise<{ folders: string[] }> {
+    return req<{ folders: string[] }>('/mail/folders')
+  }
+  async function moveMail(id: string, folder: string): Promise<{ success: boolean }> {
+    return req<{ success: boolean }>(`/mail/messages/${id}/move`, { method: 'POST', body: { folder } })
   }
   async function getMail(id: string): Promise<MailMessage> {
     return req<MailMessage>(`/mail/messages/${id}`)
@@ -980,6 +1051,21 @@ export function useApi() {
   }
   async function deleteMail(id: string): Promise<{ success: boolean }> {
     return req<{ success: boolean }>(`/mail/messages/${id}`, { method: 'DELETE' })
+  }
+  // Mail istemcileri (IMAP/SMTP) için uygulama parolaları.
+  async function listMailAppPasswords(mailbox?: string): Promise<MailAppPassword[]> {
+    const q = mailbox ? `?mailbox=${encodeURIComponent(mailbox)}` : ''
+    return req<MailAppPassword[]>(`/mail/app-passwords${q}`)
+  }
+  async function createMailAppPassword(label: string, mailbox?: string): Promise<MailAppPasswordCreated> {
+    return req<MailAppPasswordCreated>('/mail/app-passwords', { method: 'POST', body: { label, mailbox } })
+  }
+  async function revokeMailAppPassword(id: string): Promise<{ success: boolean }> {
+    return req<{ success: boolean }>(`/mail/app-passwords/${id}`, { method: 'DELETE' })
+  }
+  // Apple Mail .mobileconfig profili (tarayıcı doğrudan indirir; parola içermez).
+  function mailMobileConfigUrl(mailbox?: string): string {
+    return `${BASE}/mail/mobileconfig${mailbox ? `?mailbox=${encodeURIComponent(mailbox)}` : ''}`
   }
 
   // --- Ekip davetleri (e-postadaki linkten kabul) ---
@@ -1051,10 +1137,11 @@ export function useApi() {
     listProjects, createProject, deleteProject, renameProject, deleteOrganization,
     listClients, createClient, deleteClient,
     listTunnels, createTunnel, updateTunnel, deleteTunnel, getTunnelAccess, setTunnelAccess,
+    getTunnelDoor, setTunnelDoor, listDoorGrants, revokeDoorGrant,
     getTunnelReplicas, addTunnelReplica, removeTunnelReplica, getTunnelLB, setTunnelLB,
     getTunnelUDP, setTunnelUDP, getGameStatus,
     getTunnelTraffic, setTunnelTraffic,
-    getTunnelMetrics,
+    getTunnelMetrics, getAccessEventsSummary, listAccessEvents,
     getTunnelAlert, setTunnelAlert,
     listPathRoutes, addPathRoute, deletePathRoute,
     getTunnelMTLS, setTunnelMTLS,
@@ -1070,7 +1157,8 @@ export function useApi() {
     resendInvitation, listMyInvitations, getInvitation, acceptInvitation, declineInvitation,
     listAPITokens, createAPIToken, rotateAPIToken, revokeAPIToken,
     listIPRules, createIPRule, updateIPRule, deleteIPRule,
-    mailInfo, listMail, getMail, sendMail, deleteMail, mailAttachmentUrl,
+    mailInfo, listMail, listMailFolders, moveMail, getMail, sendMail, deleteMail, mailAttachmentUrl,
+    listMailAppPasswords, createMailAppPassword, revokeMailAppPassword, mailMobileConfigUrl,
     listSecrets, createSecret, deleteSecret,
     listPolicies, getPolicy, createPolicy, updatePolicy, deletePolicy, bindPolicy, unbindPolicy,
   }

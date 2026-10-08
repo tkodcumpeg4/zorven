@@ -106,6 +106,9 @@ export interface Client {
   created_at: string         // RFC 3339 UTC
   last_seen_at?: string
   is_service?: boolean
+  app_kind?: string          // "desktop" | boş (CLI/servis)
+  update_available?: boolean // bağlı istemcinin sürümü yayındakinden eski
+  latest_version?: string
   metrics?: Metrics
   // Cihaz alanları (F14) — bağlantı kopsa da kalıcıdır.
   hostname?: string
@@ -374,6 +377,32 @@ export interface TunnelAccess {
   }
 }
 
+// Web ile kapı açma (ham TCP/UDP tünelleri)
+export interface TunnelDoor {
+  tunnel_id: string
+  enabled: boolean
+  duration_sec: number
+  durations: number[]
+  available: boolean
+  host: string
+  url: string
+  connect_address: string
+  proto: string
+  exposure: string
+  access_mode: TunnelAccessMode
+  access_ready: boolean
+}
+
+export interface DoorGrant {
+  id: string
+  tunnel_id: string
+  ip: string
+  identity?: string
+  method: 'basic' | 'oauth'
+  expires_at: string
+  created_at: string
+}
+
 export interface TunnelAccessInput {
   mode: TunnelAccessMode
   enabled: boolean
@@ -573,6 +602,8 @@ export interface RequestLog {
   duration_ms: number
   bytes_in: number
   bytes_out: number
+  /** Ingress istegi proxy'lemeden reddettiyse nedeni (ip_forbidden, policy_deny ...). Bos = proxy'lendi. */
+  reject_reason?: string
 }
 
 /** Loglar sayfası gelişmiş filtre ölçütleri (sunucuya query param olarak gider). */
@@ -584,6 +615,8 @@ export interface LogFilter {
   q?: string                 // path içinde arama
   min_dur?: number
   max_dur?: number
+  rejected?: string          // "true" => yalnizca ingress'in reddettigi istekler
+  reason?: string            // belirli reject_reason
   since?: string             // RFC3339
   until?: string             // RFC3339
   limit?: number
@@ -622,6 +655,37 @@ export interface MailInfo {
   can_send_external?: boolean
   /** Site sistem posta kutuları (info@, sales@ …) — yalnızca owner/platform admin. */
   system_addresses?: string[]
+  /** Mail istemcisi (IMAP/SMTP) erişimi: sunucu ayarları; kapalıysa enabled=false. */
+  client_access?: MailClientAccess
+}
+
+export interface MailClientAccess {
+  enabled: boolean
+  host?: string
+  imap_port?: number
+  /** 587 STARTTLS (0 = kapalı). */
+  submission_port?: number
+  /** 465 SSL/TLS (0 = kapalı). */
+  submissions_port?: number
+}
+
+export interface MailAppPassword {
+  id: string
+  mailbox: string
+  label: string
+  created_at: string
+  last_used_at: string | null
+  last_used_ip: string
+  revoked_at: string | null
+}
+
+/** Oluşturma yanıtı: parola YALNIZCA burada bir kez döner. */
+export interface MailAppPasswordCreated {
+  id: string
+  mailbox: string
+  label: string
+  password: string
+  created_at: string
 }
 
 export interface MailAttachment {
@@ -721,4 +785,38 @@ export interface IPAllowlistRule {
   enabled: boolean
   created_at: string
   updated_at: string
+}
+
+export interface AccessEvent {
+  id: string
+  tunnel_id: string
+  hostname: string
+  method: 'basic' | 'oauth' | string
+  provider: string
+  identity: string
+  success: boolean
+  reason: string
+  client_ip: string
+  user_agent: string
+  created_at: string
+}
+export interface AccessEventSummary {
+  window: string
+  since: string
+  total: number
+  success: number
+  failure: number
+  by_method: Record<string, number>
+  by_provider: Record<string, number>
+  by_reason: Record<string, number>
+  unique_identities: number
+  unique_ips: number
+  door_grants: number
+  door_blocked: number
+  door_blocked_ips: number
+}
+export interface AccessEventsPage {
+  items: AccessEvent[]
+  nextCursor: string
+  hasMore: boolean
 }

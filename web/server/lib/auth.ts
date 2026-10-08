@@ -2,7 +2,9 @@ import { betterAuth } from "better-auth"
 import { organization, bearer, twoFactor } from "better-auth/plugins"
 import pg from "pg"
 import { randomBytes } from "crypto"
+import { APIError } from "better-auth/api"
 import { sendMail } from "./mailer"
+import { stripBrandKeywords, slugRejectReason } from "./brand"
 import {
   verificationEmail,
   resetPasswordEmail,
@@ -75,17 +77,47 @@ async function organizationLimitReached(userId: string): Promise<boolean> {
   }
 }
 
+// Kullanicinin sectigi organizasyon slug'i marka deseni veya rezerve ad ise
+// olusturma/guncelleme reddedilir (kiraci adresleri ad--slug.<domain> oldugu
+// icin "zorven-login" gibi slug'lar kimlik avi icin kullanilabilirdi).
+async function assertSlugAllowed(slug: string | undefined): Promise<void> {
+  if (!slug) return
+  const reason = await slugRejectReason(slug, async (name) => {
+    try {
+      const { rows } = await hookPool.query(
+        `SELECT 1 FROM reserved_names WHERE name = lower($1) LIMIT 1`,
+        [name],
+      )
+      return rows.length > 0
+    } catch (err) {
+      console.error("[slug] rezerve ad kontrolu basarisiz, izin veriliyor:", err)
+      return false
+    }
+  })
+  if (reason) {
+    throw new APIError("BAD_REQUEST", {
+      message:
+        reason === "brand"
+          ? "Bu kisa ad marka korumasi nedeniyle kullanilamaz (zorven / rpshell iceremez)."
+          : "Bu kisa ad platform icin ayrilmis; baska bir ad secin.",
+    })
+  }
+}
+
 function genId(prefix: string): string {
   return `${prefix}_${randomBytes(8).toString("hex")}`
 }
 
 // Kullaniciya benzersiz, okunabilir bir organizasyon slug'i uret.
 async function uniqueOrgSlug(email: string): Promise<string> {
-  const base =
+  // Marka sozcugu iceren e-posta onegi ("zorven@...") kayit akisini bozmadan
+  // donusturulur: sozcuk cikarilir, rastgele ek zaten eklenecek (bkz. brand.ts).
+  const base = stripBrandKeywords(
     (email.split("@")[0] || "team")
       .toLowerCase()
       .replace(/[^a-z0-9-]+/g, "-")
-      .replace(/^-+|-+$/g, "") || "team"
+      .replace(/^-+|-+$/g, "") || "team",
+  )
   for (let i = 0; i < 6; i++) {
     const suffix = randomBytes(3).toString("hex")
     const slug = `${base}-${suffix}`
@@ -302,6 +334,17 @@ export const auth = betterAuth({
       // tuneller yayinda kalmaya devam ederdi. Silme Go sunucusunda
       // (DELETE /api/v1/organization) tum veriyle tek islemde yapilir.
       disableOrganizationDeletion: true,
+      // Slug marka/rezerve korumasi (bkz. assertSlugAllowed). Kayit akisinin
+      // otomatik kisisel organizasyonu bu kancadan GECMEZ (dogrudan SQL) ve
+      // slug'i uniqueOrgSlug'ta zaten donusturulmustur.
+      organizationHooks: {
+        beforeCreateOrganization: async ({ organization: org }) => {
+          await assertSlugAllowed(org.slug)
+        },
+        beforeUpdateOrganization: async ({ organization: org }) => {
+          await assertSlugAllowed(org.slug)
+        },
+      },
     }),
     // Iki adimli dogrulama (2FA): kullanici ISTEGE BAGLI olarak ayarlardan acar.
     // Iki yontem: (1) Authenticator app (TOTP), (2) E-posta kodu (OTP) — kendi

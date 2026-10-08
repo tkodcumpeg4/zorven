@@ -147,6 +147,7 @@ const fStatus = ref('')          // '' | 2xx | 3xx | 4xx | 5xx | kesin kod
 const fHost = ref('')
 const fQ = ref('')
 const fMinDur = ref<number | ''>('')
+const fRejected = ref(false)
 
 const methods = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD']
 const statusOpts = [
@@ -171,6 +172,7 @@ function buildFilter(): LogFilter {
   if (fHost.value) f.hostname = fHost.value
   if (fQ.value.trim()) f.q = fQ.value.trim()
   if (fMinDur.value !== '' && Number(fMinDur.value) > 0) f.min_dur = Number(fMinDur.value)
+  if (fRejected.value) f.rejected = 'true'
   return f
 }
 
@@ -188,7 +190,7 @@ async function applyFilters() {
 }
 
 function clearFilters() {
-  fMethod.value = ''; fStatus.value = ''; fHost.value = ''; fQ.value = ''; fMinDur.value = ''
+  fMethod.value = ''; fStatus.value = ''; fHost.value = ''; fQ.value = ''; fMinDur.value = ''; fRejected.value = false
   applyFilters()
 }
 
@@ -204,6 +206,7 @@ function matches(r: RequestLog): boolean {
   if (fHost.value && (r.hostname || hostOf(r.tunnel_id)) !== fHost.value) return false
   if (fQ.value.trim() && !r.path.includes(fQ.value.trim())) return false
   if (fMinDur.value !== '' && r.duration_ms < Number(fMinDur.value)) return false
+  if (fRejected.value && !r.reject_reason) return false
   return true
 }
 
@@ -229,11 +232,11 @@ function exportData(fmt: 'csv' | 'json') {
   if (fmt === 'json') {
     content = JSON.stringify(rows.value, null, 2); mime = 'application/json'; ext = 'json'
   } else {
-    const head = 'ts,method,hostname,path,status,duration_ms,client_ip,bytes_in,bytes_out'
+    const head = 'ts,method,hostname,path,status,duration_ms,client_ip,bytes_in,bytes_out,reject_reason'
     const esc = (s: string) => `"${String(s).replace(/"/g, '""')}"`
     const lines = rows.value.map(r => [
       r.ts, r.method, r.hostname || hostOf(r.tunnel_id), esc(r.path),
-      r.status, r.duration_ms, r.client_ip || '', r.bytes_in, r.bytes_out,
+      r.status, r.duration_ms, r.client_ip || '', r.bytes_in, r.bytes_out, r.reject_reason || '',
     ].join(','))
     content = [head, ...lines].join('\n'); mime = 'text/csv'; ext = 'csv'
   }
@@ -302,6 +305,10 @@ function exportData(fmt: 'csv' | 'json') {
         <span class="label-sys">{{ t('requests.minDur') }}</span>
         <input v-model="fMinDur" type="number" min="0" placeholder="0" class="w-24 rounded border border-line bg-surface-2 px-2 py-1.5 font-mono text-xs" @keyup.enter="applyFilters">
       </label>
+      <label class="flex cursor-pointer items-center gap-1.5 pb-1.5 text-xs text-fg-muted">
+        <input v-model="fRejected" type="checkbox" @change="applyFilters">
+        {{ t('requests.rejectedOnly') }}
+      </label>
       <div class="flex gap-2">
         <button class="cursor-pointer rounded bg-accent px-3 py-1.5 text-xs font-semibold text-on-accent transition hover:opacity-90" @click="applyFilters">{{ t('requests.apply') }}</button>
         <button class="cursor-pointer rounded border border-line px-3 py-1.5 text-xs text-fg-muted transition hover:bg-surface-2" @click="clearFilters">{{ t('requests.clear') }}</button>
@@ -334,7 +341,9 @@ function exportData(fmt: 'csv' | 'json') {
                 <td class="px-3 py-2 font-mono text-[11px] text-fg-subtle">{{ clock(r.ts) }}</td>
                 <td class="px-3 py-2"><MethodBadge :method="r.method" /></td>
                 <td class="max-w-[280px] truncate px-3 py-2 font-mono text-xs" :title="r.path">{{ r.path }}</td>
-                <td class="px-3 py-2"><StatusCode :code="r.status" /></td>
+                <td class="px-3 py-2">
+                  <span class="inline-flex items-center gap-1.5"><StatusCode :code="r.status" /><RejectBadge :reason="r.reject_reason" /></span>
+                </td>
                 <td class="px-3 py-2 font-mono text-[11px] tabular-nums text-fg-muted">{{ duration(r.duration_ms) }}</td>
               </tr>
             </tbody>
@@ -349,6 +358,7 @@ function exportData(fmt: 'csv' | 'json') {
           <div><dt class="label-sys mb-1">{{ t('requests.time') }}</dt><dd class="font-mono text-xs">{{ new Date(selected.ts).toLocaleString('tr-TR') }}</dd></div>
           <div><dt class="label-sys mb-1">{{ t('requests.methodStatus') }}</dt><dd class="flex items-center gap-2"><MethodBadge :method="selected.method" /><StatusCode :code="selected.status" /></dd></div>
           <div><dt class="label-sys mb-1">{{ t('requests.hostname') }}</dt><dd class="break-all font-mono text-xs text-fg-muted">{{ selected.hostname || hostOf(selected.tunnel_id) }}</dd></div>
+          <div v-if="selected.reject_reason"><dt class="label-sys mb-1">{{ t('requests.rejectReason') }}</dt><dd class="flex items-center gap-2 text-xs"><RejectBadge :reason="selected.reject_reason" /><span class="text-fg-muted">{{ t(`requests.reject.${selected.reject_reason}`) }}</span></dd></div>
           <div><dt class="label-sys mb-1">{{ t('requests.colPath') }}</dt><dd class="break-all font-mono text-xs">{{ selected.path }}</dd></div>
           <div><dt class="label-sys mb-1">{{ t('requests.colDuration') }}</dt><dd class="font-mono text-xs tabular-nums">{{ duration(selected.duration_ms) }}</dd></div>
           <div><dt class="label-sys mb-1">{{ t('requests.clientIp') }}</dt><dd class="font-mono text-xs text-fg-muted">{{ selected.client_ip || '—' }}</dd></div>

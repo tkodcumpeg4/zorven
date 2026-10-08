@@ -69,7 +69,9 @@ const errorRate = computed(() => {
 })
 const p95 = computed(() => {
   if (!requests.value.length) return '—'
-  const sorted = [...requests.value].map(r => r.duration_ms).sort((a, b) => a - b)
+  // Reddedilen istekler (reject_reason) upstream gecikmesi tasimaz: P95'e katilmaz.
+  const sorted = requests.value.filter(r => !r.reject_reason).map(r => r.duration_ms).sort((a, b) => a - b)
+  if (!sorted.length) return '—'
   return duration(sorted[Math.floor(sorted.length * 0.95)] ?? 0)
 })
 
@@ -191,6 +193,7 @@ const avgCpu = computed(() => {
               class="flex items-center gap-3 px-4 py-2 text-sm">
             <MethodBadge :method="r.method" class="w-14 shrink-0" />
             <span class="min-w-0 flex-1 truncate font-mono text-xs text-fg-muted">{{ r.path }}</span>
+            <RejectBadge :reason="r.reject_reason" />
             <StatusCode :code="r.status" />
             <span class="w-14 shrink-0 text-right font-mono text-[11px] tabular-nums text-fg-subtle">
               {{ duration(r.duration_ms) }}
@@ -297,6 +300,14 @@ const avgCpu = computed(() => {
 
               <td class="px-4 py-3">
                 <div class="font-mono text-xs text-fg-muted">{{ c.version ?? '—' }}</div>
+                <span
+                  v-if="c.update_available"
+                  class="mt-0.5 inline-flex items-center gap-1 rounded bg-warning/15 px-1.5 py-0.5 text-[10px] font-medium text-warning"
+                  :title="t('overview.updateAvailableTitle', { version: c.latest_version ?? '' })"
+                >
+                  <svg class="size-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg>
+                  {{ t('overview.updateAvailable') }}
+                </span>
                 <div class="font-mono text-xs text-fg-subtle">{{ c.remote_addr ?? '—' }}</div>
               </td>
               <td class="px-4 py-3 text-xs text-fg-muted">{{ relativeTime(c.last_seen_at) }}</td>

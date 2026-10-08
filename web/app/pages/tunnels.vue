@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import type { Tunnel, Client, Hostname, TunnelAccessMode, TunnelAccessInput, IPAllowlistRule, TunnelProto, TunnelExposure, TunnelReplica, TunnelMetricsResp, TunnelLBConfig, LBBackendStatus, LBStrategy, TunnelUDPConfig, UDPLiveStats, UDPStatMinute, GameStatus } from '~/types/api'
+import type { Tunnel, Client, Hostname, TunnelAccessMode, TunnelAccessInput, IPAllowlistRule, TunnelProto, TunnelExposure, TunnelReplica, TunnelMetricsResp, TunnelLBConfig, LBBackendStatus, LBStrategy, TunnelUDPConfig, UDPLiveStats, UDPStatMinute, GameStatus, TunnelDoor, DoorGrant, AccessEvent, AccessEventSummary } from '~/types/api'
 // TrafficPolicy/TrafficConfig useApi üzerinden kullanılıyor; burada form state yerel tiptir.
 
 const api = useApi()
-const { t } = useI18n()
+const { t, te } = useI18n()
 const toast = useToast()
 const { relativeTime } = useFormat()
 const { openUpgrade, loadBillingData } = useBilling()
@@ -74,7 +74,7 @@ onMounted(async () => {
 })
 
 // --- Detaylı ayarlar modalı (Genel + Protokol + Erişim + IP) ---
-type SettingsTab = 'general' | 'protocol' | 'access' | 'ip' | 'ha' | 'traffic' | 'metrics' | 'raw'
+type SettingsTab = 'general' | 'protocol' | 'access' | 'ip' | 'ha' | 'traffic' | 'metrics' | 'stats' | 'raw'
 const accessTunnel = ref<Tunnel | null>(null) // açık modalın tüneli
 const settingsTab = ref<SettingsTab>('general')
 const accessLoading = ref(false)
@@ -88,6 +88,15 @@ const accessForm = reactive({
   providers: [] as string[],
   allowedEmails: '', // satır/virgülle ayrılmış e-posta listesi
 })
+// Web ile kapı açma (ham TCP/UDP) — Erişim sekmesinde
+const isRawTunnel = computed(() => accessTunnel.value?.proto === 'tcp' || accessTunnel.value?.proto === 'udp')
+const doorInfo = ref<TunnelDoor | null>(null)
+const doorLoading = ref(false)
+const doorSaving = ref(false)
+const doorGrants = ref<DoorGrant[]>([])
+const doorForm = reactive({ enabled: false, duration: 43200 })
+const doorDurationKeys: Record<number, string> = { 3600: 'doorDur1h', 43200: 'doorDur12h', 86400: 'doorDur24h', 604800: 'doorDur7d' }
+const doorUrlCopied = ref(false)
 // mTLS (FAZ 6.6) — Erişim sekmesi altında
 const mtlsForm = reactive({ enabled: false, ca_pem: '' })
 const mtlsHasCa = ref(false)
@@ -118,7 +127,7 @@ const replicaSaving = ref(false)
 
 // Ham TCP/UDP tünellerinde "UDP ve Oyun" sekmesi de görünür (FAZ 4 / F24).
 const settingsTabs = computed<SettingsTab[]>(() => {
-  const base: SettingsTab[] = ['general', 'protocol', 'access', 'ip', 'ha', 'traffic', 'metrics']
+  const base: SettingsTab[] = ['general', 'protocol', 'access', 'stats', 'ip', 'ha', 'traffic', 'metrics']
   const p = accessTunnel.value?.proto
   return p === 'tcp' || p === 'udp' ? [...base, 'raw'] : base
 })
@@ -266,6 +275,7 @@ async function openSettings(tn: Tunnel, tab: SettingsTab = 'general') {
   replicas.value = []
   replicaAddId.value = ''
   metricsData.value = null
+  resetStats()
   void loadReplicas(tn.id)
   void loadLB(tn.id)
   udpLive.value = null
@@ -276,6 +286,11 @@ async function openSettings(tn: Tunnel, tab: SettingsTab = 'general') {
   void loadMetrics(tn.id)
   void loadAlert(tn.id)
   void loadMTLS(tn.id)
+  doorInfo.value = null
+  doorGrants.value = []
+  doorForm.enabled = false
+  doorForm.duration = 43200
+  if (tn.proto === 'tcp' || tn.proto === 'udp') void loadDoor(tn.id)
   try {
     const a = await api.getTunnelAccess(tn.id)
     accessForm.mode = a.mode
@@ -475,6 +490,110 @@ async function saveMTLS() {
   }
 }
 
+// --- Erişim istatistikleri (Basic/OAuth giriş olayları) ---
+const statsWindow = ref<'24h' | '7d' | '30d'>('24h')
+const statsLoading = ref(false)
+const statsSummary = ref<AccessEventSummary | null>(null)
+const statsEvents = ref<AccessEvent[]>([])
+const statsCursor = ref('')
+const statsHasMore = ref(false)
+const statsMoreLoading = ref(false)
+const statsError = ref(false)
+const statsLoadedFor = ref('')
+function resetStats() {
+  statsSummary.value = null
+  statsEvents.value = []
+  statsCursor.value = ''
+  statsHasMore.value = false
+  statsError.value = false
+  statsLoadedFor.value = ''
+}
+async function loadStats() {
+  const tn = accessTunnel.value
+  if (!tn) return
+  statsLoading.value = true
+  statsError.value = false
+  try {
+    const [sum, page] = await Promise.all([
+      api.getAccessEventsSummary(tn.id, statsWindow.value),
+      api.listAccessEvents(tn.id, 25),
+    ])
+    if (accessTunnel.value?.id !== tn.id) return
+    statsSummary.value = sum
+    statsEvents.value = page.items
+    statsCursor.value = page.nextCursor
+    statsHasMore.value = page.hasMore
+    statsLoadedFor.value = tn.id
+  } catch {
+    statsError.value = true
+  } finally {
+    statsLoading.value = false
+  }
+}
+async function loadMoreStats() {
+  const tn = accessTunnel.value
+  if (!tn || !statsHasMore.value || statsMoreLoading.value) return
+  statsMoreLoading.value = true
+  try {
+    const page = await api.listAccessEvents(tn.id, 25, statsCursor.value)
+    if (accessTunnel.value?.id !== tn.id) return
+    statsEvents.value = [...statsEvents.value, ...page.items]
+    statsCursor.value = page.nextCursor
+    statsHasMore.value = page.hasMore
+  } catch (err: any) {
+    toast.error(err?.data?.error?.message || err?.message || t('tunnels.statsLoadFailed'))
+  } finally {
+    statsMoreLoading.value = false
+  }
+}
+// Sekme ilk açıldığında yükle.
+watch(settingsTab, (tab) => {
+  if (tab === 'stats' && accessTunnel.value && statsLoadedFor.value !== accessTunnel.value.id && !statsLoading.value) void loadStats()
+})
+const statsTiles = computed(() => {
+  const s = statsSummary.value
+  if (!s) return []
+  const tiles: { key: string, value: number, cls?: string }[] = [
+    { key: 'total', value: s.total },
+    { key: 'success', value: s.success, cls: 'text-emerald-500' },
+    { key: 'failure', value: s.failure, cls: s.failure > 0 ? 'text-danger' : '' },
+    { key: 'identities', value: s.unique_identities },
+    { key: 'ips', value: s.unique_ips },
+  ]
+  if (isRawTunnel.value) {
+    tiles.push({ key: 'doorGrants', value: s.door_grants }, { key: 'doorBlocked', value: s.door_blocked })
+  }
+  return tiles
+})
+function statsBreakdown(m: Record<string, number> | undefined) {
+  const rows = Object.entries(m || {}).filter(([k]) => k !== '').sort((a, b) => b[1] - a[1])
+  const max = Math.max(1, ...rows.map(r => r[1]))
+  return rows.map(([k, v]) => ({ key: k, value: v, pct: Math.max(3, Math.round(v / max * 100)) }))
+}
+const statsBreakdowns = computed(() => [
+  { id: 'method', rows: statsBreakdown(statsSummary.value?.by_method) },
+  { id: 'provider', rows: statsBreakdown(statsSummary.value?.by_provider) },
+  { id: 'reason', rows: statsBreakdown(statsSummary.value?.by_reason) },
+])
+const statsEmpty = computed(() => {
+  const s = statsSummary.value
+  return !!s && s.total === 0 && s.door_grants === 0 && s.door_blocked === 0 && statsEvents.value.length === 0
+})
+function statsLabel(group: string, key: string): string {
+  const k = `tunnels.statsLbl_${group}_${key}`
+  return te(k) ? t(k) : key
+}
+function statsReason(reason: string): string {
+  const k = `tunnels.statsReason_${reason}`
+  return te(k) ? t(k) : (reason || '-')
+}
+function shortUA(ua: string): string {
+  if (!ua) return '-'
+  const m = ua.match(/(Edg|OPR|Firefox|Chrome|Safari|curl|Postman\w*|python-requests|Go-http-client)\/?([\d.]*)/i)
+  const base = m ? `${m[1]}${m[2] ? ' ' + m[2].split('.')[0] : ''}` : ua
+  return base.length > 28 ? base.slice(0, 27) + '…' : base
+}
+
 // --- Metrikler (FAZ 6.3) ---
 async function loadMetrics(tunnelId: string) {
   metricsLoading.value = true
@@ -646,6 +765,68 @@ async function removeIPRule(rule: IPAllowlistRule) {
   }
 }
 
+async function loadDoor(tunnelId: string) {
+  doorLoading.value = true
+  try {
+    const d = await api.getTunnelDoor(tunnelId)
+    if (accessTunnel.value?.id !== tunnelId) return
+    doorInfo.value = d
+    doorForm.enabled = d.enabled
+    doorForm.duration = d.duration_sec
+    doorGrants.value = d.enabled ? await api.listDoorGrants(tunnelId) : []
+  } catch (err: any) {
+    toast.error(err?.data?.error?.message || err?.message || t('tunnels.doorLoadFailed'))
+  } finally {
+    doorLoading.value = false
+  }
+}
+
+async function saveDoor() {
+  const tn = accessTunnel.value
+  if (!tn) return
+  doorSaving.value = true
+  try {
+    doorInfo.value = await api.setTunnelDoor(tn.id, { enabled: doorForm.enabled, duration_sec: doorForm.duration })
+    doorGrants.value = doorInfo.value.enabled ? await api.listDoorGrants(tn.id) : []
+    toast.success(t('tunnels.doorSaved'))
+  } catch (err: any) {
+    const msg = err?.data?.error?.message || err?.message || t('tunnels.doorSaveFailed')
+    toast.error(msg)
+  } finally {
+    doorSaving.value = false
+  }
+}
+
+async function copyDoorUrl() {
+  if (!doorInfo.value?.url) return
+  try {
+    await navigator.clipboard.writeText(doorInfo.value.url)
+    doorUrlCopied.value = true
+    toast.success(t('tunnels.doorCopied'))
+    setTimeout(() => { doorUrlCopied.value = false }, 1500)
+  } catch { /* pano erişimi yok */ }
+}
+
+async function refreshDoorGrants() {
+  const tn = accessTunnel.value
+  if (!tn) return
+  try {
+    doorGrants.value = await api.listDoorGrants(tn.id)
+  } catch { /* sessizce */ }
+}
+
+async function revokeGrant(g: DoorGrant) {
+  const tn = accessTunnel.value
+  if (!tn) return
+  try {
+    await api.revokeDoorGrant(tn.id, g.id)
+    doorGrants.value = doorGrants.value.filter(x => x.id !== g.id)
+    toast.info(t('tunnels.doorRevoked'))
+  } catch (err: any) {
+    toast.error(err?.data?.error?.message || err?.message || t('tunnels.doorRevokeFailed'))
+  }
+}
+
 async function saveAccess() {
   const tn = accessTunnel.value
   if (!tn) return
@@ -677,6 +858,7 @@ async function saveAccess() {
     accessForm.hasPassword = res.config.has_password ?? accessForm.hasPassword
     accessForm.password = ''
     toast.success(t('tunnels.accessSaved'))
+    if (isRawTunnel.value) void loadDoor(tn.id)
   } catch (err: any) {
     toast.error(err?.data?.error?.message || err?.message || t('tunnels.accessSaveFailed'))
   } finally {
@@ -1018,7 +1200,7 @@ async function remove(tn: Tunnel) {
                 <input v-model="protoForm.exposure" type="radio" value="port" class="accent-[var(--color-accent)]">
                 <span class="text-sm font-medium text-fg">{{ t('tunnels.exposurePort') }}</span>
               </span>
-              <span class="help-tip" tabindex="0" :data-tip="t('tunnels.exposurePortHint')">?</span>
+              <span class="help-tip" tabindex="0" :data-tip="t('tunnels.exposurePortHint', { domain: platformHost })">?</span>
             </label>
             <label class="flex items-center justify-between gap-2.5 rounded border p-2.5 transition-colors"
                    :class="[protoForm.exposure === 'sni' ? 'border-accent bg-accent/5' : 'border-line hover:border-fg-subtle', protoForm.proto === 'udp' ? 'cursor-not-allowed opacity-60' : 'cursor-pointer']">
@@ -1449,9 +1631,98 @@ async function remove(tn: Tunnel) {
           </div>
         </div>
 
+        <!-- ERİŞİM İSTATİSTİKLERİ -->
+        <div v-else-if="settingsTab === 'stats'" class="space-y-4">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <p class="min-w-0 flex-1 text-xs text-fg-muted">{{ t('tunnels.statsIntro') }}</p>
+            <select v-model="statsWindow" class="cursor-pointer rounded border border-line bg-bg px-2 py-1 text-xs focus:border-accent" :aria-label="t('tunnels.statsWindow')" @change="loadStats">
+              <option value="24h">{{ t('tunnels.statsWin24h') }}</option>
+              <option value="7d">{{ t('tunnels.statsWin7d') }}</option>
+              <option value="30d">{{ t('tunnels.statsWin30d') }}</option>
+            </select>
+          </div>
+
+          <p v-if="statsLoading && !statsSummary" class="py-6 text-center text-xs text-fg-muted">{{ t('common.loading') }}</p>
+          <p v-else-if="statsError" class="rounded border border-dashed border-line py-8 text-center text-xs text-danger">{{ t('tunnels.statsLoadFailed') }}</p>
+          <template v-else-if="statsSummary">
+            <div v-if="statsEmpty" class="flex flex-col items-center gap-2 rounded border border-dashed border-line px-4 py-8 text-center">
+              <svg class="size-7 text-fg-subtle" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6l7-3z" /><path d="M9.5 12l1.8 1.8L15 10" /></svg>
+              <p class="text-xs text-fg-muted">{{ accessForm.mode === 'none' ? t('tunnels.statsEmptyOff') : t('tunnels.statsEmptyNoData') }}</p>
+              <button v-if="accessForm.mode === 'none'" class="rounded border border-line px-3 py-1 text-xs text-fg transition-colors hover:border-accent hover:text-accent" @click="settingsTab = 'access'">{{ t('tunnels.statsGoAccess') }}</button>
+            </div>
+            <template v-else>
+              <div class="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                <div v-for="tile in statsTiles" :key="tile.key" class="rounded border border-line p-3">
+                  <div class="text-lg font-bold text-fg" :class="tile.cls">{{ tile.value }}</div>
+                  <div class="text-[11px] text-fg-muted">{{ t('tunnels.statsTile_' + tile.key) }}</div>
+                </div>
+              </div>
+
+              <div class="grid gap-3 sm:grid-cols-3">
+                <div v-for="g in statsBreakdowns" :key="g.id" class="rounded border border-line p-3">
+                  <div class="label-sys mb-2">{{ t('tunnels.statsBy_' + g.id) }}</div>
+                  <p v-if="!g.rows.length" class="text-[11px] text-fg-subtle">-</p>
+                  <ul v-else class="space-y-1.5">
+                    <li v-for="r in g.rows" :key="r.key">
+                      <div class="flex items-center justify-between gap-2 text-[11px]">
+                        <span class="min-w-0 truncate text-fg">{{ g.id === 'reason' ? statsReason(r.key) : statsLabel(g.id, r.key) }}</span>
+                        <span class="shrink-0 font-mono text-fg-muted">{{ r.value }}</span>
+                      </div>
+                      <div class="mt-0.5 h-1.5 overflow-hidden rounded-full bg-surface-2">
+                        <div class="h-full rounded-full" :class="g.id === 'reason' && r.key !== 'ok' ? 'bg-danger/70' : 'bg-accent/70'" :style="{ width: r.pct + '%' }" />
+                      </div>
+                    </li>
+                  </ul>
+                </div>
+              </div>
+
+              <div class="rounded border border-line">
+                <div class="label-sys border-b border-line px-3 py-2">{{ t('tunnels.statsRecent') }}</div>
+                <p v-if="!statsEvents.length" class="px-3 py-6 text-center text-xs text-fg-muted">{{ t('tunnels.statsNoEvents') }}</p>
+                <div v-else class="overflow-x-auto">
+                  <table class="w-full min-w-[560px] text-left text-xs">
+                    <thead class="text-[10px] uppercase tracking-wide text-fg-subtle">
+                      <tr>
+                        <th class="px-3 py-1.5 font-medium">{{ t('tunnels.statsColTime') }}</th>
+                        <th class="px-2 py-1.5 font-medium">{{ t('tunnels.statsColMethod') }}</th>
+                        <th class="px-2 py-1.5 font-medium">{{ t('tunnels.statsColIdentity') }}</th>
+                        <th class="px-2 py-1.5 font-medium">{{ t('tunnels.statsColResult') }}</th>
+                        <th class="px-2 py-1.5 font-medium">{{ t('tunnels.statsColIp') }}</th>
+                        <th class="px-3 py-1.5 font-medium">{{ t('tunnels.statsColAgent') }}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="ev in statsEvents" :key="ev.id" class="border-t border-line">
+                        <td class="whitespace-nowrap px-3 py-1.5 text-fg-muted" :title="new Date(ev.created_at).toLocaleString()">{{ relativeTime(ev.created_at) }}</td>
+                        <td class="whitespace-nowrap px-2 py-1.5 text-fg">{{ statsLabel('method', ev.method) }}<span v-if="ev.provider" class="text-fg-muted"> / {{ statsLabel('provider', ev.provider) }}</span></td>
+                        <td class="max-w-[160px] truncate px-2 py-1.5 font-mono text-fg" :title="ev.identity">{{ ev.identity || '-' }}</td>
+                        <td class="px-2 py-1.5">
+                          <span class="inline-flex items-center gap-1 whitespace-nowrap rounded-full px-2 py-0.5 text-[10px] font-medium" :class="ev.success ? 'bg-emerald-500/15 text-emerald-500' : 'bg-danger/15 text-danger'">
+                            <span class="size-1.5 rounded-full" :class="ev.success ? 'bg-emerald-500' : 'bg-danger'" />
+                            {{ ev.success ? t('tunnels.statsOk') : t('tunnels.statsFail') }}
+                          </span>
+                          <div v-if="!ev.success" class="mt-0.5 text-[10px] text-fg-muted">{{ statsReason(ev.reason) }}</div>
+                        </td>
+                        <td class="whitespace-nowrap px-2 py-1.5 font-mono text-fg-muted">{{ ev.client_ip || '-' }}</td>
+                        <td class="whitespace-nowrap px-3 py-1.5 text-fg-muted" :title="ev.user_agent">{{ shortUA(ev.user_agent) }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div v-if="statsHasMore" class="border-t border-line p-2 text-center">
+                  <button :disabled="statsMoreLoading" class="rounded border border-line px-3 py-1 text-xs text-fg transition-colors hover:border-accent hover:text-accent disabled:opacity-50" @click="loadMoreStats">
+                    {{ statsMoreLoading ? t('common.loading') : t('tunnels.statsLoadMore') }}
+                  </button>
+                </div>
+              </div>
+            </template>
+          </template>
+        </div>
+
         <!-- ERİŞİM -->
         <div v-else-if="settingsTab === 'access'" class="space-y-4">
-          <p class="text-xs text-fg-muted">{{ t('tunnels.accessIntro') }}</p>
+          <p v-if="isRawTunnel" class="rounded border border-line bg-surface-1 p-2.5 text-xs text-fg-muted">{{ t('tunnels.accessIntroRaw') }}</p>
+          <p v-else class="text-xs text-fg-muted">{{ t('tunnels.accessIntro') }}</p>
           <!-- Mod seçimi -->
           <div class="space-y-2">
             <label class="flex cursor-pointer items-center justify-between gap-2.5 rounded border p-2.5 transition-colors"
@@ -1539,8 +1810,84 @@ async function remove(tn: Tunnel) {
             </button>
           </div>
 
-          <!-- mTLS (istemci sertifikası) — FAZ 6.6 -->
-          <div class="space-y-3 border-t border-line pt-4">
+          <!-- Web ile kapı açma (ham TCP/UDP) -->
+          <div v-if="isRawTunnel" class="space-y-3 border-t border-line pt-4">
+            <div class="flex items-center justify-between gap-2">
+              <div class="flex items-center gap-2">
+                <Icon name="lucide:door-open" class="size-4 text-fg-muted" />
+                <span class="label-sys">{{ t('tunnels.doorTitle') }}</span>
+                <span class="help-tip" tabindex="0" :data-tip="t('tunnels.doorHint')">?</span>
+              </div>
+            </div>
+
+            <p v-if="doorLoading && !doorInfo" class="py-2 text-center text-xs text-fg-muted">{{ t('common.loading') }}</p>
+
+            <template v-else-if="doorInfo">
+              <label class="flex cursor-pointer items-center justify-between rounded border border-line px-3 py-2">
+                <span class="text-sm text-fg">{{ t('tunnels.doorEnable') }}</span>
+                <input v-model="doorForm.enabled" type="checkbox" class="accent-[var(--color-accent)]">
+              </label>
+              <p v-if="doorForm.enabled && !doorInfo.access_ready" class="text-xs text-amber-700 dark:text-amber-400">{{ t('tunnels.doorNeedAccess') }}</p>
+
+              <div>
+                <span class="label-sys mb-1.5 block">{{ t('tunnels.doorDuration') }}</span>
+                <div class="grid grid-cols-4 gap-2">
+                  <label v-for="sec in doorInfo.durations" :key="sec"
+                         class="flex cursor-pointer items-center justify-center rounded border px-2 py-1.5 text-xs transition-colors"
+                         :class="doorForm.duration === sec ? 'border-accent bg-accent/5 text-fg' : 'border-line text-fg-muted hover:border-fg-subtle'">
+                    <input v-model="doorForm.duration" type="radio" :value="sec" class="sr-only">
+                    {{ t('tunnels.' + (doorDurationKeys[sec] || 'doorDur12h')) }}
+                  </label>
+                </div>
+              </div>
+
+              <div v-if="doorInfo.enabled && doorInfo.url" class="space-y-2 rounded border border-line bg-surface-1 p-3">
+                <span class="label-sys block">{{ t('tunnels.doorUrl') }}</span>
+                <div class="flex items-center gap-2">
+                  <code class="min-w-0 flex-1 truncate rounded bg-bg px-2 py-1 font-mono text-xs text-fg">{{ doorInfo.url }}</code>
+                  <button class="inline-flex shrink-0 items-center gap-1 rounded border border-line px-2 py-1 text-xs text-fg-muted hover:bg-surface-2 hover:text-fg" @click="copyDoorUrl">
+                    <Icon :name="doorUrlCopied ? 'lucide:check' : 'lucide:copy'" class="size-3.5" /> {{ t('tunnels.doorCopy') }}
+                  </button>
+                </div>
+                <p class="text-[11px] text-fg-subtle">{{ t('tunnels.doorUrlHint') }}</p>
+                <p v-if="doorInfo.connect_address" class="text-xs text-fg-muted">
+                  {{ t('tunnels.doorConnect') }}: <span class="font-mono text-fg">{{ doorInfo.connect_address }}</span>
+                </p>
+              </div>
+
+              <div class="flex justify-end">
+                <button :disabled="doorSaving" class="rounded bg-accent px-4 py-1.5 text-sm font-medium text-on-accent transition-opacity hover:opacity-90 disabled:opacity-50" @click="saveDoor">
+                  {{ doorSaving ? t('common.saving') : t('tunnels.doorSave') }}
+                </button>
+              </div>
+
+              <!-- Aktif izinler -->
+              <div v-if="doorInfo.enabled" class="space-y-2">
+                <div class="flex items-center justify-between">
+                  <span class="label-sys">{{ t('tunnels.doorGrants') }}</span>
+                  <button class="inline-flex items-center gap-1 rounded border border-line px-2 py-1 text-[11px] text-fg-muted hover:bg-surface-2 hover:text-fg" @click="refreshDoorGrants">
+                    <Icon name="lucide:refresh-cw" class="size-3" /> {{ t('tunnels.doorRefresh') }}
+                  </button>
+                </div>
+                <p v-if="!doorGrants.length" class="rounded border border-dashed border-line py-3 text-center text-xs text-fg-muted">{{ t('tunnels.doorGrantsEmpty') }}</p>
+                <ul v-else class="divide-y divide-line rounded border border-line">
+                  <li v-for="g in doorGrants" :key="g.id" class="flex items-center justify-between gap-2 px-3 py-2">
+                    <div class="min-w-0">
+                      <span class="font-mono text-xs text-fg">{{ g.ip }}</span>
+                      <span v-if="g.identity" class="ml-2 truncate text-[11px] text-fg-muted">{{ g.identity }}</span>
+                      <p class="text-[11px] text-fg-subtle">{{ t('tunnels.doorGrantUntil') }}: {{ new Date(g.expires_at).toLocaleString() }}</p>
+                    </div>
+                    <button class="shrink-0 rounded p-1 text-fg-muted hover:bg-danger/10 hover:text-danger" :title="t('tunnels.doorRevoke')" :aria-label="t('tunnels.doorRevoke')" @click="revokeGrant(g)">
+                      <Icon name="lucide:x" class="size-3.5" />
+                    </button>
+                  </li>
+                </ul>
+              </div>
+            </template>
+          </div>
+
+          <!-- mTLS (istemci sertifikası) — FAZ 6.6 (ham TCP/UDP'de yok) -->
+          <div v-if="!isRawTunnel" class="space-y-3 border-t border-line pt-4">
             <div class="flex items-center justify-between gap-2">
               <div class="flex items-center gap-2">
                 <span class="label-sys">{{ t('tunnels.mtlsTitle') }}</span>

@@ -248,7 +248,7 @@ function getInitials(name: string, email: string) {
   const src = name || email || '?'
   const parts = src.split(' ').filter(Boolean)
   if (parts.length >= 2) {
-    return (parts[0][0] + parts[1][0]).toUpperCase()
+    return ((parts[0]?.[0] ?? '') + (parts[1]?.[0] ?? '')).toUpperCase()
   }
   return src.slice(0, 2).toUpperCase()
 }

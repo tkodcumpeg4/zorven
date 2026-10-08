@@ -5,7 +5,7 @@ const api = useApi()
 const { t } = useI18n()
 const toast = useToast()
 const { relativeTime } = useFormat()
-const { openUpgrade, loadBillingData } = useBilling()
+const { platformAdmin, tenantSlug, platformDomain } = useAuth()
 
 const hostnames = ref<Hostname[]>([])
 const tunnels = ref<Tunnel[]>([])
@@ -19,6 +19,7 @@ const activeTab = ref<'platform' | 'custom'>('platform')
 // Form durumu
 const form = reactive({
   name: '',          // Platform subdomain etiketi (ör: 'api')
+  kind: 'scoped' as 'scoped' | 'short', // scoped: ad--kiracı.platform | short: ad.platform
   custom_domain: '', // Tam FQDN (ör: 'api.alanadiniz.com')
 })
 
@@ -124,6 +125,19 @@ async function changeAttachment(h: Hostname, newTunnelID: string) {
   }
 }
 
+const platformHost = computed(() => platformDomain.value || 'zorven.app')
+const previewLabel = computed(() => form.name.trim().toLowerCase() || t('domains.previewPlaceholder'))
+// Gerçekte oluşacak adres: kiracı slug'ı panelde auth/me'den gelir.
+const previewFqdn = computed(() =>
+  form.kind === 'short'
+    ? `${previewLabel.value}.${platformHost.value}`
+    : `${previewLabel.value}--${tenantSlug.value || t('domains.previewTenant')}.${platformHost.value}`,
+)
+function pickKind(k: 'scoped' | 'short') {
+  form.kind = k
+  formError.value = ''
+}
+
 const TYPE_META: Record<Hostname['type'], { label: string, title: string, cls: string }> = {
   scoped: {
     label: t('domains.typeScopedLabel'),
@@ -155,7 +169,7 @@ async function submit() {
   try {
     if (activeTab.value === 'platform') {
       if (!form.name.trim()) { formError.value = t('domains.errNameRequired'); saving.value = false; return }
-      const newH = await api.createHostname(form.name.trim())
+      const newH = await api.createHostname(form.name.trim(), undefined, form.kind)
       hostnames.value.push(newH)
       form.name = ''
       toast.success(t('domains.added', { fqdn: newH.fqdn }))
@@ -178,16 +192,10 @@ async function submit() {
         toast.success(t('domains.addedCustom', { fqdn: hst.fqdn }))
       }
     }
-    loadBillingData()
   } catch (e: any) {
-    const code = apiErrorCode(e)
     const msg = hostnameError(e, t('domains.addFailed'))
     formError.value = msg
-    if (code === 'feature_not_available' || code === 'plan_limit_reached') {
-      openUpgrade(msg, 'domains')
-    } else {
-      toast.error(formError.value)
-    }
+    toast.error(formError.value)
   } finally {
     saving.value = false
   }
@@ -280,6 +288,37 @@ async function remove(h: Hostname) {
         <form class="grid gap-3 sm:grid-cols-[1fr_auto]" @submit.prevent="submit">
           <!-- Platform Subdomain Alanı -->
           <div v-if="activeTab === 'platform'">
+            <div class="mb-3 grid gap-2 sm:grid-cols-2" role="radiogroup" :aria-label="t('domains.kindLabel')">
+              <button
+                type="button"
+                role="radio"
+                :aria-checked="form.kind === 'scoped'"
+                class="rounded border px-3 py-2 text-left transition-colors"
+                :class="form.kind === 'scoped' ? 'border-accent bg-accent/5' : 'border-line hover:border-fg-subtle'"
+                @click="pickKind('scoped')"
+              >
+                <span class="flex items-center gap-1.5 text-xs font-medium text-fg">
+                  <Icon :name="form.kind === 'scoped' ? 'lucide:circle-dot' : 'lucide:circle'" class="size-3.5" :class="form.kind === 'scoped' ? 'text-accent' : 'text-fg-subtle'" />
+                  {{ t('domains.kindScoped') }}
+                  <span class="rounded border border-accent/30 px-1 text-[10px] text-accent">{{ t('domains.recommended') }}</span>
+                </span>
+                <span class="mt-1 block font-mono text-[11px] text-fg-muted">{{ t('domains.kindScopedEx', { domain: platformHost }) }}</span>
+              </button>
+              <button
+                type="button"
+                role="radio"
+                :aria-checked="form.kind === 'short'"
+                class="rounded border px-3 py-2 text-left transition-colors"
+:class="form.kind === 'short' ? 'border-accent bg-accent/5' : 'border-line hover:border-fg-subtle'"
+                @click="pickKind('short')"
+              >
+                <span class="flex items-center gap-1.5 text-xs font-medium text-fg">
+                  <Icon :name="form.kind === 'short' ? 'lucide:circle-dot' : 'lucide:circle'" class="size-3.5" :class="form.kind === 'short' ? 'text-accent' : 'text-fg-subtle'" />
+                  {{ t('domains.kindShort') }}
+                </span>
+                <span class="mt-1 block font-mono text-[11px] text-fg-muted">{{ t('domains.kindShortEx', { domain: platformHost }) }}</span>
+              </button>
+            </div>
             <label for="name" class="label-sys mb-1 block">{{ t('domains.shortName') }}</label>
             <input
               id="name"
@@ -288,7 +327,8 @@ async function remove(h: Hostname) {
               class="w-full rounded border border-line bg-bg px-2.5 py-1.5 font-mono text-sm placeholder:text-fg-subtle focus:border-accent"
             >
             <p class="mt-1 text-[11px] text-fg-subtle">
-              {{ t('domains.shortNameHint') }} <code class="font-mono">api</code> &rarr; <code class="font-mono">api.zorven.app</code>
+              {{ t('domains.shortNameHint') }} <span class="text-fg-muted">{{ t('domains.previewLabel') }}</span>
+              <code class="font-mono text-fg">{{ previewFqdn }}</code>
             </p>
           </div>
 
