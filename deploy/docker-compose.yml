@@ -36,6 +36,16 @@ services:
       # Webmail inbound SMTP: mail.<domain> MX buraya gelen mailleri teslim eder.
       # NOT: sunucu firewall'unda ve hosting sağlayıcıda inbound 25 açık olmalı.
       - "25:25"
+      # Mail istemcisi erisimi (Gmail uygulamasi, Outlook, Apple Mail, Thunderbird):
+      # 993 = IMAP (implicit TLS), 587 = SMTP gonderim (STARTTLS zorunlu),
+      # 465 = SMTP gonderim (implicit TLS). Konteynerin KENDI 587'si; ayri `mail`
+      # (Postfix) servisinin ic 587'si ile cakismaz. Sunucu firewall'unda ve hosting
+      # saglayicida bu portlar acik olmali (saglayicilar giden/gelen 587/465'i
+      # kisitlayabilir). Kapatmak icin ZORVEN_IMAP_ADDR / ZORVEN_SUBMISSION_ADDR /
+      # ZORVEN_SUBMISSIONS_ADDR = off.
+      - "993:993"
+      - "587:587"
+      - "465:465"
       # Ham TCP/UDP rezerve-port tünelleri (FAZ 3 / D2, Mod A). Bu aralıktan her
       # tünele bir port atanır (<alan-adi>:PORT). Firewall'da da açık olmalı.
       - "10000-10099:10000-10099"
@@ -50,14 +60,23 @@ services:
       # Webmail: gelen SMTP alıcısını (:25) ve giden relay'i (mail:587) etkinleştirir.
       # Adresler org-slug@mail.<domain> biçimindedir. Boş bırakılırsa webmail kapalı.
       - ZORVEN_MAIL_DOMAIN=mail.${PLATFORM_DOMAIN:-localhost}
+      # Mail istemcisi sunuculari (IMAP/SMTP gonderim; yalniz MAIL_DOMAIN + TLS sertifikasi
+      # varken calisir). Sunucu adi varsayilan mail.<platform domain>; sertifika bu adi kapsamali.
+      - ZORVEN_IMAP_ADDR=${ZORVEN_IMAP_ADDR:-:993}
+      - ZORVEN_IMAP_DEBUG=${ZORVEN_IMAP_DEBUG:-}
+      - ZORVEN_SUBMISSION_ADDR=${ZORVEN_SUBMISSION_ADDR:-:587}
+      - ZORVEN_SUBMISSIONS_ADDR=${ZORVEN_SUBMISSIONS_ADDR:-:465}
       # Log saklama suresi (gun). Vars. 30; 0 = temizlik kapali.
       - ZORVEN_LOG_RETENTION_DAYS=${ZORVEN_LOG_RETENTION_DAYS:-30}
       # Secret Vault (FAZ 1 / F06) sifreleme anahtari (base64 32 bayt). Bos ise
       # secret olusturma 503 doner; policy motoru bundan bagimsiz calisir.
       - ZORVEN_SECRET_KEY=${ZORVEN_SECRET_KEY:-}
       # Sosyal giris butonlarinin gorunurlugu icin (asil OAuth Better Auth/web'de).
+      # Ziyaretci OAuth (tunel erisim denetimi) icin secret da gerekir; yoksa oauth modu fail-closed.
       - GITHUB_CLIENT_ID=${GITHUB_CLIENT_ID:-}
+      - GITHUB_CLIENT_SECRET=${GITHUB_CLIENT_SECRET:-}
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
     volumes:
       # certs bir bind mount: setup öncesi buraya self-signed server.crt/server.key
       # yerleştirilir. DualCertManager bilinmeyen host'lar (ör. IP) için anında

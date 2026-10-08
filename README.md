@@ -35,6 +35,8 @@ outbound HTTPS connection is allowed.
 - Path-based routing: send different URL prefixes of one hostname to different tunnels
 - Ephemeral tunnels with an automatic time-to-live (`zorven ephemeral 8080`)
 - Mutual TLS (client-certificate) per tunnel, per-tunnel IP allow-lists, visitor access control (Basic auth / Google & GitHub OAuth)
+- Branded visitor sign-in pages for protected tunnels (password form and "Sign in with Google/GitHub"), with the Zorven session cookies never forwarded to your service
+- Web door for raw TCP/UDP tunnels: visitors sign in on a web page and their IP is temporarily allowed to reach the port; grants can be revoked at any time
 
 **Edge gateway**
 
@@ -52,6 +54,8 @@ outbound HTTPS connection is allowed.
 **Observability**
 
 - Live request log, request inspector with replay and replay diff, per-tunnel metrics
+- Rejected-request log: requests the ingress turned away (IP filter, policy, WAF, rate limit, offline client ...) are recorded with a reason, with a badge and filter in the panel
+- Access statistics per tunnel: sign-in successes/failures by method and provider, unique identities and IPs, web-door grants
 - Alerts on error-rate thresholds with e-mail notification, abuse reporting for visitors
 
 **Platform**
@@ -61,7 +65,9 @@ outbound HTTPS connection is allowed.
 - REST API with OpenAPI spec; SDKs for Go, Node.js, and Python
 - CLI client, background service install (`zorven service ...`), self-updating binaries, and a cross-platform desktop app (Windows/macOS/Linux)
 - Remote terminal and screen sharing (off by default; opt-in per client for security)
-- Self-hosted webmail: inbound receiver + outbound sender with DKIM signing
+- Self-hosted webmail: inbound receiver + outbound sender with DKIM signing, folders, and external sending for every tenant
+- Mail apps: use your Zorven mailbox from Gmail, Outlook, Apple Mail, or Thunderbird over IMAP (993) and authenticated SMTP submission (587/465) with revocable app passwords and autoconfig / Autodiscover / `.mobileconfig`
+- Client version reporting: clients report their real version and the panel flags outdated ones
 - Configurable log retention (`ZORVEN_LOG_RETENTION_DAYS`, default 30)
 - Postgres-backed; ships with a Docker Compose stack for one-command self-hosting
 
@@ -189,6 +195,7 @@ repository:
 - Zero-trust access conditions (2FA and source-network conditions)
 - Service accounts (machine identities)
 - Plan-based log retention
+- Per-plan short-name quota and suspension of names after a plan downgrade
 - Device tags (metadata labels on devices)
 - Platform plan management (changing a tenant's plan; plan labels in the platform console)
 - Hosted marketing site and billing screens

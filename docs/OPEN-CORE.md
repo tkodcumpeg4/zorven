@@ -13,12 +13,14 @@ separate, private codebase.
 | Custom domains with automatic ACME TLS, mutual TLS, IP allow-lists | yes | |
 | Policy engine (deny, redirect, set header, rate limit, require mTLS), WAF, webhook signature verification | yes | |
 | Secret Vault | yes | |
-| Path-based routing, visitor access control (Basic / OAuth) | yes | |
+| Path-based routing, visitor access control (Basic / OAuth) with branded sign-in pages | yes | |
+| Web door for raw TCP/UDP tunnels | yes | |
+| Access statistics and rejected-request log | yes | |
 | Load balancing, replicas, health checks | yes | |
 | Private network (`zorven connect`, `zorven forward`, subnets) | yes | |
 | Request inspector, replay, replay diff, metrics, alerts, abuse reports | yes | |
 | Multi-tenant model: organizations, projects, members, invitations, API tokens | yes | |
-| Webmail (inbound + outbound, DKIM/SPF/DMARC; external sending is open to every tenant), remote terminal, screen sharing | yes | |
+| Webmail (inbound + outbound, DKIM/SPF/DMARC; external sending is open to every tenant), mail apps over IMAP/SMTP submission with app passwords, remote terminal, screen sharing | yes | |
 | CLI, desktop app, Go / Node.js / Python SDKs, REST API | yes | |
 | Dashboard (English + Turkish) | yes | billing and plan screens |
 | Self-hosting stack (Docker Compose, install scripts) | yes | |
@@ -30,6 +32,7 @@ separate, private codebase.
 | Zero-trust access conditions (2FA, source-network conditions) | | yes |
 | Service accounts | | yes |
 | Plan-based log retention | | yes |
+| Short-name quota per plan and suspension of names when a plan is downgraded | | yes |
 | Device tags | | yes |
 | Platform plan management (plan-change endpoint and plan labels in the platform console) | | yes |
 
@@ -55,6 +58,16 @@ Other commercial seams are likewise replaced by simple defaults in the open buil
 - **Log retention:** a fixed, configurable period. Set `ZORVEN_LOG_RETENTION_DAYS`
   (default `30`; `0` disables pruning). Request logs older than that are deleted
   in the background.
+- **Web door:** available on every tunnel of the raw TCP/UDP kind; the plan gate is
+  always open and plan-downgrade closing never triggers.
+- **Short names:** `name.yourdomain` short names are unlimited and are never
+  suspended. The tenant-scoped name (`name--tenant.yourdomain`) is the default
+  kind; short names are opt-in (`kind: short`).
+- **Brand protection:** names containing the brand keywords (`zorven`, `rpshell`) and
+  a list of reserved words (migration 0066) cannot be registered as short names or
+  tenant slugs, to prevent look-alike phishing. If you fork Zorven under another
+  name, edit `BrandKeywords` in `server/store/brandnames.go`, the matching list in
+  `web/server/lib/brand.ts`, and the reserved names via a new migration.
 - **Device access:** every member of an organization can reach the organization's
   devices; owners and admins manage sensitive settings.
 
