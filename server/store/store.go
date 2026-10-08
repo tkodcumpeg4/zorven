@@ -10,12 +10,15 @@ import (
 	"errors"
 	"time"
 
+	"github.com/tkodcumpeg4/zorven/server/accesslog"
 	"github.com/tkodcumpeg4/zorven/server/reqlog"
 	"github.com/tkodcumpeg4/zorven/shared/protocol"
 )
 
 var (
 	ErrNotFound             = errors.New("kayit bulunamadi")
+	// ErrMailAppPasswordLimit: kutu basina aktif uygulama parolasi siniri asildi.
+	ErrMailAppPasswordLimit = errors.New("uygulama parolasi siniri asildi")
 	ErrHostnameTaken        = errors.New("hostname zaten bir tunele bagli")
 	ErrTenantNotFound       = errors.New("kiraci bulunamadi")
 	ErrUserNotFound         = errors.New("kullanici bulunamadi")
@@ -204,6 +207,11 @@ type Client struct {
 	RemoteAddr string            `json:"remote_addr,omitempty"`
 	LastSeenAt *time.Time        `json:"last_seen_at,omitempty"`
 	IsService  bool              `json:"is_service,omitempty"`
+	AppKind    string            `json:"app_kind,omitempty"` // "desktop" | ""
+	// UpdateAvailable/LatestVersion: bagli istemcinin surumu yayinlanan
+	// manifest'ten eskiyse doldurulur (DB'de tutulmaz).
+	UpdateAvailable bool   `json:"update_available,omitempty"`
+	LatestVersion   string `json:"latest_version,omitempty"`
 	Metrics    *protocol.Metrics `json:"metrics,omitempty"`
 
 	// Cihaz alanlari (FAZ 3 / F14). Bunlar DB'de TUTULUR: baglanti kopunca
@@ -336,6 +344,79 @@ type MailMessage struct {
 	Seen       bool      `json:"seen"`
 	ReceivedAt time.Time `json:"received_at"`
 	Raw        string    `json:"-"`
+	// RawBytes, ham RFC822 mesajin birebir baytlaridir (migration 0063, bytea).
+	// NUL ve gecersiz UTF-8 korunur. Doluysa Raw'a (TEXT) tercih edilir.
+	RawBytes []byte `json:"-"`
+
+	// IMAP erisimi (migration 0059). Panel JSON'una cikmaz (Folder haric).
+	Folder   string `json:"folder,omitempty"` // inbox | sent | trash | drafts ("" = yone gore varsayilan)
+	Mailbox  string `json:"-"` // kutu adresi (kucuk harf); "" ise yone gore turetilir
+	UID      uint32 `json:"-"` // klasor ici kalici UID (Insert sonrasi dolar)
+	Flagged  bool   `json:"-"`
+	Answered bool   `json:"-"`
+	Deleted  bool   `json:"-"` // IMAP Deleted bayragi (EXPUNGE bekliyor)
+}
+
+// RawData, mesajin ham baytlarini doner: once RawBytes, yoksa eski TEXT Raw.
+// Ikisi de bossa nil (cagiran yeniden olusturur).
+func (m MailMessage) RawData() []byte {
+	if len(m.RawBytes) > 0 {
+		return m.RawBytes
+	}
+	if m.Raw != "" {
+		return []byte(m.Raw)
+	}
+	return nil
+}
+
+// IMAP klasorleri (mail_messages.folder).
+const (
+	MailFolderInbox  = "inbox"
+	MailFolderSent   = "sent"
+	MailFolderTrash  = "trash"
+	MailFolderDrafts = "drafts"
+)
+
+// MailFolderState, bir klasorun UIDVALIDITY ve bir sonraki UID degeridir.
+type MailFolderState struct {
+	UIDValidity uint32
+	UIDNext     uint32
+}
+
+// MailIndexEntry, IMAP oturumunun bir klasordeki mesaj dizini satiridir
+// (govde yok). Size, saklanan ham mesajin bayt uzunlugudur (0 = ham yok).
+type MailIndexEntry struct {
+	ID         string
+	UID        uint32
+	Seen       bool
+	Flagged    bool
+	Answered   bool
+	Deleted    bool
+	Size       int64
+	ReceivedAt time.Time
+	MessageID  string
+}
+
+// MailFlagUpdate, nil olmayan alanlari gunceller.
+type MailFlagUpdate struct {
+	Seen     *bool
+	Flagged  *bool
+	Answered *bool
+	Deleted  *bool
+}
+
+// MailAppPassword, mail istemcileri icin uygulama parolasi kaydidir.
+// PasswordHash asla JSON'a cikmaz.
+type MailAppPassword struct {
+	ID           string     `json:"id"`
+	TenantID     string     `json:"tenant_id"`
+	Mailbox      string     `json:"mailbox"`
+	Label        string     `json:"label"`
+	PasswordHash string     `json:"-"`
+	CreatedAt    time.Time  `json:"created_at"`
+	LastUsedAt   *time.Time `json:"last_used_at"`
+	LastUsedIP   string     `json:"last_used_ip"`
+	RevokedAt    *time.Time `json:"revoked_at"`
 }
 
 // MailAttachment, bir webmail mesajina bagli ek dosya. Content yalnizca tekil
@@ -504,6 +585,10 @@ type HostRoute struct {
 	AccessConfig  []byte // moda gore JSONB config
 	AccessEnabled bool
 
+	// Door, nil degilse bu route bir ham TCP/UDP tunelinin "web ile kapi acma"
+	// hostname'idir: istekler tunele proxylenmez, giris + grant akisina gider.
+	Door *DoorRoute
+
 	// Trafik politikası (tunnel_traffic_policies) — router snapshot'ına gömülür
 	// (FAZ 6). TrafficEnabled=false ise hiçbir kural uygulanmaz (varsayılan).
 	// Ingress bu ham JSON'ı Reload'da BİR KEZ parse eder (per-istek parse yok).
@@ -514,6 +599,65 @@ type HostRoute struct {
 	// istemci sertifikası zorunlu tutulur; MTLSCAPem imzalayan CA'dır (PEM).
 	MTLSEnabled bool
 	MTLSCAPem   string
+}
+
+// Kapi (web door) sabitleri.
+const (
+	DoorDuration1h  = 3600
+	DoorDuration12h = 43200
+	DoorDuration24h = 86400
+	DoorDuration7d  = 604800
+)
+
+// DoorDurations, izin verilen kapi sureleri (saniye).
+var DoorDurations = []int{DoorDuration1h, DoorDuration12h, DoorDuration24h, DoorDuration7d}
+
+// ValidDoorDuration, sure izin verilen degerlerden biri mi.
+func ValidDoorDuration(sec int) bool {
+	for _, d := range DoorDurations {
+		if d == sec {
+			return true
+		}
+	}
+	return false
+}
+
+// TunnelDoor, bir ham tunelin web-door ayari.
+type TunnelDoor struct {
+	TunnelID    string    `json:"tunnel_id"`
+	TenantID    string    `json:"-"`
+	Enabled     bool      `json:"enabled"`
+	DurationSec int       `json:"duration_sec"`
+	Host        string    `json:"host"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	// PlanClosed, kapi plan Pro altina dustugu icin otomatik kapatildiysa true
+	// (sahip yeniden acinca false olur).
+	PlanClosed bool `json:"plan_closed"`
+}
+
+// DoorRoute, kapi hostname'inin ingress icin ek bilgisi (HostRoute.Door).
+type DoorRoute struct {
+	DurationSec int
+	PublicPort  int    // port-modu icin rezerve port; SNI'de 0
+	TunnelHost  string // tunelin kendi (SNI) hostname'i; bos olabilir
+	Proto       string // tcp | udp
+	Exposure    string // port | sni
+	// Disabled, kapi kapali ama plan nedeniyle kapatilmis (plan_closed): host hala
+	// cozulur ki ziyaretci "planda yok" sayfasini gorsun. Giris/grant YOKTUR.
+	Disabled bool
+}
+
+// DoorGrant, bir IP'ye verilmis sureli kapi izni.
+type DoorGrant struct {
+	ID        string     `json:"id"`
+	TenantID  string     `json:"-"`
+	TunnelID  string     `json:"tunnel_id"`
+	IP        string     `json:"ip"`
+	Identity  string     `json:"identity,omitempty"`
+	Method    string     `json:"method"` // basic | oauth
+	ExpiresAt time.Time  `json:"expires_at"`
+	CreatedAt time.Time  `json:"created_at"`
+	RevokedAt *time.Time `json:"revoked_at,omitempty"`
 }
 
 // TunnelAccessPolicy, bir tunelin erişim denetimi politikası (FAZ 1a).
@@ -850,6 +994,43 @@ type Store interface {
 	InsertRequestLogs(ctx context.Context, entries []reqlog.Entry) error
 	QueryRequestLogs(ctx context.Context, f reqlog.Filter) ([]reqlog.Entry, error)
 
+	// Tunel ziyaretci erisim olaylari (Basic/OAuth giris istatistikleri).
+	InsertAccessEvents(ctx context.Context, events []accesslog.Event) error
+	ListAccessEvents(ctx context.Context, tenantID, tunnelID string, limit int, beforeTS time.Time, beforeID string) ([]accesslog.Event, error)
+	AccessEventSummary(ctx context.Context, tenantID, tunnelID string, since time.Time) (accesslog.Summary, error)
+
+	// --- Web ile kapi acma (web door) ---
+	// GetTunnelDoor, tunelin kapi ayarini doner (kayit yoksa enabled=false, varsayilan sure).
+	GetTunnelDoor(ctx context.Context, tenantID, tunnelID string) (TunnelDoor, error)
+	// SetTunnelDoor, kapi ayarini upsert eder. Kiraci sahipligini dogrular.
+	SetTunnelDoor(ctx context.Context, tenantID string, d TunnelDoor) error
+	// ListEnabledDoors, etkin tum kapilari doner (rawproxy ve router onbellegi icin).
+	ListEnabledDoors(ctx context.Context) ([]TunnelDoor, error)
+	// ListDoorRoutes, etkin kapilarin ingress yonlendirme kayitlarini doner.
+	ListDoorRoutes(ctx context.Context) ([]HostRoute, error)
+	// OpenDoorGrant, (tunel, ip) icin AKTIF grant varsa onu aynen doner (sure uzatmaz),
+	// yoksa yeni olusturur. created=true yeni olusturuldu demektir.
+	OpenDoorGrant(ctx context.Context, g DoorGrant) (grant DoorGrant, created bool, err error)
+	// ListDoorGrants, tunelin grant'lerini doner. activeOnly ise suresi dolmamis ve
+	// iptal edilmemis olanlar. En yeniden eskiye.
+	ListDoorGrants(ctx context.Context, tenantID, tunnelID string, activeOnly bool, limit int) ([]DoorGrant, error)
+	// ListActiveDoorGrantsByTunnel, rawproxy onbellegi icin tunelin aktif grant'leri (kiracisiz).
+	ListActiveDoorGrantsByTunnel(ctx context.Context, tunnelID string) ([]DoorGrant, error)
+	// RevokeDoorGrant, tek grant'i iptal eder ve iptal edileni doner (yoksa/aktif degilse ErrNotFound).
+	RevokeDoorGrant(ctx context.Context, tenantID, tunnelID, grantID string) (DoorGrant, error)
+	// RevokeDoorGrantsByIP, (tunel, ip) icin aktif tum grant'leri iptal eder; iptal sayisini doner.
+	RevokeDoorGrantsByIP(ctx context.Context, tenantID, tunnelID, ip string) (int, error)
+	// PruneDoorGrants, bitisinden (sure dolumu/iptal) before kadar once gecmis grant'leri siler.
+	PruneDoorGrants(ctx context.Context, before time.Time) (int64, error)
+	// RecordDoorRevocation, (tunel, kimlik) icin son iptal zamanini yazar (yalniz ileri gider).
+	RecordDoorRevocation(ctx context.Context, tunnelID, identity string, at time.Time) error
+	// ListDoorRevocations, tunelin kimlik -> son iptal zamani haritasini doner.
+	ListDoorRevocations(ctx context.Context, tunnelID string) (map[string]time.Time, error)
+	// CloseDoorsForTenant, kiracinin tum kapilarini kalici kapatir (enabled=false,
+	// plan_closed=true), aktif grant'lerini iptal eder ve iptal edilen kimlikler icin
+	// oturum iptali yazar. Kapatilan tunel kimliklerini ve iptal edilen grant'leri doner.
+	CloseDoorsForTenant(ctx context.Context, tenantID string, at time.Time) (tunnelIDs []string, revoked []DoorGrant, err error)
+
 	// ListHostnamesByClient, bir istemcinin tum tunellerinin adlari. Istemci
 	// zaten token'iyla dogrulanmis oldugu icin (ListTunnelsByClient ile ayni
 	// gerekce) ayrica tenantID istemez. El sikismada tek sorguda tum adlari
@@ -936,7 +1117,7 @@ type Store interface {
 
 	// --- Webmail ---
 	InsertMailMessage(ctx context.Context, m MailMessage) (MailMessage, error)
-	ListMailMessages(ctx context.Context, tenantID, direction string, limit int) ([]MailMessage, error)
+	ListMailMessages(ctx context.Context, tenantID, folder string, limit int) ([]MailMessage, error)
 	GetMailMessage(ctx context.Context, tenantID, id string) (MailMessage, error)
 	MarkMailSeen(ctx context.Context, tenantID, id string) error
 	DeleteMailMessage(ctx context.Context, tenantID, id string) error
@@ -945,6 +1126,44 @@ type Store interface {
 	InsertMailAttachment(ctx context.Context, a MailAttachment) error
 	ListMailAttachments(ctx context.Context, tenantID, messageID string) ([]MailAttachment, error)
 	GetMailAttachment(ctx context.Context, tenantID, id string) (MailAttachment, error)
+
+	// IMAP erisimi (klasor/UID/bayrak) — server/mail IMAP sunucusu kullanir.
+	MailFolderState(ctx context.Context, tenantID, mailbox, folder string) (MailFolderState, error)
+	ListMailIndex(ctx context.Context, tenantID, mailbox, folder string) ([]MailIndexEntry, error)
+	// GetMailMessageFull, ham RFC822 (Raw) dahil tam satiri doner.
+	GetMailMessageFull(ctx context.Context, tenantID, id string) (MailMessage, error)
+	SetMailRaw(ctx context.Context, tenantID, id, raw string) error
+	SetMailFlags(ctx context.Context, tenantID, id string, u MailFlagUpdate) error
+	// MoveMailMessage, mesaji baska klasore tasir; hedefte yeni UID atanir.
+	MoveMailMessage(ctx context.Context, tenantID, id, folder string) (uint32, error)
+	// ExpungeMail, Deleted isaretli mesajlari kalici siler (uids bos = hepsi)
+	// ve silinen UID'leri doner.
+	ExpungeMail(ctx context.Context, tenantID, mailbox, folder string, uids []uint32) ([]uint32, error)
+	// FindMailByMessageID, klasorde Message-ID ile mesaj arar (APPEND tekillestirme).
+	FindMailByMessageID(ctx context.Context, tenantID, mailbox, folder, messageID string) (MailIndexEntry, bool, error)
+
+	// Kullanici klasorleri (migration 0064). Adlar '/' ayiracli IMAP adlaridir;
+	// mesajlar mail_messages.folder = MailUserFolderKey(ad) ile baglanir.
+	// CreateMailFolder ust klasorleri de olusturur; ad varsa ErrMailFolderExists.
+	CreateMailFolder(ctx context.Context, tenantID, mailbox, name, specialUse string) error
+	ListMailFolders(ctx context.Context, tenantID, mailbox string) ([]MailFolder, error)
+	// ListTenantMailFolderNames, kiracinin tum kutularindaki ayri klasor adlarini doner (panel).
+	ListTenantMailFolderNames(ctx context.Context, tenantID string) ([]string, error)
+	// DeleteMailFolder, klasoru ve icindeki mesajlari siler; alt klasor varsa
+	// ErrMailFolderHasChildren, klasor yoksa ErrNotFound.
+	DeleteMailFolder(ctx context.Context, tenantID, mailbox, name string) error
+	// RenameMailFolder, klasoru ve alt klasorlerini (mesajlariyla, UID'leri koruyarak) tasir.
+	RenameMailFolder(ctx context.Context, tenantID, mailbox, oldName, newName string) error
+	SetMailFolderSubscribed(ctx context.Context, tenantID, mailbox, name string, subscribed bool) error
+
+	// Mail uygulama parolalari (IMAP/SMTP).
+	CreateMailAppPassword(ctx context.Context, p MailAppPassword) (MailAppPassword, error)
+	ListMailAppPasswords(ctx context.Context, tenantID, mailbox string) ([]MailAppPassword, error)
+	RevokeMailAppPassword(ctx context.Context, tenantID, id string) error
+	// ListActiveMailAppPasswords, giris dogrulamasi icin kutunun iptal edilmemis
+	// parolalarini (hash dahil) doner.
+	ListActiveMailAppPasswords(ctx context.Context, mailbox string) ([]MailAppPassword, error)
+	TouchMailAppPassword(ctx context.Context, id, ip string) error
 
 	Close() error
 }

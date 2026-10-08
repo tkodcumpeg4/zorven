@@ -17,35 +17,81 @@ func (s *Store) InsertMailMessage(ctx context.Context, m store.MailMessage) (sto
 	if m.Direction != "inbound" && m.Direction != "outbound" {
 		return store.MailMessage{}, fmt.Errorf("gecersiz mail yonu: %q", m.Direction)
 	}
-	err := s.pool.QueryRow(ctx,
+	if m.Folder == "" {
+		m.Folder = store.MailFolderInbox
+		if m.Direction == "outbound" {
+			m.Folder = store.MailFolderSent
+		}
+	}
+	if !validMailFolder(m.Folder) {
+		return store.MailMessage{}, fmt.Errorf("gecersiz mail klasoru: %q", m.Folder)
+	}
+	if m.Mailbox == "" {
+		m.Mailbox = m.To
+		if m.Direction == "outbound" {
+			m.Mailbox = m.From
+		}
+	}
+	m.Mailbox = mailboxKey(m.Mailbox)
+	// Ham mesaj bytea'ya birebir yazilir (NUL/8-bit korunur); TEXT sutunu bos kalir.
+	rawBytes := m.RawBytes
+	if len(rawBytes) == 0 && m.Raw != "" {
+		rawBytes = []byte(m.Raw)
+	}
+	m.Raw = ""
+	if len(rawBytes) == 0 {
+		rawBytes = nil
+	}
+	m.RawBytes = rawBytes
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return store.MailMessage{}, fmt.Errorf("mail kaydedilemedi: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	uid, err := nextMailUID(ctx, tx, m.TenantID, m.Mailbox, m.Folder)
+	if err != nil {
+		return store.MailMessage{}, err
+	}
+	m.UID = uid
+	err = tx.QueryRow(ctx,
 		`INSERT INTO mail_messages
 		   (id, tenant_id, direction, from_addr, to_addr, subject, text_body, html_body,
-		    message_id, in_reply_to, seen, raw)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+		    message_id, in_reply_to, seen, raw, folder, mailbox, uid, flagged, answered, deleted, raw_bytes)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
 		 RETURNING received_at`,
 		m.ID, m.TenantID, m.Direction, m.From, m.To, m.Subject, m.TextBody, m.HTMLBody,
-		m.MessageID, m.InReplyTo, m.Seen, m.Raw,
+		m.MessageID, m.InReplyTo, m.Seen, m.Raw, m.Folder, m.Mailbox, int64(m.UID),
+		m.Flagged, m.Answered, m.Deleted, rawBytes,
 	).Scan(&m.ReceivedAt)
 	if err != nil {
+		return store.MailMessage{}, fmt.Errorf("mail kaydedilemedi: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return store.MailMessage{}, fmt.Errorf("mail kaydedilemedi: %w", err)
 	}
 	return m, nil
 }
 
-// ListMailMessages, kiraciya ait belirli yondeki (inbound/outbound) mesajlari
-// en yeniden eskiye siralar. Govdeler haric hafif bir projeksiyon doner (liste
+// ListMailMessages, kiraciya ait belirli klasordeki (inbox/sent/trash) mesajlari
+// en yeniden eskiye siralar. Klasor esas alinir (yon degil): IMAP ile tasinan
+// mesajlar panelde de dogru listede gorunur. Govdeler haric hafif bir projeksiyon doner (liste
 // icin); tam icerik GetMailMessage ile alinir. text_body onizleme icin gelir.
-func (s *Store) ListMailMessages(ctx context.Context, tenantID, direction string, limit int) ([]store.MailMessage, error) {
+func (s *Store) ListMailMessages(ctx context.Context, tenantID, folder string, limit int) ([]store.MailMessage, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 200
 	}
+	if !validMailFolder(folder) {
+		return nil, nil
+	}
 	rows, err := s.pool.Query(ctx,
 		`SELECT id, tenant_id, direction, from_addr, to_addr, subject,
-		        left(text_body, 280), message_id, in_reply_to, seen, received_at
+		        left(text_body, 280), message_id, in_reply_to, seen, received_at, folder
 		 FROM mail_messages
-		 WHERE tenant_id = $1 AND direction = $2
+		 WHERE tenant_id = $1 AND folder = $2
 		 ORDER BY received_at DESC
-		 LIMIT $3`, tenantID, direction, limit)
+		 LIMIT $3`, tenantID, folder, limit)
 	if err != nil {
 		return nil, fmt.Errorf("mailler listelenemedi: %w", err)
 	}
@@ -55,7 +101,7 @@ func (s *Store) ListMailMessages(ctx context.Context, tenantID, direction string
 	for rows.Next() {
 		var m store.MailMessage
 		if err := rows.Scan(&m.ID, &m.TenantID, &m.Direction, &m.From, &m.To, &m.Subject,
-			&m.TextBody, &m.MessageID, &m.InReplyTo, &m.Seen, &m.ReceivedAt); err != nil {
+			&m.TextBody, &m.MessageID, &m.InReplyTo, &m.Seen, &m.ReceivedAt, &m.Folder); err != nil {
 			return nil, err
 		}
 		out = append(out, m)
@@ -112,7 +158,7 @@ func (s *Store) DeleteMailMessage(ctx context.Context, tenantID, id string) erro
 func (s *Store) CountUnseenMail(ctx context.Context, tenantID string) (int, error) {
 	var n int
 	err := s.pool.QueryRow(ctx,
-		`SELECT count(*) FROM mail_messages WHERE tenant_id = $1 AND direction = 'inbound' AND seen = false`,
+		`SELECT count(*) FROM mail_messages WHERE tenant_id = $1 AND folder = 'inbox' AND seen = false`,
 		tenantID).Scan(&n)
 	if err != nil {
 		return 0, fmt.Errorf("okunmamis mail sayilamadi: %w", err)

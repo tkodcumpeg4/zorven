@@ -22,8 +22,8 @@ func (s *Store) TunnelMetrics(ctx context.Context, tenantID, tunnelID string, si
 		`SELECT to_timestamp(floor(extract(epoch from ts)/$4)*$4) AS bucket,
 		        count(*),
 		        count(*) FILTER (WHERE status >= 500),
-		        COALESCE(avg(duration_ms),0),
-		        COALESCE(max(duration_ms),0),
+		        COALESCE(avg(duration_ms) FILTER (WHERE reject_reason = ''),0),
+		        COALESCE(max(duration_ms) FILTER (WHERE reject_reason = ''),0),
 		        COALESCE(sum(bytes_in),0),
 		        COALESCE(sum(bytes_out),0)
 		 FROM request_logs
@@ -74,8 +74,8 @@ func (s *Store) InsertRequestLogs(ctx context.Context, entries []reqlog.Entry) e
 }
 
 const insertRequestLogSQL = `INSERT INTO request_logs
-   (id, tenant_id, tunnel_id, hostname, client_ip, ts, method, path, status, duration_ms, bytes_in, bytes_out)
- VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+   (id, tenant_id, tunnel_id, hostname, client_ip, ts, method, path, status, duration_ms, bytes_in, bytes_out, reject_reason)
+ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
  ON CONFLICT (id) DO NOTHING`
 
 // pgText, Postgres text'in kabul etmedigi NUL baytini ve gecersiz UTF-8'i
@@ -93,7 +93,7 @@ func pgText(v string) string {
 func queueRequestLog(b *pgx.Batch, e reqlog.Entry) {
 	b.Queue(insertRequestLogSQL,
 		e.ID, pgText(e.TenantID), pgText(e.TunnelID), pgText(e.Hostname), pgText(e.ClientIP), e.TS,
-		pgText(e.Method), pgText(e.Path), e.Status, e.DurationMS, e.BytesIn, e.BytesOut)
+		pgText(e.Method), pgText(e.Path), e.Status, e.DurationMS, e.BytesIn, e.BytesOut, pgText(e.RejectReason))
 }
 
 func (s *Store) execBatch(ctx context.Context, b *pgx.Batch) error {
@@ -150,7 +150,13 @@ func (s *Store) QueryRequestLogs(ctx context.Context, f reqlog.Filter) ([]reqlog
 		add("duration_ms <= $%d", f.MaxDurMS)
 	}
 
-	sql := `SELECT id, tenant_id, tunnel_id, hostname, client_ip, ts, method, path, status, duration_ms, bytes_in, bytes_out
+	if f.Reason != "" {
+		add("reject_reason = $%d", f.Reason)
+	} else if f.Rejected {
+		where = append(where, "reject_reason <> ''")
+	}
+
+	sql := `SELECT id, tenant_id, tunnel_id, hostname, client_ip, ts, method, path, status, duration_ms, bytes_in, bytes_out, reject_reason
 	        FROM request_logs`
 	if len(where) > 0 {
 		sql += " WHERE " + strings.Join(where, " AND ")
@@ -178,7 +184,7 @@ func (s *Store) QueryRequestLogs(ctx context.Context, f reqlog.Filter) ([]reqlog
 	for rows.Next() {
 		var e reqlog.Entry
 		if err := rows.Scan(&e.ID, &e.TenantID, &e.TunnelID, &e.Hostname, &e.ClientIP,
-			&e.TS, &e.Method, &e.Path, &e.Status, &e.DurationMS, &e.BytesIn, &e.BytesOut); err != nil {
+			&e.TS, &e.Method, &e.Path, &e.Status, &e.DurationMS, &e.BytesIn, &e.BytesOut, &e.RejectReason); err != nil {
 			return nil, err
 		}
 		out = append(out, e)

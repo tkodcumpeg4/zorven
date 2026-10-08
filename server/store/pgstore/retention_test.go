@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/tkodcumpeg4/zorven/server/accesslog"
 )
 
 func TestRetentionDays_Env(t *testing.T) {
@@ -52,5 +54,36 @@ func TestPruneRetention_FixedDays(t *testing.T) {
 	// days<=0: temizlik kapali
 	if res, _ := s.pruneRetentionAt(ctx, now.Add(1000*day), 0); res.RequestLogs != 0 {
 		t.Fatalf("0 gun = kapali olmali: %+v", res)
+	}
+}
+
+// Ziyaretci erisim olaylari da ayni sabit sureye tabidir ve web-door izinleri
+// bitisinden 24 saat sonra silinir. Postgres gerektirir.
+func TestPruneRetention_AccessEventsFixedDays(t *testing.T) {
+	ctx := context.Background()
+	s := freshStore(t)
+	if _, err := s.pool.Exec(ctx, `DELETE FROM tunnel_access_events`); err != nil {
+		t.Fatalf("temizlik: %v", err)
+	}
+	ten, err := s.CreateTenant(ctx, "ae-fixed")
+	if err != nil {
+		t.Fatalf("CreateTenant: %v", err)
+	}
+	now := time.Now().UTC()
+	day := 24 * time.Hour
+	evs := []accesslog.Event{
+		{ID: "ae_f1", TenantID: ten.ID, TunnelID: "t", Method: "basic", CreatedAt: now.Add(-time.Hour)},
+		{ID: "ae_f2", TenantID: ten.ID, TunnelID: "t", Method: "basic", CreatedAt: now.Add(-10 * day)},
+		{ID: "ae_f3", TenantID: ten.ID, TunnelID: "t", Method: "basic", CreatedAt: now.Add(-40 * day)},
+	}
+	if err := s.InsertAccessEvents(ctx, evs); err != nil {
+		t.Fatal(err)
+	}
+	res, err := s.pruneRetentionAt(ctx, now, 30)
+	if err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if res.AccessEvents != 1 {
+		t.Fatalf("yalniz 40 gunluk silinmeli: %+v", res)
 	}
 }

@@ -23,6 +23,10 @@ const (
 type RetentionResult struct {
 	RequestLogs int64
 	UDPStats    int64
+	// AccessEvents, tunnel_access_events (ziyaretci giris olaylari) silme sayisi.
+	AccessEvents int64
+	// DoorGrants, suresi dolmus/iptal edilmis web-door izinlerinin silme sayisi.
+	DoorGrants int64
 }
 
 // RetentionDays, etkin saklama suresini (gun) doner. <=0: temizlik kapali.
@@ -38,8 +42,9 @@ func RetentionDays() int {
 	return n
 }
 
-// PruneRetention, RetentionDays()'ten eski request_logs ve udp_stats_minute
-// satirlarini (tum kiracilar) partiler halinde siler.
+// PruneRetention, RetentionDays()'ten eski request_logs, tunnel_access_events ve
+// udp_stats_minute satirlarini (tum kiracilar) ve bitisinden 24 saat sonra
+// web-door izinlerini partiler halinde siler.
 func (s *Store) PruneRetention(ctx context.Context) (RetentionResult, error) {
 	return s.pruneRetentionAt(ctx, time.Now().UTC(), RetentionDays())
 }
@@ -64,6 +69,20 @@ func (s *Store) pruneRetentionAt(ctx context.Context, now time.Time, days int) (
 	res.UDPStats = n
 	if err != nil {
 		return res, fmt.Errorf("retention: udp_stats_minute: %w", err)
+	}
+	n, err = s.batchDelete(ctx,
+		`DELETE FROM tunnel_access_events WHERE id IN (
+		   SELECT id FROM tunnel_access_events WHERE created_at < $1 LIMIT $2)`, cutoff)
+	res.AccessEvents = n
+	if err != nil {
+		return res, fmt.Errorf("retention: tunnel_access_events: %w", err)
+	}
+	// Web-door izinleri: bitisinden 24 saat sonra silinir (denetim izi
+	// tunnel_access_events'te).
+	n, err = s.PruneDoorGrants(ctx, now.Add(-24*time.Hour))
+	res.DoorGrants = n
+	if err != nil {
+		return res, fmt.Errorf("retention: tunnel_door_grants: %w", err)
 	}
 	return res, nil
 }
