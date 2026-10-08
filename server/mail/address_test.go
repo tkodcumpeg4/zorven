@@ -49,9 +49,9 @@ func TestAddressDomain(t *testing.T) {
 func TestSend_RejectsHeaderInjection(t *testing.T) {
 	s := NewSender("127.0.0.1:1", "mail.zorven.app")
 	cases := []struct{ from, to, irt string }{
-		{"a@mail.zorven.app", "b@mail.zorven.app\r\nBcc: x@gmail.com", ""},
-		{"a@mail.zorven.app\r\nBcc: x@gmail.com", "b@mail.zorven.app", ""},
-		{"a@mail.zorven.app", "b@mail.zorven.app", "<id@x>\r\nBcc: x@gmail.com"},
+		{"a@mail.zorven.app", "b@mail.zorven.app\r\nBcc: x@example.net", ""},
+		{"a@mail.zorven.app\r\nBcc: x@example.net", "b@mail.zorven.app", ""},
+		{"a@mail.zorven.app", "b@mail.zorven.app", "<id@x>\r\nBcc: x@example.net"},
 	}
 	for _, c := range cases {
 		_, err := s.Send(c.from, c.to, "s", "b", "", c.irt, nil)

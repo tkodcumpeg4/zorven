@@ -2,19 +2,19 @@ package ingress
 
 import (
 	"context"
-	"crypto/subtle"
 	"crypto/x509"
-	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/tkodcumpeg4/zorven/server/auth"
+	"github.com/tkodcumpeg4/zorven/server/accesslog"
 	"github.com/tkodcumpeg4/zorven/server/bandwidth"
+	"github.com/tkodcumpeg4/zorven/server/door"
 	"github.com/tkodcumpeg4/zorven/server/events"
 	"github.com/tkodcumpeg4/zorven/server/ipfilter"
 	"github.com/tkodcumpeg4/zorven/server/ratelimit"
@@ -79,6 +79,23 @@ type Handler struct {
 	// dogrular (mode=oauth). nil ise oauth modu devre disidir.
 	Visitor *visitorauth.Manager
 
+	// BasicSecret, mode=basic tarayici oturum cerezini (_zvb_session) imzalayan
+	// sir. Bos ise form/cerez devre disidir ve tarayicilar eski yerel Basic Auth
+	// penceresini gorur.
+	BasicSecret []byte
+
+	// BasicLimiter, basarisiz Basic giris denemelerini (tunel+IP basina 10/10dk)
+	// sinirlar. nil ise ilk kullanimda varsayilan olusturulur.
+	BasicLimiter *ratelimit.Limiter
+	basicRLOnce  sync.Once
+
+	// Door, ham TCP/UDP tunelleri icin web ile kapi acma servisi. nil ise kapi
+	// hostname'leri 404 doner.
+	Door *door.Service
+
+	// AccessEvents, ziyaretci erisim olaylarini (istatistik) toplu yazar. nil olabilir.
+	AccessEvents *accesslog.Persister
+
 	// PlatformDomain, kiraci subdomainlerinin altinda oldugu domain (or.
 	// zorven.app). FAZ 4: yalnizca *.PlatformDomain tunellerinde ve ucretsiz
 	// katmanda uyari ara-sayfasi (interstitial) gosterilir. Bos ise kapali.
@@ -87,9 +104,14 @@ type Handler struct {
 	// rr (FAZ 5 / HA): hostname basina round-robin sayaci. Cok-replikalı
 	// tunellerde istekleri cevrimici agent'lar arasinda dagitir. Zero-value hazir.
 	rr roundRobin
+
+	// rejectLim, ingress'in proxy'lemeden reddettigi isteklerin loglanmasini
+	// tunel basina sinirlar (tarama/bot seli request_logs'u doldurmasin).
+	rejectLim rejectLimiter
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
 	// WebSocket yukseltmeleri (Upgrade: websocket) artik desteklenir: tunel
 	// kontrolleri (tunel aktif mi, IP izin listesi, hiz siniri, istemci
 	// cevrimici mi) yapildiktan sonra serveWebSocket'e dallanilir. Bkz. ServeHTTP
@@ -104,6 +126,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		normalizeHost(r.TLS.ServerName) != normalizeHost(r.Host) {
 		writeError(w, r, http.StatusMisdirectedRequest, codeMisdirected,
 			"Bu baglanti istenen host icin kurulmadi; yeni bir baglanti ile tekrar deneyin.")
+		// Host bir tunele cozumleniyorsa (kiraci biliniyor) reddi logla.
+		if t, found := h.Router.LookupPath(r.Host, r.URL.Path); found && t.Door == nil {
+			h.logReject(t, r, http.StatusMisdirectedRequest, RejectMisdirected, started)
+		}
 		return
 	}
 
@@ -127,6 +153,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Web door hostname'i (ham TCP/UDP tunelinin kapisi): proxy yok; giris + grant
+	// akisi. Tunelin statik IP izin listesi BURADA uygulanmaz (ziyaretcinin
+	// kapiya ulasabilmesi gerekir; liste ham porta uygulanir).
+	if tun.Door != nil {
+		h.serveDoor(w, r, tun)
+		return
+	}
+
 	// Y1: route mTLS istiyorsa dogrulanmis istemci sertifikasi SART. El
 	// sikismadaki dogrulamaya guvenmek yetmez: baglanti mTLS acilmadan once
 	// kurulmus olabilir (keep-alive) veya istek yol kuraliyla CA'si farkli
@@ -135,6 +169,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if tun.MTLSEnabled && !h.clientCertOK(r, tun.TunnelID) {
 		writeError(w, r, http.StatusForbidden, protocol.CodeAccessDenied,
 			"Bu tunel istemci sertifikasi (mTLS) gerektirir.")
+		h.logReject(tun, r, http.StatusForbidden, RejectMTLSRequired, started)
 		return
 	}
 
@@ -147,6 +182,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				"ip", ip, "tunel", tun.TunnelID, "tenant", tun.TenantID, "hostname", tun.FQDN)
 			writeError(w, r, http.StatusForbidden, protocol.CodeIPForbidden,
 				"Erişim engellendi: IP adresiniz ("+ip+") bu tünelin izin listesinde bulunmuyor.")
+			h.logReject(tun, r, http.StatusForbidden, RejectIPForbidden, started)
 			return
 		}
 	}
@@ -159,9 +195,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Basic Auth giriş formu uçları (/_zvb/login, /_zvb/logout) da erişim
+	// denetiminden muaftır ve ASLA istemci uygulamasına iletilmez.
+	if strings.HasPrefix(r.URL.Path, "/_zvb/") {
+		h.serveBasicEndpoint(w, r, tun)
+		return
+	}
+
 	// Tünel erişim denetimi (Basic Auth / OAuth). Politika yoksa/kapalıysa
 	// tünel herkese açıktır (geriye uyumlu). Reddedilirse yanıt yazılmıştır.
-	if !h.enforceAccess(w, r, tun) {
+	arec := &recorder{ResponseWriter: w, status: http.StatusOK}
+	if !h.enforceAccess(arec, r, tun) {
+		h.logReject(tun, r, arec.status, accessRejectReason(arec.status), started)
 		return
 	}
 
@@ -169,7 +214,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// ara-sayfası göster (phishing/kötüye kullanım caydırma). Onay çerezi varsa
 	// veya ücretli katman / özel domain / asset-XHR isteğiyse atlanır.
 	if h.shouldShowInterstitial(tun, r) {
-		h.serveInterstitial(w, r)
+		irec := &recorder{ResponseWriter: w, status: http.StatusOK}
+		h.serveInterstitial(irec, r)
+		h.logReject(tun, r, irec.status, RejectInterstitial, started)
 		return
 	}
 
@@ -194,15 +241,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				msg = "Erişim policy tarafından engellendi."
 			}
 			writeError(w, r, pol.denyStatus, protocol.CodeAccessDenied, msg)
+			h.logReject(tun, r, pol.denyStatus, RejectPolicyDeny, started)
 		case pol.redirectLoc != "":
 			http.Redirect(w, r, pol.redirectLoc, pol.redirectStatus)
+			h.logReject(tun, r, pol.redirectStatus, RejectPolicyRedirect, started)
 		case pol.rateLimited:
 			w.Header().Set("Retry-After", strconv.Itoa(int(pol.retryAfter.Seconds())))
 			writeError(w, r, http.StatusTooManyRequests, protocol.CodeRateLimited,
 				"İstek hız sınırı aşıldı. Lütfen sonra tekrar deneyin.")
+			h.logReject(tun, r, http.StatusTooManyRequests, RejectRateLimited, started)
 		case pol.mtlsFailed:
 			writeError(w, r, http.StatusForbidden, protocol.CodeAccessDenied,
 				"Bu kaynak istemci sertifikası (mTLS) gerektirir.")
+			h.logReject(tun, r, http.StatusForbidden, RejectMTLSRequired, started)
 		case pol.wafBlocked:
 			// Hangi kuralin eslestigi YALNIZCA logda; yanit bilgi sizdirmaz.
 			h.Log.Warn("waf tarafindan engellendi",
@@ -210,6 +261,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				"ip", clientIP(r), "yol", r.URL.Path, "kural", pol.wafRule)
 			writeError(w, r, http.StatusForbidden, protocol.CodeAccessDenied,
 				"İstek güvenlik politikası tarafından engellendi.")
+			h.logReject(tun, r, http.StatusForbidden, RejectWAFBlocked, started)
 		case pol.webhookFailed:
 			st := pol.webhookStatus
 			if st == 0 {
@@ -218,6 +270,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.Log.Warn("webhook imza dogrulamasi basarisiz",
 				"tunel", tun.TunnelID, "hostname", tun.FQDN, "durum", st)
 			writeError(w, r, st, protocol.CodeAccessDenied, pol.webhookMessage)
+			h.logReject(tun, r, st, RejectWebhookFailed, started)
 		}
 		return
 	}
@@ -227,6 +280,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// once yaniti burada dondururuz.
 	if loc, status, ok := tp.matchRedirect(r.URL.Path); ok {
 		http.Redirect(w, r, loc, status)
+		h.logReject(tun, r, status, RejectRedirectRule, started)
 		return
 	}
 
@@ -237,6 +291,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Retry-After", strconv.Itoa(int(h.ReqLimiter.RetryAfter().Seconds())))
 		writeError(w, r, http.StatusTooManyRequests, protocol.CodeRateLimited,
 			"Bu tunel icin istek hizi siniri asildi.")
+		h.logReject(tun, r, http.StatusTooManyRequests, RejectRateLimited, started)
 		return
 	}
 
@@ -280,6 +335,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if sess == nil {
 		writeError(w, r, http.StatusBadGateway, protocol.CodeClientOffline,
 			"Tunelin istemcisi su anda bagli degil.")
+		h.logReject(tun, r, http.StatusBadGateway, RejectClientOffline, started)
 		return
 	}
 
@@ -300,54 +356,9 @@ func (h *Handler) enforceAccess(w http.ResponseWriter, r *http.Request, tun stor
 	}
 	switch tun.AccessMode {
 	case "basic":
-		var cfg struct {
-			Username     string `json:"username"`
-			PasswordHash string `json:"password_hash"`
-		}
-		_ = json.Unmarshal(tun.AccessConfig, &cfg)
-		user, pass, ok := r.BasicAuth()
-		if ok && subtle.ConstantTimeCompare([]byte(user), []byte(cfg.Username)) == 1 {
-			if valid, _ := auth.Verify(pass, cfg.PasswordHash); valid {
-				return true
-			}
-		}
-		w.Header().Set("WWW-Authenticate", `Basic realm="Zorven"`)
-		writeError(w, r, http.StatusUnauthorized, protocol.CodeAuthRequired,
-			"Bu tunel parola korumalidir.")
-		return false
+		return h.enforceBasic(w, r, tun)
 	case "oauth":
-		if h.Visitor == nil || !h.Visitor.Enabled() {
-			// Sağlayıcı yapılandırılmamış (creds yok) — fail-closed.
-			writeError(w, r, http.StatusForbidden, protocol.CodeAccessDenied,
-				"OAuth erisim denetimi bu sunucuda yapilandirilmamis (saglayici anahtarlari eksik).")
-			return false
-		}
-		var cfg struct {
-			Providers     []string `json:"providers"`
-			AllowedEmails []string `json:"allowed_emails"`
-		}
-		_ = json.Unmarshal(tun.AccessConfig, &cfg)
-		email, ok := h.Visitor.SessionEmail(r)
-		if ok && visitorauth.EmailAllowed(email, cfg.AllowedEmails) {
-			return true
-		}
-		if ok {
-			// Oturum var ama e-posta izin listesinde değil — yeniden yönlendirme
-			// döngüsü yerine net bir 403.
-			writeError(w, r, http.StatusForbidden, protocol.CodeAccessDenied,
-				"Erisim reddedildi: hesabiniz ("+email+") bu tunele erisim yetkisine sahip degil.")
-			return false
-		}
-		// Oturum yok → sağlayıcıya yönlendir. GET dışı isteklerde 401 döneriz
-		// (tarayıcı olmayan istemciler redirect'i izleyemez).
-		if r.Method != http.MethodGet && r.Method != http.MethodHead {
-			writeError(w, r, http.StatusUnauthorized, protocol.CodeAuthRequired,
-				"Bu tunel OAuth ile korunmaktadir; once tarayicidan giris yapin.")
-			return false
-		}
-		rd := r.URL.RequestURI()
-		http.Redirect(w, r, visitorauth.StartURL(cfg.Providers, rd), http.StatusFound)
-		return false
+		return h.enforceOAuth(w, r, tun)
 	}
 	return true
 }
@@ -580,6 +591,14 @@ func forwardHeaders(r *http.Request) map[string][]string {
 		}
 		out[k] = v
 	}
+	// Zorven oturum cerezleri (_zva_session / _zvb_session) backend'e ASLA gitmez.
+	if cv, ok := out["Cookie"]; ok {
+		if kept := stripAuthCookies(cv); len(kept) > 0 {
+			out["Cookie"] = kept
+		} else {
+			delete(out, "Cookie")
+		}
+	}
 
 	proto := "http"
 	if r.TLS != nil {
@@ -686,7 +705,7 @@ func (h *Handler) recordWithID(tunnelID, tenantID string, r *http.Request, rec *
 	if h.ReqLog == nil {
 		return
 	}
-	entry := h.ReqLog.Add(reqlog.Entry{
+	h.emitEntry(reqlog.Entry{
 		ID:         id,
 		TunnelID:   tunnelID,
 		TenantID:   tenantID,
@@ -699,6 +718,14 @@ func (h *Handler) recordWithID(tunnelID, tenantID string, r *http.Request, rec *
 		BytesIn:    bytesIn,
 		BytesOut:   bytesOut,
 	})
+}
+
+// emitEntry, kaydi halka tampona, kalici log kuyruguna ve canli olay akisina yazar.
+func (h *Handler) emitEntry(e reqlog.Entry) {
+	if h.ReqLog == nil {
+		return
+	}
+	entry := h.ReqLog.Add(e)
 	// Kalici log (Postgres): batch persister'a devret. nil olabilir.
 	if h.LogPersister != nil {
 		h.LogPersister.Enqueue(entry)

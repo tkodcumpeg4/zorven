@@ -104,8 +104,17 @@ type Envelope struct {
 
 type Hello struct {
 	Type          MessageType `json:"type"`
-	ClientVersion string      `json:"client_version"`
-	Platform      string      `json:"platform"` // "windows/amd64"
+	// ClientVersion, istemci ikilisinin GERCEK surumu ("0.2.2", yerel derlemede "dev").
+	// Protokol uyumlulugu ProtocolVersion / X-Tunnel-Client-Version ile ayridir.
+	ClientVersion string `json:"client_version"`
+	Platform      string `json:"platform"` // "windows/amd64"
+
+	// ProtocolVersion, istemcinin konustugu protokol surumu. Eski istemciler
+	// gondermez (bos); sunucu o zaman baslik degerine bakar.
+	ProtocolVersion string `json:"protocol_version,omitempty"`
+	// AppKind, istemci turu: "desktop" (masaustu uygulamasi) veya bos (CLI/servis).
+	// Panel, guncel surumu dogru manifest'ten (bin/desktop.json) karsilastirir.
+	AppKind string `json:"app_kind,omitempty"`
 
 	// Features, istemcinin destekledigi opsiyonel yetenekler.
 	// Eski istemcilerde BOS gelir; sunucu o zaman eski davranisa duser.

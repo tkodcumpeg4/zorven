@@ -14,6 +14,7 @@ import (
 
 	"github.com/tkodcumpeg4/zorven/server/auth"
 	"github.com/tkodcumpeg4/zorven/server/domain"
+	"github.com/tkodcumpeg4/zorven/server/door"
 	"github.com/tkodcumpeg4/zorven/server/entitlements"
 	"github.com/tkodcumpeg4/zorven/server/events"
 	"github.com/tkodcumpeg4/zorven/server/ingress"
@@ -70,6 +71,9 @@ type Server struct {
 	// Ingress router'dan saglanir; nil ise saglik bilgisi donulmez.
 	LBHealth func(tunnelID string, clients []string) []ingress.BackendStatus
 
+	// Door, web ile kapi acma servisi (grant iptali + onbellek gecersiz kilma). nil olabilir.
+	Door *door.Service
+
 	// UDPStats (FAZ 4 / F24), UDP tunelinin canli istatistikleri (rawproxy).
 	UDPStats func(tunnelID string) (rawproxy.UDPLiveStats, bool)
 
@@ -103,6 +107,9 @@ type Server struct {
 	// sales@zorven.app ...). YALNIZCA platform admin (owner) bu adreslerden
 	// gonderebilir ve bunlara gelenler ten_default'a dusup owner panelinde gorunur.
 	SystemMailboxes []string
+	// MailClient, mail istemcisi erisimi (IMAP/SMTP gonderim) sunucu ayarlari.
+	// nil ise "Mail uygulamalarinda kullan" ozelligi kapalidir.
+	MailClient *mail.ClientConfig
 }
 
 func writeEntitlementError(w http.ResponseWriter, err error) {
@@ -201,10 +208,17 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("GET /api/v1/tunnels/{id}/udp", s.getTunnelUDP)
 	mux.HandleFunc("PUT /api/v1/tunnels/{id}/udp", s.setTunnelUDP)
 	mux.HandleFunc("GET /api/v1/tunnels/{id}/game-status", s.getGameStatus)
+	// Web ile kapi acma (ham TCP/UDP tunelleri)
+	mux.HandleFunc("GET /api/v1/tunnels/{id}/door", s.getTunnelDoor)
+	mux.HandleFunc("PUT /api/v1/tunnels/{id}/door", s.setTunnelDoor)
+	mux.HandleFunc("GET /api/v1/tunnels/{id}/door/grants", s.listDoorGrants)
+	mux.HandleFunc("DELETE /api/v1/tunnels/{id}/door/grants/{grantId}", s.revokeDoorGrant)
 	mux.HandleFunc("PATCH /api/v1/tunnels/{id}", s.updateTunnel)
 	mux.HandleFunc("DELETE /api/v1/tunnels/{id}", s.deleteTunnel)
 	mux.HandleFunc("GET /api/v1/tunnels/{id}/access", s.getTunnelAccess)
 	mux.HandleFunc("PUT /api/v1/tunnels/{id}/access", s.setTunnelAccess)
+	mux.HandleFunc("GET /api/v1/tunnels/{id}/access-events", s.listAccessEvents)
+	mux.HandleFunc("GET /api/v1/tunnels/{id}/access-events/summary", s.accessEventsSummary)
 	// FAZ 5 / HA — tünel replikaları (çoklu agent yük dengeleme).
 	mux.HandleFunc("GET /api/v1/tunnels/{id}/replicas", s.getTunnelReplicas)
 	mux.HandleFunc("POST /api/v1/tunnels/{id}/replicas", s.addTunnelReplica)
@@ -279,7 +293,15 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("POST /api/v1/mail/send", s.sendMail)
 	mux.HandleFunc("GET /api/v1/mail/messages/{id}", s.getMail)
 	mux.HandleFunc("DELETE /api/v1/mail/messages/{id}", s.deleteMail)
+	mux.HandleFunc("POST /api/v1/mail/messages/{id}/move", s.moveMail)
+	mux.HandleFunc("GET /api/v1/mail/folders", s.listMailFolders)
 	mux.HandleFunc("GET /api/v1/mail/attachments/{id}", s.getMailAttachment)
+	// Mail istemcileri (Gmail uygulamasi, Outlook, Apple Mail, Thunderbird) icin
+	// uygulama parolalari ve otomatik yapilandirma.
+	mux.HandleFunc("GET /api/v1/mail/app-passwords", s.listMailAppPasswords)
+	mux.HandleFunc("POST /api/v1/mail/app-passwords", s.createMailAppPassword)
+	mux.HandleFunc("DELETE /api/v1/mail/app-passwords/{id}", s.revokeMailAppPassword)
+	mux.HandleFunc("GET /api/v1/mail/mobileconfig", s.mailMobileConfig)
 
 	// Programatik REST API Token Yonetimi
 	mux.HandleFunc("GET /api/v1/api-tokens", s.listAPITokens)
@@ -605,13 +627,22 @@ func (s *Server) enrich(c store.Client) store.Client {
 		ls := sess.LastSeen()
 		c.LastSeenAt = &ls
 		c.IsService = sess.IsService
+		c.AppKind = sess.AppKind
 		c.Metrics = sess.Metrics()
 	} else if st, ok := s.Hub.Statuses()[c.ID]; ok {
 		c.Status, c.Version, c.RemoteAddr = "online", st.Version, st.RemoteAddr
+		c.AppKind = st.AppKind
 		ls := st.LastSeen
 		c.LastSeenAt = &ls
 	} else {
 		c.Status = "offline"
+	}
+	// Surum bayragi yalnizca CANLI istemci icin: tur (masaustu/CLI) ancak
+	// bagliyken bilinir, offline iken yanlis manifestle karsilastirilmaz.
+	if c.Status == "online" {
+		if latest := latestClientVersion(manifestFor(c.AppKind)); isOutdated(c.Version, latest) {
+			c.UpdateAvailable, c.LatestVersion = true, latest
+		}
 	}
 	return c
 }
@@ -861,6 +892,11 @@ func (s *Server) createTunnel(w http.ResponseWriter, r *http.Request) {
 	name := strings.ToLower(strings.TrimSpace(body.Name))
 	if err := validateLabel(name); err != nil {
 		writeJSONError(w, http.StatusUnprocessableEntity, "invalid_name", err.Error())
+		return
+	}
+	// Otomatik kapsamli ad (ad--kiraci) verilecekse marka deseni reddedilir.
+	if !body.NoDomain && body.HostnameID == "" && store.ContainsBrandKeyword(name) {
+		writeJSONError(w, http.StatusConflict, "name_reserved", brandReservedMsg)
 		return
 	}
 	if !validTarget(body.Target) {
@@ -1304,6 +1340,11 @@ func (s *Server) listRequests(w http.ResponseWriter, r *http.Request) {
 				f.StatusMin, f.StatusMax = n, n
 			}
 		}
+		// Ingress'in proxy'lemeden reddettigi istekler: ?rejected=true veya ?reason=ip_forbidden.
+		f.Reason = q.Get("reason")
+		if v := q.Get("rejected"); v == "true" || v == "1" {
+			f.Rejected = true
+		}
 		if v := q.Get("min_dur"); v != "" {
 			f.MinDurMS, _ = strconv.ParseInt(v, 10, 64)
 		}
@@ -1348,6 +1389,15 @@ func (s *Server) listRequests(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		entries = scoped
+	}
+	if reason, rej := q.Get("reason"), q.Get("rejected"); reason != "" || rej == "true" || rej == "1" {
+		kept := make([]reqlog.Entry, 0, len(entries))
+		for _, e := range entries {
+			if (reason != "" && e.RejectReason == reason) || (reason == "" && e.RejectReason != "") {
+				kept = append(kept, e)
+			}
+		}
+		entries = kept
 	}
 	writeJSON(w, http.StatusOK, entries)
 }

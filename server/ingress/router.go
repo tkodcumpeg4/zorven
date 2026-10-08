@@ -188,6 +188,18 @@ func (r *Router) Reload(ctx context.Context) error {
 		next[h] = rt
 	}
 
+	// Web door hostname'leri (ham TCP/UDP tuneli kapilari). Gercek bir kayit ayni
+	// adi zaten tasiyorsa o kazanir (kapi adi hicbir zaman bir tuneli golgelemez).
+	// Okunamazsa kapilar bu turda yoktur (404); ham port grant'siz zaten kapali kalir.
+	if drs, derr := r.st.ListDoorRoutes(ctx); derr == nil {
+		for _, rt := range drs {
+			h := normalizeHost(rt.FQDN)
+			if _, exists := next[h]; !exists {
+				next[h] = rt
+			}
+		}
+	}
+
 	// FAZ 6.5: yol kurallari. Her biri hedef tunelin tam HostRoute'u + PathPrefix.
 	// En uzun on-ek once eslessin diye host basina uzunluga gore azalan siralanir.
 	nextPaths := make(map[string][]pathRule)

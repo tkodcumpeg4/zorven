@@ -27,6 +27,7 @@ const (
 	FeatureZorvenNetwork Feature = "zorven_network" // ozel ag (zorven connect/forward)
 	FeatureAdvancedLB    Feature = "advanced_lb"    // gelismis yuk dengeleme
 	FeatureUDPAdvanced   Feature = "udp_advanced"   // gelismis UDP
+	FeatureWebDoor       Feature = "web_door"       // ham TCP/UDP web ile kapi acma (acikta her zaman acik)
 )
 
 // ScreenStreamSpec, ekran yayini parametreleri. Cekirdekte sinirsiz/1080p.

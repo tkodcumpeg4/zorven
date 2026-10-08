@@ -39,12 +39,25 @@ type Manager struct {
 	IPFilter *ipfilter.Engine
 	Log      *slog.Logger
 	List     Lister
+	// Door, web ile kapi acma durumu (nil = ozellik kapali). Bkz. door.go.
+	Door DoorGate
 
 	mu      sync.Mutex
 	tcpLn   map[int]net.Listener
 	udpLn   map[int]*udpListener
 	byPort  map[int]TunnelInfo
 	baseCtx context.Context
+
+	// doorConns, grant ile kabul edilen acik baglantilar (grant iptalinde kesilir).
+	doorConns connRegistry
+}
+
+// ctx, baslatilmamis yoneticide (testler) bile bos olmayan bir context doner.
+func (m *Manager) ctx() context.Context {
+	if m.baseCtx != nil {
+		return m.baseCtx
+	}
+	return context.Background()
 }
 
 func New(hub *tunnel.Hub, ipf *ipfilter.Engine, log *slog.Logger, list Lister) *Manager {
@@ -170,13 +183,12 @@ func (m *Manager) HandleSNIConn(conn net.Conn, ti TunnelInfo) {
 
 // bridgeTCP, verilen conn'u tunelin ajan oturumuna bir ham TCP akisiyla baglar.
 func (m *Manager) bridgeTCP(conn net.Conn, ti TunnelInfo) {
-	// IP izin listesi (varsa).
-	if m.IPFilter != nil && ti.TenantID != "" {
-		ip := hostOf(conn.RemoteAddr().String())
-		if allowed, err := m.IPFilter.CheckAllowed(m.baseCtx, ti.TenantID, ti.TunnelID, ip); err == nil && !allowed {
-			m.Log.Warn("rawproxy: IP engellendi", "ip", ip, "tunnel", ti.TunnelID)
-			return
-		}
+	// IP izin listesi ve/veya web-door grant'i.
+	ip := hostOf(conn.RemoteAddr().String())
+	ok, grantExp := m.admit(m.ctx(), ti, ip)
+	if !ok {
+		m.Log.Warn("rawproxy: IP engellendi", "ip", ip, "tunnel", ti.TunnelID)
+		return
 	}
 
 	sess, online := m.Hub.Get(ti.ClientID)
@@ -185,8 +197,20 @@ func (m *Manager) bridgeTCP(conn net.Conn, ti TunnelInfo) {
 		return
 	}
 
-	ctx, cancel := context.WithCancel(m.baseCtx)
+	ctx, cancel := context.WithCancel(m.ctx())
 	defer cancel()
+
+	// Yalnizca grant sayesinde kabul edildiyse: grant iptalinde veya suresi
+	// dolunca baglanti kesilir.
+	if !grantExp.IsZero() {
+		kill := func() {
+			cancel()
+			conn.Close()
+		}
+		defer m.doorConns.add(ti.TunnelID, ip, kill)()
+		t := time.AfterFunc(time.Until(grantExp), kill)
+		defer t.Stop()
+	}
 
 	stream, err := sess.OpenStream(ctx, ti.TunnelID, "tcp", conn.RemoteAddr().String())
 	if err != nil {

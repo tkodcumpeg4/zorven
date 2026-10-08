@@ -53,6 +53,29 @@ func (m *mockEntitlementService) CheckFeature(ctx context.Context, tenantID stri
 	return nil
 }
 
+func TestHasRules(t *testing.T) {
+	tun := "tun_a"
+	ms := &mockStore{rules: []store.IPAllowlistRule{
+		{ID: "r1", TenantID: "ten", TunnelID: &tun, CIDR: "10.0.0.0/8", Enabled: true},
+	}}
+	e := NewEngine(ms, &mockEntitlementService{ipAllowlistAllowed: true})
+	if err := e.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if !e.HasRules(ctx, "ten", "tun_a") {
+		t.Fatal("kapsayan kural var")
+	}
+	if e.HasRules(ctx, "ten", "tun_b") || e.HasRules(ctx, "other", "tun_a") {
+		t.Fatal("baska tunel/kiraci icin kural yok")
+	}
+	e2 := NewEngine(ms, &mockEntitlementService{ipAllowlistAllowed: false})
+	_ = e2.Reload(ctx)
+	if e2.HasRules(ctx, "ten", "tun_a") {
+		t.Fatal("plan ozelligi yoksa statik liste etkin degil")
+	}
+}
+
 func TestParseCIDR(t *testing.T) {
 	tests := []struct {
 		input   string

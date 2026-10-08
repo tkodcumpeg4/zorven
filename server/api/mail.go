@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/base64"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -56,21 +57,24 @@ func (s *Server) mailInfo(w http.ResponseWriter, r *http.Request) {
 		"unseen":            unseen,
 		"can_send_external": true,
 		"system_addresses":  systemAddrs,
+		"client_access":     s.mailClientInfo(),
 	})
 }
 
-// listMail (GET /api/v1/mail/messages?box=inbox|sent): mesaj listesi.
+// listMail (GET /api/v1/mail/messages?box=inbox|sent|trash|drafts|<klasor adi>): mesaj listesi.
+// Liste KLASOR esas alinarak yapilir (IMAP ile tasinan mesajlar dogru listede cikar).
 func (s *Server) listMail(w http.ResponseWriter, r *http.Request) {
 	tenantID, ok := s.tenantFor(r)
 	if !ok {
 		writeJSONError(w, http.StatusInternalServerError, "no_tenant", "istek kiraci kapsami olmadan ulasti")
 		return
 	}
-	direction := "inbound"
-	if r.URL.Query().Get("box") == "sent" {
-		direction = "outbound"
+	folder, okBox := mailBoxFolder(r.URL.Query().Get("box"))
+	if !okBox {
+		writeJSONError(w, http.StatusBadRequest, "invalid_box", "gecersiz klasor adi")
+		return
 	}
-	msgs, err := s.Store.ListMailMessages(r.Context(), tenantID, direction, 200)
+	msgs, err := s.Store.ListMailMessages(r.Context(), tenantID, folder, 200)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -98,7 +102,7 @@ func (s *Server) getMail(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	if m.Direction == "inbound" && !m.Seen {
+	if !m.Seen {
 		_ = s.Store.MarkMailSeen(r.Context(), tenantID, id)
 		m.Seen = true
 	}
@@ -266,6 +270,10 @@ func (s *Server) sendMail(w http.ResponseWriter, r *http.Request) {
 	subject := strings.TrimSpace(body.Subject)
 
 	messageID, err := s.MailSender.Send(from, to, subject, body.Body, "", inReplyTo, atts)
+	if errors.Is(err, mail.ErrNoSuchMailbox) {
+		writeJSONError(w, http.StatusUnprocessableEntity, "unknown_recipient", "bu adreste bir posta kutusu yok: "+to)
+		return
+	}
 	if err != nil {
 		writeJSONError(w, http.StatusBadGateway, "send_failed", "mail gonderilemedi: "+err.Error())
 		return
@@ -303,4 +311,91 @@ func (s *Server) logMailWarn(msg string, err error) {
 	if s.Logger != nil {
 		s.Logger.Warn(msg, "error", err)
 	}
+}
+
+// mailBoxFolder, panelin box parametresini mail_messages.folder degerine cevirir.
+// "" ve inbox gelen kutusudur; sistem adlari disindakiler kullanici klasoru adidir.
+func mailBoxFolder(box string) (string, bool) {
+	switch strings.ToLower(box) {
+	case "", "inbox":
+		return store.MailFolderInbox, true
+	case "sent":
+		return store.MailFolderSent, true
+	case "trash":
+		return store.MailFolderTrash, true
+	case "drafts":
+		return store.MailFolderDrafts, true
+	}
+	if store.ValidateMailFolderName(box) != nil {
+		return "", false
+	}
+	return store.MailUserFolderKey(box), true
+}
+
+// listMailFolders (GET /api/v1/mail/folders): kiracinin kullanici klasorleri
+// (IMAP ile olusturulanlar), ada gore sirali. Sistem klasorleri dahil degildir.
+func (s *Server) listMailFolders(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := s.tenantFor(r)
+	if !ok {
+		writeJSONError(w, http.StatusInternalServerError, "no_tenant", "istek kiraci kapsami olmadan ulasti")
+		return
+	}
+	names, err := s.Store.ListTenantMailFolderNames(r.Context(), tenantID)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	if names == nil {
+		names = []string{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"folders": names})
+}
+
+// moveMail (POST /api/v1/mail/messages/{id}/move): {folder}. Hedef bir sistem
+// klasoru (inbox|trash|drafts|sent) veya kiracida var olan bir kullanici klasorudur.
+func (s *Server) moveMail(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := s.tenantFor(r)
+	if !ok {
+		writeJSONError(w, http.StatusInternalServerError, "no_tenant", "istek kiraci kapsami olmadan ulasti")
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSONError(w, http.StatusBadRequest, "invalid_id", "mesaj id belirtilmedi")
+		return
+	}
+	var body struct {
+		Folder string `json:"folder"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	target, okBox := mailBoxFolder(body.Folder)
+	if !okBox || strings.TrimSpace(body.Folder) == "" {
+		writeJSONError(w, http.StatusUnprocessableEntity, "invalid_folder", "gecersiz hedef klasor")
+		return
+	}
+	if name, isUser := store.MailUserFolderName(target); isUser {
+		names, err := s.Store.ListTenantMailFolderNames(r.Context(), tenantID)
+		if err != nil {
+			s.fail(w, err)
+			return
+		}
+		found := false
+		for _, n := range names {
+			if n == name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			writeJSONError(w, http.StatusNotFound, "folder_not_found", "klasor bulunamadi")
+			return
+		}
+	}
+	if _, err := s.Store.MoveMailMessage(r.Context(), tenantID, id, target); err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "folder": body.Folder})
 }

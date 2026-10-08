@@ -30,6 +30,11 @@ type Entry struct {
 	DurationMS int64     `json:"duration_ms"`
 	BytesIn    int64     `json:"bytes_in"`
 	BytesOut   int64     `json:"bytes_out"`
+	// RejectReason, istek tunele proxy'lenmeden ingress tarafindan reddedildiyse
+	// (ip_forbidden, auth_required, policy_deny, rate_limited, client_offline ...)
+	// nedenidir; bos = normal proxy'lenen istek. Reddedilenlerin upstream gecikmesi
+	// yoktur: P95/ortalama sure hesaplarina katilmaz.
+	RejectReason string `json:"reject_reason,omitempty"`
 }
 
 // MetricBucket, bir zaman dilimindeki (bucket) toplu istek metrikleri (FAZ 6.3).
@@ -58,6 +63,8 @@ type Filter struct {
 	Until     time.Time // bu ana kadar
 	MinDurMS  int64     // en az sure
 	MaxDurMS  int64     // en fazla sure (0 = sinirsiz)
+	Rejected  bool      // true: yalnizca ingress'in reddettigi istekler
+	Reason    string    // belirli reject_reason (Rejected'i da ima eder)
 	Limit     int       // sayfa boyutu
 	Offset    int       // sayfalama
 }

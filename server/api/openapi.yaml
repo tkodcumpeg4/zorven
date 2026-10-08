@@ -313,7 +313,17 @@ paths:
     post:
       tags: [Hostnames]
       summary: Platform hostname'i oluştur
-      description: "Kapsam: `hostnames:write`. Platform domaini altında kısa ad."
+      description: |
+        Kapsam: `hostnames:write`. Platform domaini altında ad verir.
+
+        **`kind` varsayılanı `scoped`'dur** (kiracı adı): `<ad>--<kiracı-slug>.<platform>`,
+        yalnızca sizde. **`kind: short`** global kısa ad verir
+        (`<ad>.<platform>`, ilk gelen alır); bu sürümde kiracı başına sınır yoktur. Ad `zorven` veya `rpshell` içeremez (`409 name_reserved`);
+        ayrılmış kısa adlar da `409 name_reserved`, alınmış adlar `409 hostname_taken`,
+        ardışık tire (`--`) içeren etiket `422 invalid_name` döner.
+
+        **Geriye dönük uyumluluk:** `kind` göndermeyen istemciler eskiden kısa ad
+        alırdı; artık kiracı adı alırlar. Mevcut kısa adlar aynen çalışır.
       requestBody:
         required: true
         content:
@@ -323,6 +333,11 @@ paths:
               required: [name]
               properties:
                 name: { type: string, example: "api" }
+                kind:
+                  type: string
+                  enum: [scoped, short]
+                  default: scoped
+                  description: "scoped: ad--kiracı.platform (varsayılan); short: ad.platform (ilk gelen alır)"
                 tunnel_id: { type: string }
       responses:
         "201":
@@ -510,6 +525,112 @@ paths:
                 items: { $ref: "#/components/schemas/RequestLog" }
         "403": { $ref: "#/components/responses/Forbidden" }
 
+  /tunnels/{id}/access-events:
+    get:
+      tags: [Analytics]
+      summary: Tünel ziyaretçi giriş olayları
+      description: "Kapsam: `analytics:read`. Basic/OAuth giriş denemeleri (parola asla saklanmaz). En yeniden eskiye; cursor tabanlı sayfalama (`X-Next-Cursor`, `X-Has-More`)."
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 200 } }
+        - { name: cursor, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: Olay listesi
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/AccessEvent" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /tunnels/{id}/access-events/summary:
+    get:
+      tags: [Analytics]
+      summary: Tünel ziyaretçi giriş özeti
+      description: "Kapsam: `analytics:read`. Başarı/başarısızlık, yönteme/sağlayıcıya göre sayılar; benzersiz kimlik ve IP sayısı."
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: window, in: query, schema: { type: string, enum: ["24h", "7d", "30d"], default: "24h" } }
+      responses:
+        "200":
+          description: Özet
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AccessEventSummary" }
+        "400": { description: Geçersiz window }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /tunnels/{id}/door:
+    get:
+      tags: [Analytics]
+      summary: Web ile kapı açma ayarı (TCP/UDP)
+      description: "Kapsam: `tunnels:read`. Yalnızca ham TCP/UDP tünelleri. Kapı adresi ve bağlantı adresi döner."
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Kapı ayarı
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TunnelDoor" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: "Tünel TCP/UDP değil" }
+    put:
+      tags: [Analytics]
+      summary: Web ile kapı açmayı ayarla
+      description: "Kapsam: `tunnels:write`. Açmak için tünelde etkin bir giriş yöntemi (basic/oauth) gerekir. Süre: 3600, 43200 (varsayılan), 86400 veya 604800 saniye."
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled: { type: boolean }
+                duration_sec: { type: integer, enum: [3600, 43200, 86400, 604800], default: 43200 }
+      responses:
+        "200":
+          description: Kapı ayarı
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TunnelDoor" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: "Tünel TCP/UDP değil" }
+        "422": { description: "invalid_duration / access_not_configured" }
+
+  /tunnels/{id}/door/grants:
+    get:
+      tags: [Analytics]
+      summary: Aktif kapı izinleri (IP)
+      description: "Kapsam: `tunnels:read`. Süresi dolmamış, iptal edilmemiş izinler."
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/DoorGrant" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /tunnels/{id}/door/grants/{grantId}:
+    delete:
+      tags: [Analytics]
+      summary: Kapı iznini iptal et
+      description: "Kapsam: `tunnels:write`. O IP’nin açık bağlantıları da kesilir."
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: grantId, in: path, required: true, schema: { type: string } }
+      responses:
+        "204": { description: OK }
+        "404": { description: "İzin bulunamadı" }
+
   /subscription:
     get:
       tags: [Analytics]
@@ -639,7 +760,7 @@ components:
         id: { type: string, example: "hn_abc123" }
         tunnel_id: { type: string }
         fqdn: { type: string, example: "api.zorven.app" }
-        type: { type: string, enum: [global, scoped, legacy, custom] }
+        type: { type: string, enum: [global, scoped, legacy, custom], description: "global = kısa ad, scoped = kiracı adı" }
         verified: { type: boolean }
         created_at: { type: string, format: date-time }
 
@@ -655,6 +776,61 @@ components:
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
 
+    AccessEvent:
+      type: object
+      properties:
+        id: { type: string }
+        tunnel_id: { type: string }
+        hostname: { type: string }
+        method: { type: string, enum: [basic, oauth] }
+        provider: { type: string }
+        identity: { type: string }
+        success: { type: boolean }
+        reason: { type: string, description: "ok, bad_credentials, email_not_allowed, rate_limited, provider_not_configured" }
+        client_ip: { type: string }
+        user_agent: { type: string }
+        created_at: { type: string, format: date-time }
+    AccessEventSummary:
+      type: object
+      properties:
+        window: { type: string }
+        since: { type: string, format: date-time }
+        total: { type: integer }
+        success: { type: integer }
+        failure: { type: integer }
+        by_method: { type: object, additionalProperties: { type: integer } }
+        by_provider: { type: object, additionalProperties: { type: integer } }
+        by_reason: { type: object, additionalProperties: { type: integer } }
+        unique_identities: { type: integer }
+        unique_ips: { type: integer }
+        door_grants: { type: integer, description: "Web kapı: açılan kapı sayısı ve izinsiz reddedilen bağlantı/akış sayısı (dakika/IP başına toplanır). `total/success/failure` içine katılmaz." }
+        door_blocked: { type: integer }
+        door_blocked_ips: { type: integer }
+    TunnelDoor:
+      type: object
+      properties:
+        tunnel_id: { type: string }
+        enabled: { type: boolean }
+        duration_sec: { type: integer }
+        durations: { type: array, items: { type: integer } }
+        available: { type: boolean }
+        host: { type: string, example: "door--ssh--acme.zorven.app" }
+        url: { type: string, example: "https://door--ssh--acme.zorven.app/" }
+        connect_address: { type: string, example: "zorven.app:10005" }
+        proto: { type: string }
+        exposure: { type: string }
+        access_mode: { type: string }
+        access_ready: { type: boolean }
+    DoorGrant:
+      type: object
+      properties:
+        id: { type: string }
+        tunnel_id: { type: string }
+        ip: { type: string }
+        identity: { type: string }
+        method: { type: string, enum: [basic, oauth] }
+        expires_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
     RequestLog:
       type: object
       properties:

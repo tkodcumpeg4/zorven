@@ -32,10 +32,11 @@ func Run(ctx context.Context, p Pruner, log *slog.Logger, startDelay, interval t
 		res, err := p.PruneRetention(ctx)
 		if err != nil {
 			log.Warn("log saklama temizligi hata verdi", "hata", err)
-		} else if res.RequestLogs > 0 || res.UDPStats > 0 {
+		} else if res.RequestLogs > 0 || res.UDPStats > 0 || res.AccessEvents > 0 || res.DoorGrants > 0 {
 			log.Info("log saklama temizligi tamamlandi",
 				"gun", pgstore.RetentionDays(),
-				"request_logs", res.RequestLogs, "udp_stats", res.UDPStats)
+				"request_logs", res.RequestLogs, "udp_stats", res.UDPStats,
+				"access_events", res.AccessEvents, "door_grants", res.DoorGrants)
 		}
 		timer.Reset(interval)
 	}

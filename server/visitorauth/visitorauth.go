@@ -34,6 +34,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 )
@@ -68,6 +69,33 @@ type Manager struct {
 	lookup      PolicyLookup
 	client      *http.Client
 	log         *slog.Logger
+
+	// OnEvent, giris sonucu olaylarini (basari / izinsiz e-posta) bildirir.
+	// nil olabilir. Istek yolunu bloklamamalidir.
+	OnEvent func(Event)
+}
+
+// Event, bir ziyaretci OAuth giris sonucudur (erisim istatistikleri icin).
+type Event struct {
+	Host      string // tunel host'u
+	Provider  string
+	Email     string
+	Success   bool
+	Reason    string // ok | email_not_allowed
+	ClientIP  string
+	UserAgent string
+}
+
+func (m *Manager) emit(r *http.Request, host, provider, email string, success bool, reason string) {
+	if m == nil || m.OnEvent == nil {
+		return
+	}
+	ip := r.RemoteAddr
+	if i := strings.LastIndex(ip, ":"); i > 0 {
+		ip = strings.Trim(ip[:i], "[]")
+	}
+	m.OnEvent(Event{Host: host, Provider: provider, Email: email, Success: success,
+		Reason: reason, ClientIP: ip, UserAgent: r.UserAgent()})
 }
 
 // New, yapılandırılmış sağlayıcılarla bir Manager üretir. Hiç sağlayıcı yoksa
@@ -96,10 +124,14 @@ func (m *Manager) Enabled() bool {
 
 // ProviderNames, yapılandırılmış sağlayıcı adlarını döner (panel/hata mesajları için).
 func (m *Manager) ProviderNames() []string {
+	if m == nil {
+		return nil
+	}
 	out := make([]string, 0, len(m.providers))
 	for name := range m.providers {
 		out = append(out, name)
 	}
+	sort.Strings(out)
 	return out
 }
 
@@ -137,6 +169,22 @@ type sessionClaims struct {
 	Email string `json:"email"`
 	Host  string `json:"host"`
 	Exp   int64  `json:"exp"`
+	// IatMs, oturumun verilis zamani (unix milisaniye). Kapi (web door) oturum
+	// iptalinde kullanilir. Eski cerezlerde yoktur: verilis = Exp - sessionTTL.
+	IatMs int64 `json:"iatms,omitempty"`
+}
+
+// issuedAt, oturumun verilis zamanini doner (IatMs yoksa Exp - TTL).
+func (c sessionClaims) issuedAt() time.Time {
+	if c.IatMs > 0 {
+		return time.UnixMilli(c.IatMs)
+	}
+	return time.Unix(c.Exp, 0).Add(-sessionTTL)
+}
+
+func newSessionClaims(email, host string) sessionClaims {
+	now := time.Now()
+	return sessionClaims{Email: email, Host: host, Exp: now.Add(sessionTTL).Unix(), IatMs: now.UnixMilli()}
 }
 
 type stateClaims struct {
@@ -147,10 +195,16 @@ type stateClaims struct {
 }
 
 type grantClaims struct {
-	Email string `json:"email"`
-	Host  string `json:"host"`
-	RD    string `json:"rd"`
-	Exp   int64  `json:"exp"`
+	Provider string `json:"p,omitempty"`
+	// Allowed=false: e-posta doğrulandı ama izin listesinde değil. Oturum yine de
+	// kurulur ki ziyaretçi tünel host'unda markalı "erişim reddedildi" sayfasını
+	// görüp farklı hesapla giriş yapabilsin; ingress her istekte izin listesini
+	// yeniden denetler, yani bu oturum erişim SAĞLAMAZ.
+	Allowed bool   `json:"ok"`
+	Email   string `json:"email"`
+	Host    string `json:"host"`
+	RD      string `json:"rd"`
+	Exp     int64  `json:"exp"`
 }
 
 // --- Oturum denetimi (ingress hot-path) -------------------------------------
@@ -158,21 +212,40 @@ type grantClaims struct {
 // SessionEmail, isteğin geçerli bir ziyaretçi oturum çerezi taşıyıp taşımadığını
 // döner. Çerez host'a bağlıdır (başka tünelde yeniden kullanılamaz).
 func (m *Manager) SessionEmail(r *http.Request) (string, bool) {
+	email, _, ok := m.SessionInfo(r)
+	return email, ok
+}
+
+// SessionInfo, SessionEmail gibi gecerli oturumun e-postasini ve VERILIS zamanini
+// doner. Web door, grant iptalinden once verilmis oturumlari gecersiz saymak icin
+// kullanir.
+func (m *Manager) SessionInfo(r *http.Request) (email string, issued time.Time, ok bool) {
 	c, err := r.Cookie(sessionCookie)
 	if err != nil {
-		return "", false
+		return "", time.Time{}, false
 	}
 	var claims sessionClaims
 	if !m.verifyToken(c.Value, &claims) {
-		return "", false
+		return "", time.Time{}, false
 	}
 	if claims.Exp < time.Now().Unix() {
-		return "", false
+		return "", time.Time{}, false
 	}
 	if !strings.EqualFold(claims.Host, hostOnly(r.Host)) {
-		return "", false
+		return "", time.Time{}, false
 	}
-	return claims.Email, true
+	return claims.Email, claims.issuedAt(), true
+}
+
+// IssueSessionValueAt, IssueSessionValue gibi ama verilis zamani verilir (testler).
+func (m *Manager) IssueSessionValueAt(host, email string, at time.Time) string {
+	return m.signToken(sessionClaims{Email: email, Host: strings.ToLower(host), Exp: at.Add(sessionTTL).Unix(), IatMs: at.UnixMilli()})
+}
+
+// IssueSessionValue, host için imzalı bir _zva_session çerez DEĞERİ üretir
+// (testler ve araçlar için; normal akış /_zva/finish üzerinden ilerler).
+func (m *Manager) IssueSessionValue(host, email string) string {
+	return m.signToken(newSessionClaims(email, strings.ToLower(host)))
 }
 
 // EmailAllowed, e-postanın izin listesine göre geçip geçmediğini döner. Liste
@@ -206,6 +279,8 @@ func (m *Manager) ServeTunnelEndpoint(w http.ResponseWriter, r *http.Request) {
 		m.handleStart(w, r)
 	case "/_zva/finish":
 		m.handleFinish(w, r)
+	case "/_zva/logout":
+		m.handleLogout(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -256,6 +331,23 @@ func (m *Manager) handleStart(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, prov.AuthURL+"?"+q.Encode(), http.StatusFound)
 }
 
+// handleLogout, ziyaretçi oturum çerezini siler ve rd'ye (güvenli yol) döner.
+// Giriş sayfasındaki "farklı hesapla giriş" bağlantısı için kullanılır.
+func (m *Manager) handleLogout(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookie,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		Expires:  time.Unix(0, 0),
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteLaxMode,
+	})
+	w.Header().Set("Cache-Control", "no-store")
+	http.Redirect(w, r, safeRD(r.URL.Query().Get("rd")), http.StatusSeeOther)
+}
+
 func (m *Manager) handleFinish(w http.ResponseWriter, r *http.Request) {
 	var g grantClaims
 	if !m.verifyToken(r.URL.Query().Get("g"), &g) || g.Exp < time.Now().Unix() {
@@ -266,9 +358,12 @@ func (m *Manager) handleFinish(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Oturum jetonu bu host için geçerli değil.", http.StatusBadRequest)
 		return
 	}
-	sess := m.signToken(sessionClaims{
-		Email: g.Email, Host: g.Host, Exp: time.Now().Add(sessionTTL).Unix(),
-	})
+	sess := m.signToken(newSessionClaims(g.Email, g.Host))
+	// Yalnızca izinli e-postalar "ok" sayılır; izinsiz olan callback'te zaten
+	// email_not_allowed olarak kaydedildi (bkz. HandleCallback).
+	if g.Allowed {
+		m.emit(r, g.Host, g.Provider, g.Email, true, "ok")
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
 		Value:    sess,
@@ -323,13 +418,16 @@ func (m *Manager) HandleCallback(w http.ResponseWriter, r *http.Request) {
 		AllowedEmails []string `json:"allowed_emails"`
 	}
 	_ = json.Unmarshal(cfg, &pc)
-	if !EmailAllowed(email, pc.AllowedEmails) {
-		m.log.Info("ziyaretçi reddedildi (izin listesinde yok)", "email", email, "host", st.Host)
-		http.Error(w, "Erişim reddedildi: "+email+" bu tünele erişim yetkisine sahip değil.", http.StatusForbidden)
-		return
+	allowed := EmailAllowed(email, pc.AllowedEmails)
+	if !allowed {
+		if m.log != nil {
+			m.log.Info("ziyaretçi reddedildi (izin listesinde yok)", "email", email, "host", st.Host)
+		}
+		m.emit(r, st.Host, st.Provider, email, false, "email_not_allowed")
 	}
 
 	grant := m.signToken(grantClaims{
+		Provider: st.Provider, Allowed: allowed,
 		Email: email, Host: st.Host, RD: st.RD, Exp: time.Now().Add(grantTTL).Unix(),
 	})
 	dest := "https://" + st.Host + "/_zva/finish?g=" + url.QueryEscape(grant)

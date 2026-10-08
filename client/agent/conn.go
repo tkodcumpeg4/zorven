@@ -38,6 +38,8 @@ type Agent struct {
 	NoTerminal bool // true ise uzak kabuk (PTY) erisimi tamamen reddedilir
 	NoScreen   bool // true ise uzak ekran paylasimi tamamen reddedilir
 	IsService  bool // true ise arka plan sistem servisi olarak calisir
+	// AppKind, "desktop" ise hello'da bildirilir (masaustu uygulamasi).
+	AppKind string
 
 	// Version, bu ikilinin surumu (ldflags -X main.version ile gomulur).
 	// Oto-update, manifest.version bundan FARKLI ise guncelleme yapar.
@@ -288,11 +290,21 @@ func (a *Agent) connectOnce(ctx context.Context) error {
 	return a.readLoop(ctx, conn)
 }
 
+// clientVersion, hello'da bildirilen GERCEK ikili surumu (ldflags). Bos ise "dev".
+func (a *Agent) clientVersion() string {
+	if a.Version == "" {
+		return "dev"
+	}
+	return a.Version
+}
+
 func (a *Agent) handshake(ctx context.Context, conn *websocket.Conn) error {
 	hello, err := protocol.Marshal(protocol.Hello{
 		Type:          protocol.TypeHello,
-		ClientVersion: protocol.Version,
-		Platform:      runtime.GOOS + "/" + runtime.GOARCH,
+		ClientVersion:   a.clientVersion(),
+		ProtocolVersion: protocol.Version,
+		AppKind:         a.AppKind,
+		Platform:        runtime.GOOS + "/" + runtime.GOARCH,
 		// Akis kontrolunu destekledigimizi bildir. Sunucu desteklemiyorsa
 		// hello_ack'te geri onaylamaz ve eski davranis surer.
 		Features:        []string{protocol.FeatureFlowControl},

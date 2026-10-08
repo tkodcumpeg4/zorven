@@ -306,7 +306,11 @@ func (s *Server) resolveTenantForUser(ctx context.Context, u store.User) (store.
 		return store.Tenant{}, err
 	}
 
-	slug := slugify(u.GitHubLogin)
+	// Marka sozcugu iceren veya rezerve bir kullanici adi kayit akisini
+	// bozmadan donusturulur (kimlik avi: "zorven-login" gibi kiraci adi olmasin).
+	slug := store.SanitizeGeneratedSlug(slugify(u.GitHubLogin),
+		func(n string) bool { ok, _ := s.Store.IsReservedName(ctx, n); return ok },
+		func() string { return randomHex(3) })
 	if _, err := s.Store.GetTenantBySlug(ctx, slug); err == nil {
 		slug = slug + "-" + randomHex(3) // cakisma: kisa ek
 	} else if !errors.Is(err, store.ErrTenantNotFound) {

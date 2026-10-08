@@ -43,6 +43,7 @@ type Session struct {
 	RemoteAddr  string
 	ConnectedAt time.Time
 	IsService   bool
+	AppKind     string // "desktop" | "" (hello.app_kind)
 
 	metricsMu     sync.RWMutex
 	latestMetrics *protocol.Metrics

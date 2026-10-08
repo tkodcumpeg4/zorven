@@ -210,7 +210,10 @@ func (h *Handler) handshake(ctx context.Context, s *Session) error {
 	if err := json.Unmarshal(data, &hello); err != nil {
 		return err
 	}
+	// ClientVersion = ikilinin GERCEK surumu (panelde gosterilir); protokol
+	// uyumlulugu X-Tunnel-Client-Version basligiyla ayri denetlenir.
 	s.Version, s.Platform = hello.ClientVersion, hello.Platform
+	s.AppKind = hello.AppKind
 	s.IsService = hello.IsService
 	if hello.Metrics != nil {
 		s.SetMetrics(hello.Metrics)

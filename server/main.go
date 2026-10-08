@@ -21,9 +21,11 @@ import (
 	"golang.org/x/crypto/acme/autocert"
 
 	"github.com/spf13/cobra"
+	"github.com/tkodcumpeg4/zorven/server/accesslog"
 	"github.com/tkodcumpeg4/zorven/server/api"
 	"github.com/tkodcumpeg4/zorven/server/auth"
 	"github.com/tkodcumpeg4/zorven/server/bandwidth"
+	"github.com/tkodcumpeg4/zorven/server/door"
 	"github.com/tkodcumpeg4/zorven/server/entitlements"
 	"github.com/tkodcumpeg4/zorven/server/events"
 	"github.com/tkodcumpeg4/zorven/server/ingress"
@@ -198,6 +200,13 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 			}, log)
 			go logPersister.Run(ctx)
 
+			// Ziyaretci erisim olaylari (Basic/OAuth giris istatistikleri): istek
+			// yolunu bloklamadan toplu yazilir.
+			accessPersister := accesslog.NewPersister(func(pctx context.Context, batch []accesslog.Event) error {
+				return st.InsertAccessEvents(pctx, batch)
+			}, log)
+			go accessPersister.Run(ctx)
+
 			// Log saklama temizligi: sabit sure, ZORVEN_LOG_RETENTION_DAYS (vars. 30);
 			// acilistan 1 dk sonra, sonra saatlik.
 			if pr, ok := st.(retention.Pruner); ok {
@@ -270,23 +279,33 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 			// Webmail: ZORVEN_MAIL_DOMAIN ayarliysa gelen mail alicisini baslat ve
 			// giden gonderici'yi kur. Bos ise webmail tamamen kapalidir.
 			mailDomain := strings.ToLower(strings.TrimSpace(os.Getenv("ZORVEN_MAIL_DOMAIN")))
+			// Mail istemcisi (IMAP / SMTP gonderim) sunuculari TLS yuklendikten sonra baslar.
+			var mailSender *mail.Sender
+			var mailSysLocalParts []string
+			var mailAuto *mail.AutoConfigHandler
 			if mailDomain != "" {
 				relay := firstNonEmpty(os.Getenv("ZORVEN_MAIL_RELAY"), "mail:587")
 				inboundAddr := firstNonEmpty(os.Getenv("ZORVEN_MAIL_INBOUND_ADDR"), ":25")
 				apiSrv.MailDomain = mailDomain
 				apiSrv.MailSender = mail.NewSender(relay, mailDomain)
+				mailSender = apiSrv.MailSender
 				// Site sistem posta kutulari (info@, sales@ ... @platformDomain). Owner
 				// bunlara gelenleri ten_default'ta gorur ve bunlardan gonderir.
 				sysLocalParts := strings.Fields(strings.ReplaceAll(firstNonEmpty(
 					os.Getenv("ZORVEN_SYSTEM_MAILBOXES"),
 					"info hello contact support sales abuse admin kvkk legal privacy postmaster no-reply",
 				), ",", " "))
+				mailSysLocalParts = sysLocalParts
 				if apiSrv.PlatformDomain != "" {
 					for _, lp := range sysLocalParts {
 						apiSrv.SystemMailboxes = append(apiSrv.SystemMailboxes, lp+"@"+apiSrv.PlatformDomain)
 					}
 				}
-				mailSrv := mail.NewServer(st, mailDomain, apiSrv.PlatformDomain, sysLocalParts, inboundAddr)
+				// Yerel alicilar (slug@mail.<domain>, info@<platform>) relay'e gitmez,
+				// dogrudan INBOX'a teslim edilir (gelen :25 ile ayni kurallar).
+				mailLocal := mail.NewLocal(st, mailDomain, apiSrv.PlatformDomain, sysLocalParts)
+				apiSrv.MailSender.Local = mailLocal
+				mailSrv := mail.NewServerLocal(mailLocal, inboundAddr)
 				go func() {
 					log.Info("webmail: gelen SMTP alicisi baslatildi", "addr", inboundAddr, "domain", mailDomain)
 					if err := mailSrv.ListenAndServe(); err != nil {
@@ -385,6 +404,36 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 			}
 			apiSrv.Captures = captures
 
+			// Web ile kapi acma (ham TCP/UDP tunelleri): grant onbellegi + reddedilen
+			// baglanti sayaclari. Plan kapisi (acikta no-op); rawMgr asagida kurulur, iptalde
+			// o IP'nin acik baglantilari kesilir.
+			doorSvc := door.New(st, accessPersister, log)
+			doorSvc.Gate = func(gctx context.Context, tenantID string) error {
+				err := entitlementSvc.CheckFeature(gctx, tenantID, entitlements.FeatureWebDoor)
+				var ee *entitlements.EntitlementError
+				if errors.As(err, &ee) {
+					// Plan reddi (gecici DB hatasindan ayirt edilir).
+					return door.ErrNotAvailable
+				}
+				return err
+			}
+			doorSvc.OnChange = func() {
+				if err := router.Reload(ctx); err != nil {
+					log.Warn("tunel eslestirmeleri tazelenemedi", "hata", err)
+				}
+				if rawMgr != nil {
+					rawMgr.Reload()
+				}
+			}
+			doorSvc.OnRevoke = func(tunnelID, ip string) {
+				if rawMgr != nil {
+					rawMgr.CloseDoorConns(tunnelID, ip)
+				}
+			}
+			go doorSvc.Run(ctx)
+			apiSrv.Door = doorSvc
+			proxy.Door = doorSvc
+
 			// Ziyaretçi OAuth (tünel mode=oauth): tünel arkasındaki servise erişen
 			// dış kullanıcıları Google/GitHub ile doğrular. İmza sırrı ve en az bir
 			// sağlayıcı creds'i yoksa kendiliğinden devre dışı (oauth modu fail-closed).
@@ -424,6 +473,9 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				log,
 			)
 			proxy.Visitor = visitorMgr
+			proxy.BasicSecret = []byte(visitorSecret)
+			proxy.AccessEvents = accessPersister
+			visitorMgr.OnEvent = proxy.RecordVisitorEvent
 			if visitorMgr.Enabled() {
 				log.Info("ziyaretci OAuth erisim denetimi ACIK",
 					"saglayicilar", visitorMgr.ProviderNames(), "callback_host", visitorHost)
@@ -462,6 +514,7 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				}
 				return out, nil
 			})
+			rawMgr.Door = doorSvc
 			rawMgr.Start(ctx)
 
 			// Gecici tunel supurucusu (FAZ 2 / F07): suresi dolan tunelleri
@@ -608,6 +661,16 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 			}
 
 			mux := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// Mail istemcisi otomatik yapilandirma (Thunderbird autoconfig, Outlook
+				// Autodiscover): public, IP basina hiz sinirli; yalnizca kendi hostlarinda.
+				if mailAuto != nil && mailAuto.Match(r) {
+					if !publicLimiter.Allow(ipOf(r)) {
+						tooManyRequests(w)
+						return
+					}
+					mailAuto.ServeHTTP(w, r)
+					return
+				}
 				// analytics.<domain>: tum istekler Umami'ye (kok yolda). Control/tunel
 				// yonlendirmesinden ONCE, kendi host'unda calisir.
 				if analyticsProxy != nil && ingress.HostMatchesAny(r.Host, analyticsHosts) {
@@ -705,6 +768,46 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				acmeEmail = firstNonEmpty(acmeEmail, os.Getenv("ZORVEN_ACME_EMAIL"))
 				platDomain := firstNonEmpty(platformDomain, os.Getenv("ZORVEN_PLATFORM_DOMAIN"))
 				dualCertMgr = tlscert.NewDualCertManager(&defaultCert, platDomain, controlHosts, st, acmeEmail, autocertCache)
+
+				// Mail istemcisi erisimi: IMAP (993) + kimlik dogrulamali SMTP gonderim
+				// (587 STARTTLS, 465 TLS). Yalnizca ZORVEN_MAIL_DOMAIN + TLS varken.
+				// Adres degeri "off" ise ilgili sunucu kapali; bos ise varsayilan.
+				if mailDomain != "" {
+					addrOr := func(env, def string) string {
+						v := strings.TrimSpace(os.Getenv(env))
+						if v == "" {
+							v = def
+						}
+						if mail.DisabledAddr(v) {
+							return ""
+						}
+						return v
+					}
+					cc, mcErr := mail.StartClientServers(ctx, mail.ClientServersConfig{
+						Store:            st,
+						MailDomain:       mailDomain,
+						PlatformDomain:   apiSrv.PlatformDomain,
+						SystemLocalParts: mailSysLocalParts,
+						Relay:            mailSender,
+						TLS: &tls.Config{
+							MinVersion:     tls.VersionTLS12,
+							GetCertificate: dualCertMgr.GetCertificate,
+						},
+						Logger:           log,
+						Host:             os.Getenv("ZORVEN_MAIL_CLIENT_HOST"),
+						IMAPAddr:         addrOr("ZORVEN_IMAP_ADDR", ":993"),
+						IMAPStartTLSAddr: addrOr("ZORVEN_IMAP_STARTTLS_ADDR", "off"),
+						SubmissionAddr:   addrOr("ZORVEN_SUBMISSION_ADDR", ":587"),
+						SubmissionsAddr:  addrOr("ZORVEN_SUBMISSIONS_ADDR", ":465"),
+					})
+					if mcErr != nil {
+						log.Warn("mail istemcisi sunuculari baslatilamadi", "hata", mcErr)
+					} else if cc != nil {
+						apiSrv.MailClient = cc
+						mailAuto = mail.NewAutoConfigHandler(*cc)
+						platformHostList = append(platformHostList, mailAuto.Hosts()...)
+					}
+				}
 				baseNextProtos := []string{"h2", "http/1.1", "acme-tls/1"}
 				srv.TLSConfig = &tls.Config{
 					GetCertificate: dualCertMgr.GetCertificate,

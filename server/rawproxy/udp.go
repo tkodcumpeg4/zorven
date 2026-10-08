@@ -95,6 +95,10 @@ type udpFlow struct {
 	cancel   context.CancelFunc
 	lastSeen int64       // unix nano (mu altinda)
 	bucket   tokenBucket // flow PPS (yalnizca okuma dongusu)
+
+	// Web-door: yalnizca grant sayesinde kabul edilen flow'lar icin.
+	grantExp time.Time // sifir degilse flow bu ana kadar yasayabilir
+	unreg    func()    // grant iptalinde kesilebilmesi icin kayit silici
 }
 
 // udpCounters, dinleyici basladigindan beri biriken sayaclar.
@@ -240,23 +244,25 @@ func (ul *udpListener) handle(src *net.UDPAddr, data []byte) {
 
 // openFlow, yeni kaynak adres icin ajana akis acar. Basarisizsa nil.
 func (ul *udpListener) openFlow(ti TunnelInfo, src *net.UDPAddr, key string) *udpFlow {
-	// IP izin listesi (varsa).
-	if ul.m.IPFilter != nil && ti.TenantID != "" {
-		if allowed, err := ul.m.IPFilter.CheckAllowed(ul.m.baseCtx, ti.TenantID, ti.TunnelID, src.IP.String()); err == nil && !allowed {
-			return nil
-		}
+	// IP izin listesi ve/veya web-door grant'i (yalnizca yeni flow'da; paket basina degil).
+	ok, grantExp := ul.m.admit(ul.m.ctx(), ti, src.IP.String())
+	if !ok {
+		return nil
 	}
 	sess, online := ul.m.Hub.Get(ti.ClientID)
 	if !online {
 		return nil
 	}
-	ctx, cancel := context.WithCancel(ul.m.baseCtx)
+	ctx, cancel := context.WithCancel(ul.m.ctx())
 	stream, err := sess.OpenStream(ctx, ti.TunnelID, "udp", key)
 	if err != nil {
 		cancel()
 		return nil
 	}
-	f := &udpFlow{stream: stream, cancel: cancel, lastSeen: time.Now().UnixNano()}
+	f := &udpFlow{stream: stream, cancel: cancel, lastSeen: time.Now().UnixNano(), grantExp: grantExp}
+	if !grantExp.IsZero() {
+		f.unreg = ul.m.doorConns.add(ti.TunnelID, src.IP.String(), func() { ul.removeFlow(key, f) })
+	}
 	ul.mu.Lock()
 	ul.flows[key] = f
 	if len(ul.flows) > ul.peakFlows {
@@ -318,6 +324,9 @@ func (ul *udpListener) removeFlow(key string, f *udpFlow) {
 		delete(ul.flows, key)
 	}
 	ul.mu.Unlock()
+	if f.unreg != nil {
+		f.unreg()
+	}
 	f.cancel()
 	f.stream.Close("flow closed")
 }
@@ -338,7 +347,7 @@ func (ul *udpListener) idleSweep() {
 			var stale []staleFlow
 			ul.mu.Lock()
 			for k, f := range ul.flows {
-				if f.lastSeen < cutoff {
+				if f.lastSeen < cutoff || (!f.grantExp.IsZero() && time.Now().After(f.grantExp)) {
 					stale = append(stale, staleFlow{k, f})
 				}
 			}

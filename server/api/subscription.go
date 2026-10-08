@@ -1,7 +1,9 @@
 package api
 
 import (
+	"context"
 	"net/http"
+	"time"
 
 	"github.com/tkodcumpeg4/zorven/server/store"
 )
@@ -44,6 +46,15 @@ func (s *Server) getSubscription(w http.ResponseWriter, r *http.Request) {
 func (s *Server) planChanged(tenantID string) {
 	if s.OnPlanChange != nil {
 		s.OnPlanChange(tenantID)
+	}
+	// Plan Pro altina dustuyse web kapilar kalici kapatilir ve grant'ler iptal edilir
+	// (router yeniden yuklenmeden ONCE, ki kapi host'u dogru durumla yuklensin).
+	if s.Door != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if _, err := s.Door.EnforcePlan(ctx, tenantID); err != nil {
+			s.logger().Warn("plan dususunde web kapilar kapatilamadi", "tenant_id", tenantID, "hata", err)
+		}
+		cancel()
 	}
 	s.tunnelsChanged()
 }

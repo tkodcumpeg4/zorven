@@ -158,6 +158,26 @@ func (e *Engine) CheckAllowed(ctx context.Context, tenantID, tunnelID, clientIPS
 	return false, nil
 }
 
+// HasRules, bu tunel icin ETKIN bir statik izin listesi olup olmadigini soyler.
+// Plan IP izin listesini icermiyorsa (CheckAllowed'in bypass ettigi durum) veya
+// kapsayan aktif kural yoksa false. Web-door "statik liste yoksa varsayilan
+// reddet" karari icin kullanilir.
+func (e *Engine) HasRules(ctx context.Context, tenantID, tunnelID string) bool {
+	if e.ent != nil {
+		if err := e.ent.CheckFeature(ctx, tenantID, entitlements.FeatureIPAllowlist); err != nil {
+			return false
+		}
+	}
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	for _, r := range e.rules[tenantID] {
+		if r.TunnelID == "" || r.TunnelID == tunnelID {
+			return true
+		}
+	}
+	return false
+}
+
 // ParseCIDR, tek IP veya CIDR girdisini standart *net.IPNet yapisina cevirir.
 func ParseCIDR(s string) (net.IP, *net.IPNet, error) {
 	s = strings.TrimSpace(s)

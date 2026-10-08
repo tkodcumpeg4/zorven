@@ -67,6 +67,19 @@ func (m *DualCertManager) HostPolicy(ctx context.Context, host string) error {
 	return nil
 }
 
+// hasCachedCert, autocert onbelleginde host icin sertifika var mi (RSA/ECDSA anahtarlari).
+func (m *DualCertManager) hasCachedCert(ctx context.Context, host string) bool {
+	if m.AutocertManager == nil || m.AutocertManager.Cache == nil {
+		return false
+	}
+	for _, k := range []string{host, host + "+rsa"} {
+		if _, err := m.AutocertManager.Cache.Get(ctx, k); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
 // GetCertificate, TLS el sikismasinda SNI'a gore dogru sertifikayi doner.
 func (m *DualCertManager) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	sni := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(hello.ServerName), "."))
@@ -96,7 +109,8 @@ func (m *DualCertManager) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certi
 		return nil, fmt.Errorf("ozel alan adi bulunamadi veya henuz dogrulanmadi: %s", sni)
 	}
 
-	// 4. ACME manager varsa gercek Let's Encrypt sertifikasi uret/al:
+	// 4. ACME manager varsa gercek Let's Encrypt sertifikasi uret/al
+	// (askidaki domainlerde HostPolicy yalnizca onbellekteki sertifikaya izin verir):
 	if m.AutocertManager != nil {
 		return m.AutocertManager.GetCertificate(hello)
 	}

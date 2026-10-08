@@ -44,7 +44,19 @@ func (h *Handler) serveWebSocket(w http.ResponseWriter, r *http.Request, sess *t
 	ctx := r.Context()
 	// Istek basliklari OLDUGU GIBI iletilir (Upgrade, Connection, Sec-WebSocket-*);
 	// ajan bu el sikismasini yerel servise aynen tekrarlar.
-	stream, err := sess.OpenWS(ctx, tunnelID, r.URL.Path, r.URL.RawQuery, map[string][]string(r.Header))
+	wsHeaders := make(map[string][]string, len(r.Header))
+	for k, v := range r.Header {
+		wsHeaders[k] = v
+	}
+	// Zorven oturum cerezleri backend'e gitmez.
+	if cv, ok := wsHeaders["Cookie"]; ok {
+		if kept := stripAuthCookies(cv); len(kept) > 0 {
+			wsHeaders["Cookie"] = kept
+		} else {
+			delete(wsHeaders, "Cookie")
+		}
+	}
+	stream, err := sess.OpenWS(ctx, tunnelID, r.URL.Path, r.URL.RawQuery, wsHeaders)
 	if err != nil {
 		logRec.status = http.StatusBadGateway
 		writeError(w, r, http.StatusBadGateway, protocol.CodeClientOffline,

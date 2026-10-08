@@ -16,6 +16,7 @@ import (
 type fakeStore struct {
 	store.Store
 	routes []store.HostRoute
+	doors  []store.HostRoute
 }
 
 func (f *fakeStore) ListHostRoutes(context.Context) ([]store.HostRoute, error) {
@@ -24,6 +25,10 @@ func (f *fakeStore) ListHostRoutes(context.Context) ([]store.HostRoute, error) {
 
 func (f *fakeStore) ListPathRouteEntries(context.Context) ([]store.HostRoute, error) {
 	return nil, nil
+}
+
+func (f *fakeStore) ListDoorRoutes(context.Context) ([]store.HostRoute, error) {
+	return f.doors, nil
 }
 
 func (f *fakeStore) ListPolicyRoutes(context.Context) ([]store.PolicyRoute, error) {

@@ -43,6 +43,9 @@ func scopedFQDN(tunnelName, tenantSlug, platform string) string {
 	return tunnelName + "--" + tenantSlug + "." + platform
 }
 
+// brandReservedMsg, marka deseniyle (zorven/rpshell iceren) reddedilen adlar icin.
+const brandReservedMsg = "bu ad marka korumasi nedeniyle ayrilmis (zorven / rpshell iceren adlar alinamaz)"
+
 // --- hostnames -------------------------------------------------------------
 
 func (s *Server) listHostnames(w http.ResponseWriter, r *http.Request) {
@@ -86,8 +89,21 @@ func (s *Server) createHostname(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		TunnelID string `json:"tunnel_id"`
 		Name     string `json:"name"`
+		// Kind: "scoped" (varsayilan) -> <ad>--<kiraci>.<platform>;
+		// "short" -> <ad>.<platform> (global, ilk gelen alir; Pro ve ustu).
+		Kind string `json:"kind"`
 	}
 	if !decode(w, r, &body) {
+		return
+	}
+	kind := strings.ToLower(strings.TrimSpace(body.Kind))
+	switch kind {
+	case "", "scoped":
+		kind = "scoped"
+	case "short":
+	default:
+		writeJSONError(w, http.StatusUnprocessableEntity, "invalid_kind",
+			`kind "scoped" veya "short" olmali`)
 		return
 	}
 	if body.Name == "" {
@@ -116,21 +132,50 @@ func (s *Server) createHostname(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	reserved, err := s.Store.IsReservedName(r.Context(), name)
-	if err != nil {
-		s.fail(w, err)
-		return
-	}
-	fqdn := name + "." + s.PlatformDomain
-	// K1: reserved_names tablosu eksik kalsa bile platformun calisma zamanindaki
-	// kendi hostlari (--control-host, analytics, ziyaretci callback'i) alinamaz.
-	if !reserved && s.ReservedHost != nil && s.ReservedHost(fqdn) {
-		reserved = true
-	}
-	if reserved {
-		writeJSONError(w, http.StatusConflict, "name_reserved",
-			"bu ad platform icin ayrilmis")
-		return
+	var fqdn string
+	htype := store.HostTypeScoped
+	if kind == "short" {
+		// Kisa ad (global, ilk gelen alir): acik surumde sayi siniri yoktur;
+		// platform yoneticisi marka/rezerve desen kurallarindan muaftir.
+		platAdmin := isPlatformAdmin(r.Context())
+		if !platAdmin && store.ContainsBrandKeyword(name) {
+			writeJSONError(w, http.StatusConflict, "name_reserved", brandReservedMsg)
+			return
+		}
+		// Tam eslesmeli rezerve adlar (altyapi hostlari dahil) platform
+		// yoneticisi icin de gecerlidir; yalnizca marka DESENI ve kota muaftir.
+		reserved, err := s.Store.IsReservedName(r.Context(), name)
+		if err != nil {
+			s.fail(w, err)
+			return
+		}
+		fqdn = name + "." + s.PlatformDomain
+		// K1: reserved_names tablosu eksik kalsa bile platformun calisma zamanindaki
+		// kendi hostlari (--control-host, analytics, ziyaretci callback'i) alinamaz.
+		if !reserved && s.ReservedHost != nil && s.ReservedHost(fqdn) {
+			reserved = true
+		}
+		if reserved {
+			writeJSONError(w, http.StatusConflict, "name_reserved",
+				"bu ad platform icin ayrilmis")
+			return
+		}
+		htype = store.HostTypeGlobal
+	} else {
+		// Kiraci kapsamli ad: "--" ayraci yuzunden global adlarla cakisamaz
+		// (validateLabel "--" iceren girdiyi zaten reddetti). Marka deseni
+		// (zorven/rpshell iceren etiket) kimlik avini onlemek icin burada da
+		// reddedilir; platform yoneticisi bile muaf degildir.
+		if store.ContainsBrandKeyword(name) {
+			writeJSONError(w, http.StatusConflict, "name_reserved", brandReservedMsg)
+			return
+		}
+		tenant, err := s.Store.GetTenant(r.Context(), tenantID)
+		if err != nil {
+			s.fail(w, err)
+			return
+		}
+		fqdn = scopedFQDN(name, tenant.Slug, s.PlatformDomain)
 	}
 
 	// Tunel belirtilmisse bu kiraciya ait mi?
@@ -143,7 +188,7 @@ func (s *Server) createHostname(w http.ResponseWriter, r *http.Request) {
 	}
 
 	projID, _ := s.projectFor(r)
-	h, err := s.Store.AddHostnameWithProject(r.Context(), tenantID, body.TunnelID, fqdn, store.HostTypeGlobal, projID)
+	h, err := s.Store.AddHostnameWithProject(r.Context(), tenantID, body.TunnelID, fqdn, htype, projID)
 	if errors.Is(err, store.ErrHostnameTaken) {
 		writeJSONError(w, http.StatusConflict, "hostname_taken", fqdn+" zaten alinmis")
 		return

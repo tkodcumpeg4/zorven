@@ -126,9 +126,8 @@ func (a *App) InstallUpdate() string {
 	if err != nil {
 		return "Güncelleme indirilemedi."
 	}
-	sum := sha256.Sum256(data)
-	if !strings.EqualFold(hex.EncodeToString(sum[:]), f.SHA256) {
-		return "İndirilen dosya doğrulanamadı (sha256 uyuşmuyor); güncelleme uygulanmadı."
+	if msg := verifyDownload(data, f.SHA256, f.Size); msg != "" {
+		return msg
 	}
 
 	exe, err := os.Executable()
@@ -153,6 +152,23 @@ func (a *App) InstallUpdate() string {
 		}
 		os.Exit(0)
 	}()
+	return ""
+}
+
+// verifyDownload, indirilen verinin sha256'sini, (verildiyse) boyutunu ve
+// Windows'ta calistirilabilir (MZ) olup olmadigini denetler. Bos donerse
+// dosya uygulanabilir; aksi halde kullaniciya gosterilecek hata metni.
+func verifyDownload(data []byte, wantSHA string, wantSize int64) string {
+	sum := sha256.Sum256(data)
+	if !strings.EqualFold(hex.EncodeToString(sum[:]), wantSHA) {
+		return "İndirilen dosya doğrulanamadı (sha256 uyuşmuyor); güncelleme uygulanmadı."
+	}
+	if wantSize > 0 && int64(len(data)) != wantSize {
+		return "İndirilen dosya boyutu beklenenle uyuşmuyor; güncelleme uygulanmadı."
+	}
+	if runtime.GOOS == "windows" && !bytes.HasPrefix(data, []byte("MZ")) {
+		return "İndirilen dosya geçerli bir uygulama değil; güncelleme uygulanmadı."
+	}
 	return ""
 }
 

@@ -312,7 +312,20 @@ paths:
     post:
       tags: [Hostnames]
       summary: Create platform hostname
-      description: "Scope: `hostnames:write`. A short name under the platform domain."
+      description: |
+        Scope: `hostnames:write`. Allocates a name under the platform domain.
+
+        **`kind` defaults to `scoped`** (tenant name): `<name>--<tenant-slug>.<platform>`,
+        exclusively yours. **`kind: short`** allocates a global short name
+        (`<name>.<platform>`, first come first served); there is no per-tenant limit
+        in this edition. Names cannot contain
+        `zorven` or `rpshell` (`409 name_reserved`); reserved short names are also
+        `409 name_reserved`, taken names `409 hostname_taken`, and labels containing
+        consecutive hyphens (`--`) return `422 invalid_name`.
+
+        **Backward compatibility:** clients that omit `kind` used to receive a short
+        name; they now receive a tenant name. Existing short names keep working.
+
       requestBody:
         required: true
         content:
@@ -322,6 +335,11 @@ paths:
               required: [name]
               properties:
                 name: { type: string, example: "api" }
+                kind:
+                  type: string
+                  enum: [scoped, short]
+                  default: scoped
+                  description: "scoped: name--tenant.platform (default); short: name.platform (first come first served)"
                 tunnel_id: { type: string }
       responses:
         "201":
@@ -509,6 +527,112 @@ paths:
                 items: { $ref: "#/components/schemas/RequestLog" }
         "403": { $ref: "#/components/responses/Forbidden" }
 
+  /tunnels/{id}/access-events:
+    get:
+      tags: [Analytics]
+      summary: Tunnel visitor sign-in events
+      description: "Scope: `analytics:read`. Basic/OAuth sign-in attempts (passwords are never stored). Newest first; cursor pagination (`X-Next-Cursor`, `X-Has-More`)."
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 200 } }
+        - { name: cursor, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: Event list
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/AccessEvent" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /tunnels/{id}/access-events/summary:
+    get:
+      tags: [Analytics]
+      summary: Tunnel visitor sign-in summary
+      description: "Scope: `analytics:read`. Success/failure counts, by method and provider; unique identities and IPs."
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: window, in: query, schema: { type: string, enum: ["24h", "7d", "30d"], default: "24h" } }
+      responses:
+        "200":
+          description: Summary
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AccessEventSummary" }
+        "400": { description: Invalid window }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /tunnels/{id}/door:
+    get:
+      tags: [Analytics]
+      summary: Web door setting (TCP/UDP)
+      description: "Scope: `tunnels:read`. Raw TCP/UDP tunnels only. Returns the door URL and the connection address."
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Door setting
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TunnelDoor" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: "Tunnel is not TCP/UDP" }
+    put:
+      tags: [Analytics]
+      summary: Configure the web door
+      description: "Scope: `tunnels:write`. Enabling requires a configured sign-in method (basic/oauth) on the tunnel. Duration: 3600, 43200 (default), 86400 or 604800 seconds."
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled: { type: boolean }
+                duration_sec: { type: integer, enum: [3600, 43200, 86400, 604800], default: 43200 }
+      responses:
+        "200":
+          description: Door setting
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TunnelDoor" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: "Tunnel is not TCP/UDP" }
+        "422": { description: "invalid_duration / access_not_configured" }
+
+  /tunnels/{id}/door/grants:
+    get:
+      tags: [Analytics]
+      summary: Active door grants (IPs)
+      description: "Scope: `tunnels:read`. Grants that are neither expired nor revoked."
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/DoorGrant" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /tunnels/{id}/door/grants/{grantId}:
+    delete:
+      tags: [Analytics]
+      summary: Revoke a door grant
+      description: "Scope: `tunnels:write`. Open connections from that IP are closed too."
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: grantId, in: path, required: true, schema: { type: string } }
+      responses:
+        "204": { description: OK }
+        "404": { description: "Grant not found" }
+
   /subscription:
     get:
       tags: [Analytics]
@@ -638,7 +762,7 @@ components:
         id: { type: string, example: "hn_abc123" }
         tunnel_id: { type: string }
         fqdn: { type: string, example: "api.zorven.app" }
-        type: { type: string, enum: [global, scoped, legacy, custom] }
+        type: { type: string, enum: [global, scoped, legacy, custom], description: "global = short name, scoped = tenant name" }
         verified: { type: boolean }
         created_at: { type: string, format: date-time }
 
@@ -654,6 +778,61 @@ components:
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
 
+    AccessEvent:
+      type: object
+      properties:
+        id: { type: string }
+        tunnel_id: { type: string }
+        hostname: { type: string }
+        method: { type: string, enum: [basic, oauth] }
+        provider: { type: string }
+        identity: { type: string }
+        success: { type: boolean }
+        reason: { type: string, description: "ok, bad_credentials, email_not_allowed, rate_limited, provider_not_configured" }
+        client_ip: { type: string }
+        user_agent: { type: string }
+        created_at: { type: string, format: date-time }
+    AccessEventSummary:
+      type: object
+      properties:
+        window: { type: string }
+        since: { type: string, format: date-time }
+        total: { type: integer }
+        success: { type: integer }
+        failure: { type: integer }
+        by_method: { type: object, additionalProperties: { type: integer } }
+        by_provider: { type: object, additionalProperties: { type: integer } }
+        by_reason: { type: object, additionalProperties: { type: integer } }
+        unique_identities: { type: integer }
+        unique_ips: { type: integer }
+        door_grants: { type: integer, description: "Web door: number of doors opened and of connections/flows rejected without a grant (aggregated per minute/IP). Not included in `total/success/failure`." }
+        door_blocked: { type: integer }
+        door_blocked_ips: { type: integer }
+    TunnelDoor:
+      type: object
+      properties:
+        tunnel_id: { type: string }
+        enabled: { type: boolean }
+        duration_sec: { type: integer }
+        durations: { type: array, items: { type: integer } }
+        available: { type: boolean }
+        host: { type: string, example: "door--ssh--acme.zorven.app" }
+        url: { type: string, example: "https://door--ssh--acme.zorven.app/" }
+        connect_address: { type: string, example: "zorven.app:10005" }
+        proto: { type: string }
+        exposure: { type: string }
+        access_mode: { type: string }
+        access_ready: { type: boolean }
+    DoorGrant:
+      type: object
+      properties:
+        id: { type: string }
+        tunnel_id: { type: string }
+        ip: { type: string }
+        identity: { type: string }
+        method: { type: string, enum: [basic, oauth] }
+        expires_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
     RequestLog:
       type: object
       properties:

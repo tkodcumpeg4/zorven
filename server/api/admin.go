@@ -199,10 +199,6 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		m.Next.ServeHTTP(w, r)
 		return
 	}
-	if strings.HasPrefix(r.URL.Path, "/_cluster/") {
-		m.Next.ServeHTTP(w, r)
-		return
-	}
 
 	// 1. Better Auth oturum cerezi kontrolu (better-auth.session_token veya __Secure-better-auth.session_token)
 	if m.BetterAuth != nil {

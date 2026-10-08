@@ -86,7 +86,7 @@ func errorPage(status int, code, msg string) string {
 </head>
 <body>
   <div class="card">
-    <p class="code">` + html.EscapeString(code) + `</p>
+    <p class="code" lang="en">` + html.EscapeString(code) + `</p>
     <h1>` + http.StatusText(status) + `</h1>
     <p>` + html.EscapeString(msg) + `</p>
     <div class="status"><span class="dot"></span>zorven tunnel</div>

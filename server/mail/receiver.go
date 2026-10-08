@@ -9,13 +9,17 @@ package mail
 
 import (
 	"context"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"strings"
 	"time"
+	"unicode/utf8"
 
+	"github.com/emersion/go-message"
+	_ "github.com/emersion/go-message/charset" // ISO-8859-x, windows-125x vb. cozumleme
 	"github.com/emersion/go-message/mail"
 	"github.com/emersion/go-smtp"
 	"github.com/tkodcumpeg4/zorven/server/store"
@@ -26,37 +30,29 @@ const (
 	maxRecipients   = 50
 )
 
-// Backend, gelen SMTP oturumlari icin store + domain baglamini tutar.
+// Backend, gelen SMTP oturumlari icin yerel teslim baglamini tutar.
 type Backend struct {
-	Store store.Store
-	// Domain, kiraci webmail domaini (or. "mail.zorven.app"): <slug>@Domain.
-	Domain string
-	// PlatformDomain, sitenin kendi domaini (or. "zorven.app"). Bu domain uzerinde
-	// yalnizca SystemLocalParts icindeki adresler kabul edilir (info@, sales@ ...)
-	// ve platform kiracisina (ten_default) yonlendirilir — owner gorur/yanitlar.
-	PlatformDomain   string
-	SystemLocalParts map[string]bool
+	// Local, adres cozumleme + INBOX teslimi (SMTP gonderim ve panel ile ortak).
+	Local *Local
 }
 
 // NewServer, verilen adreste (or. ":25") dinleyecek yapilandirilmis bir SMTP
 // sunucusu doner. Cagiran taraf go ile server.ListenAndServe() calistirir.
+//
+// domain: kiraci webmail domaini (or. "mail.zorven.app"): <slug>@domain.
+// platformDomain: sitenin kendi domaini (or. "zorven.app"); bu domain uzerinde
+// yalnizca systemLocalParts (info@, sales@ ...) kabul edilir ve platform
+// kiracisina (ten_default) yonlendirilir — owner gorur/yanitlar.
 func NewServer(st store.Store, domain, platformDomain string, systemLocalParts []string, addr string) *smtp.Server {
-	sys := make(map[string]bool, len(systemLocalParts))
-	for _, lp := range systemLocalParts {
-		lp = strings.ToLower(strings.TrimSpace(lp))
-		if lp != "" {
-			sys[lp] = true
-		}
-	}
-	be := &Backend{
-		Store:            st,
-		Domain:           strings.ToLower(strings.TrimSpace(domain)),
-		PlatformDomain:   strings.ToLower(strings.TrimSpace(platformDomain)),
-		SystemLocalParts: sys,
-	}
+	return NewServerLocal(NewLocal(st, domain, platformDomain, systemLocalParts), addr)
+}
+
+// NewServerLocal, hazir bir Local ile gelen SMTP sunucusu kurar.
+func NewServerLocal(l *Local, addr string) *smtp.Server {
+	be := &Backend{Local: l}
 	s := smtp.NewServer(be)
 	s.Addr = addr
-	s.Domain = be.Domain
+	s.Domain = l.MailDomain
 	s.ReadTimeout = 60 * time.Second
 	s.WriteTimeout = 60 * time.Second
 	s.MaxMessageBytes = maxMessageBytes
@@ -69,16 +65,10 @@ func (b *Backend) NewSession(_ *smtp.Conn) (smtp.Session, error) {
 	return &session{be: b}, nil
 }
 
-// recipient, cozulmus bir alicidir (bize ait, gecerli slug).
-type recipient struct {
-	tenantID string
-	addr     string
-}
-
 type session struct {
 	be   *Backend
 	from string
-	rcpt []recipient
+	rcpt []string
 }
 
 func (s *session) Mail(from string, _ *smtp.MailOptions) error {
@@ -92,30 +82,22 @@ func (s *session) Rcpt(to string, _ *smtp.RcptOptions) error {
 	if at < 0 {
 		return &smtp.SMTPError{Code: 550, Message: "gecersiz alici adresi"}
 	}
-	local, domain := to[:at], to[at+1:]
-	if local == "" {
+	if to[:at] == "" {
 		return &smtp.SMTPError{Code: 550, Message: "gecersiz alici"}
 	}
-
-	// (1) Sistem adresi: <lp>@<platformDomain> (info@zorven.app gibi). Platform
-	// kiracisina (ten_default) yonlendirilir; owner panelden gorur/yanitlar.
-	if s.be.PlatformDomain != "" && domain == s.be.PlatformDomain {
-		if s.be.SystemLocalParts[local] {
-			s.rcpt = append(s.rcpt, recipient{tenantID: store.DefaultTenantID, addr: to})
-			return nil
-		}
-		return &smtp.SMTPError{Code: 550, Message: "boyle bir posta kutusu yok"}
-	}
-
-	// (2) Kiraci webmail adresi: <slug>@<mailDomain>.
-	if domain != s.be.Domain {
+	// Yalnizca bizim alan adlarimiz ve var olan kutular (open relay degil).
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, local, err := s.be.Local.Resolve(ctx, to)
+	switch {
+	case !local:
 		return &smtp.SMTPError{Code: 550, Message: "bu sunucu bu domain icin mail kabul etmiyor"}
-	}
-	t, err := s.be.Store.GetTenantBySlug(context.Background(), local)
-	if err != nil {
+	case errors.Is(err, ErrNoSuchMailbox):
 		return &smtp.SMTPError{Code: 550, Message: "boyle bir posta kutusu yok"}
+	case err != nil:
+		return &smtp.SMTPError{Code: 451, Message: "gecici hata, sonra tekrar deneyin"}
 	}
-	s.rcpt = append(s.rcpt, recipient{tenantID: t.ID, addr: to})
+	s.rcpt = append(s.rcpt, to)
 	return nil
 }
 
@@ -128,41 +110,14 @@ func (s *session) Data(r io.Reader) error {
 		return fmt.Errorf("mail govdesi okunamadi: %w", err)
 	}
 
-	subject, fromAddr, text, html, messageID, inReplyTo, attachments := parseMessage(raw)
-	if fromAddr == "" {
-		fromAddr = s.from
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	for _, rc := range s.rcpt {
-		saved, err := s.be.Store.InsertMailMessage(ctx, store.MailMessage{
-			TenantID:  rc.tenantID,
-			Direction: "inbound",
-			From:      fromAddr,
-			To:        rc.addr,
-			Subject:   subject,
-			TextBody:  text,
-			HTMLBody:  html,
-			MessageID: messageID,
-			InReplyTo: inReplyTo,
-			Seen:      false,
-			Raw:       string(raw),
-		})
-		if err != nil {
-			log.Printf("[mail] gelen mail kaydedilemedi (tenant=%s): %v", rc.tenantID, err)
-			return &smtp.SMTPError{Code: 451, Message: "gecici depolama hatasi, sonra tekrar deneyin"}
-		}
-		for _, att := range attachments {
-			att.MessageID = saved.ID
-			att.TenantID = rc.tenantID
-			if err := s.be.Store.InsertMailAttachment(ctx, att); err != nil {
-				log.Printf("[mail] ek kaydedilemedi (msg=%s): %v", saved.ID, err)
-			}
-		}
+	n, err := s.be.Local.Deliver(ctx, s.from, s.rcpt, raw)
+	if err != nil {
+		return &smtp.SMTPError{Code: 451, Message: "gecici depolama hatasi, sonra tekrar deneyin"}
 	}
-	log.Printf("[mail] %d aliciya gelen mail teslim edildi (from=%s subject=%q)", len(s.rcpt), fromAddr, subject)
+	log.Printf("[mail] %d aliciya gelen mail teslim edildi (from=%s)", n, s.from)
 	return nil
 }
 
@@ -176,9 +131,31 @@ func (s *session) Logout() error { return nil }
 // parseMessage, ham RFC822 mesajindan konu, gonderen, metin/html govde ve
 // Message-ID/In-Reply-To basliklarini cikarir. Coklu parcali (multipart)
 // mesajlarda ilk text/plain ve text/html parcalari alinir; ekler atlanir.
+//
+// Donen metinler Postgres TEXT'e guvenle yazilabilir (NUL temiz, gecerli UTF-8);
+// birebir bayt korumasi ham mesajda (raw_bytes) yapilir.
 func parseMessage(raw []byte) (subject, from, text, html, messageID, inReplyTo string, attachments []store.MailAttachment) {
-	mr, err := mail.CreateReader(strings.NewReader(string(raw)))
-	if err != nil {
+	subject, from, text, html, messageID, inReplyTo, attachments = parseMessageRaw(raw)
+	return cleanText(subject), from, cleanText(text), cleanText(html), messageID, inReplyTo, attachments
+}
+
+// cleanText, TEXT sutununa yazilamayan NUL baytlarini ve gecersiz UTF-8'i temizler.
+func cleanText(s string) string {
+	if s == "" {
+		return s
+	}
+	if strings.IndexByte(s, 0) >= 0 {
+		s = strings.ReplaceAll(s, "\x00", "")
+	}
+	if !utf8.ValidString(s) {
+		s = strings.ToValidUTF8(s, "?")
+	}
+	return s
+}
+
+func parseMessageRaw(raw []byte) (subject, from, text, html, messageID, inReplyTo string, attachments []store.MailAttachment) {
+	mr, err := mail.CreateReader(bytes.NewReader(raw))
+	if err != nil && !message.IsUnknownCharset(err) {
 		// Parse edilemezse en azindan ham govdeyi metin olarak sakla.
 		return "", "", string(raw), "", "", "", nil
 	}

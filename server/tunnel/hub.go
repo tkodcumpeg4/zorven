@@ -62,6 +62,7 @@ func (h *Hub) Get(clientID string) (*Session, bool) {
 type Status struct {
 	Online     bool
 	Version    string
+	AppKind    string
 	Platform   string
 	RemoteAddr string
 	LastSeen   time.Time
@@ -77,6 +78,7 @@ func (h *Hub) Statuses() map[string]Status {
 		out[id] = Status{
 			Online:     true,
 			Version:    s.Version,
+			AppKind:    s.AppKind,
 			Platform:   s.Platform,
 			RemoteAddr: s.RemoteAddr,
 			LastSeen:   s.LastSeen(),

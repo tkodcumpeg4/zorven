@@ -140,6 +140,8 @@ func (a *App) connect(target string) string {
 		CACertPath:      cfg.CACertPath,
 		NoTerminal:      cfg.NoTerminal,
 		NoScreen:        cfg.NoScreen,
+		Version:         version,
+		AppKind:         "desktop",
 		Log:             a.log,
 		// Eski (iptal edilmis) ajanin gec gelen "durduruldu" durumu yeni
 		// baglantinin durumunu ezmesin: yalnizca aktif ajan yayin yapar.
