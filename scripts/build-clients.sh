@@ -13,6 +13,19 @@ VERSION="${1:-dev}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="$ROOT/dist"
 
+# Imzali guncelleme (F-13): ozel anahtar dosyasi ZORUNLU (ZORVEN_RELEASE_KEY_FILE)
+# ve acik anahtar istemciye gomulu olmali; yoksa yayin yapilmaz. Bkz. docs/release-signing.md
+if [ "$VERSION" != "dev" ]; then
+  if [ -z "${ZORVEN_RELEASE_KEY_FILE:-}" ] || [ ! -f "$ZORVEN_RELEASE_KEY_FILE" ]; then
+    echo "HATA: ZORVEN_RELEASE_KEY_FILE tanimli degil ya da dosya yok; manifest imzalanamaz." >&2
+    exit 1
+  fi
+  if ! grep -Eq '"[A-Za-z0-9+/]{43}="' "$ROOT/shared/updatesig/keys.go"; then
+    echo "HATA: shared/updatesig/keys.go PublicKeys bos; acik anahtar gomulmeden istemci yayinlanmaz." >&2
+    exit 1
+  fi
+fi
+
 # GOOS/GOARCH/uzanti/insan-okunur-ad
 TARGETS=(
   "windows/amd64/.exe/Windows (Intel/AMD 64-bit)"
@@ -69,12 +82,25 @@ sha_of() { sha256sum "$1" 2>/dev/null | awk '{print $1}' || shasum -a 256 "$1" |
     sz=$(wc -c < "$src" | tr -d ' ')
     [ $first -eq 1 ] || printf ',\n'
     first=0
-    printf '    "%s/%s": {"name": "%s", "sha256": "%s", "size": %s}' \
-      "$goos" "$goarch" "$served" "$sha" "$sz"
+    # windows/amd64 yalniz "+cli" anahtariyla: eski masaustu surumlerinin (<=0.2.4)
+    # gomulu ajani duz anahtari okuyup CLI'yi masaustu exe'sinin uzerine yaziyordu.
+    key="$goos/$goarch"
+    [ "$key" = "windows/amd64" ] && key="windows/amd64+cli"
+    printf '    "%s": {"name": "%s", "sha256": "%s", "size": %s}' \
+      "$key" "$served" "$sha" "$sz"
   done
   printf '\n  }\n}\n'
 } > "$OUT/manifest.json"
 echo "  -> $OUT/manifest.json (surum $VERSION)"
+
+if [ "$VERSION" != "dev" ]; then
+  echo
+  echo "manifest imzalaniyor..."
+  # desktop.json (masaustu yayini) dist'te varsa o da imzalanir.
+  SIGN_FILES=("$OUT/manifest.json")
+  [ -f "$OUT/desktop.json" ] && SIGN_FILES+=("$OUT/desktop.json")
+  go run "$ROOT/scripts/release-sign.go" "${SIGN_FILES[@]}"
+fi
 
 echo
 echo "Tamamlandi -> $OUT"

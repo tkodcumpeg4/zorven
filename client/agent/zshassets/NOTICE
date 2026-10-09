@@ -1,0 +1,13 @@
+Zorven istemcisi asagidaki ucuncu taraf zsh eklentilerini degistirmeden gomer
+(go:embed) ve uzak terminalde zsh acilirken kullanir. Lisans metinleri ilgili
+dizinlerdedir; ikili dagitimlarda bu bildirim korunmalidir.
+
+- zsh-autosuggestions v0.7.1  (MIT)
+  https://github.com/zsh-users/zsh-autosuggestions
+  Copyright (c) 2013 Thiago de Arruda, (c) 2016-2021 Eric Freese
+  Lisans: zsh-autosuggestions/LICENSE
+
+- zsh-syntax-highlighting 0.8.0  (BSD-3-Clause)
+  https://github.com/zsh-users/zsh-syntax-highlighting
+  Copyright (c) 2010-2020 zsh-syntax-highlighting contributors
+  Lisans: zsh-syntax-highlighting/COPYING.md

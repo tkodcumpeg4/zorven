@@ -63,6 +63,8 @@ type Status struct {
 	Online     bool
 	Version    string
 	AppKind    string
+	Shells     []protocol.ShellInfo
+	DefaultShell string
 	Platform   string
 	RemoteAddr string
 	LastSeen   time.Time
@@ -79,6 +81,8 @@ func (h *Hub) Statuses() map[string]Status {
 			Online:     true,
 			Version:    s.Version,
 			AppKind:    s.AppKind,
+			Shells:     s.Shells,
+			DefaultShell: s.DefaultShell,
 			Platform:   s.Platform,
 			RemoteAddr: s.RemoteAddr,
 			LastSeen:   s.LastSeen(),

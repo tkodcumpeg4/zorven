@@ -28,6 +28,23 @@ func (m *mockDNSVerifier) LookupTXT(ctx context.Context, name string) ([]string,
 	return nil, errors.New("txt not found")
 }
 
+// F-36: IP literal, localhost ve ic ag son ekleri reddedilir; .test/.example
+// (e2e) ve sondaki nokta kabul edilir.
+func TestValidateDomain_ReservedAndIP(t *testing.T) {
+	bad := []string{"1.2.3.4", "127.0.0.1", "::1", "[::1]", "localhost", "localhost.", "app.localhost", "printer.local", "db.internal", "a.b.internal."}
+	for _, d := range bad {
+		if err := ValidateDomain(d, "rpshell.app"); err == nil {
+			t.Errorf("ValidateDomain(%q) reddedilmeliydi", d)
+		}
+	}
+	good := []string{"a.example.test", "foo.example.com", "api.example.com.", "API.Example.COM"}
+	for _, d := range good {
+		if err := ValidateDomain(d, "rpshell.app"); err != nil {
+			t.Errorf("ValidateDomain(%q) kabul edilmeliydi: %v", d, err)
+		}
+	}
+}
+
 func TestValidateDomain(t *testing.T) {
 	platform := "rpshell.app"
 
@@ -127,5 +144,30 @@ func TestGetInstructions(t *testing.T) {
 	instDef := GetInstructions("api.musteri.com", "zrv-verify-abc", "")
 	if instDef.CNAMETarget != "cname.zorven.app" {
 		t.Errorf("varsayilan CNAMETarget cname.zorven.app olmali, got: %s", instDef.CNAMETarget)
+	}
+}
+
+func TestVerifyCustomDomain_CNAMEExactOnly(t *testing.T) {
+	ctx := context.Background()
+	platform := "rpshell.app"
+	mock := &mockDNSVerifier{
+		cnames: map[string]string{
+			"ok.example.com":    "cname.rpshell.app.",
+			"upper.example.com": "CNAME.RPShell.app",
+			"other.example.com": "victim-tunnel.rpshell.app.",
+			"apex.example.com":  "rpshell.app.",
+			"deep.example.com":  "x.cname.rpshell.app.",
+		},
+		txts: map[string][]string{},
+	}
+	for _, h := range []string{"ok.example.com", "upper.example.com"} {
+		if err := VerifyCustomDomain(ctx, h, "tok", platform, mock); err != nil {
+			t.Errorf("%s kabul edilmeli: %v", h, err)
+		}
+	}
+	for _, h := range []string{"other.example.com", "apex.example.com", "deep.example.com"} {
+		if err := VerifyCustomDomain(ctx, h, "tok", platform, mock); !errors.Is(err, ErrVerificationFailed) {
+			t.Errorf("%s reddedilmeli, got %v", h, err)
+		}
 	}
 }

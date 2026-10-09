@@ -19,11 +19,11 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/minio/selfupdate"
+	"github.com/tkodcumpeg4/zorven/shared/updatesig"
 	wailsrt "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
@@ -66,20 +66,41 @@ func (a *App) updateBase() string {
 var updateHTTP = &http.Client{Timeout: 60 * time.Second}
 
 func (a *App) fetchDesktopManifest(ctx context.Context) (desktopManifest, error) {
-	var m desktopManifest
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, a.updateBase()+"/bin/desktop.json", nil)
-	resp, err := updateHTTP.Do(req)
+	body, err := fetchUpdateFile(ctx, a.updateBase()+"/bin/desktop.json")
 	if err != nil {
-		return m, fmt.Errorf("sunucuya ulaşılamadı")
+		return desktopManifest{}, err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return m, fmt.Errorf("sürüm bilgisi alınamadı (HTTP %d)", resp.StatusCode)
+	sig, err := fetchUpdateFile(ctx, a.updateBase()+"/bin/desktop.json.sig")
+	if err != nil {
+		return desktopManifest{}, fmt.Errorf("güncelleme imzası alınamadı")
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&m); err != nil {
+	return parseSignedManifest(body, sig, nil)
+}
+
+// parseSignedManifest, desktop.json baytlarini imza dogrulandiktan SONRA
+// ayristirir (keys nil ise gomulu acik anahtarlar).
+func parseSignedManifest(body, sig []byte, keys []string) (desktopManifest, error) {
+	var m desktopManifest
+	if err := updatesig.Verify(body, sig, keys); err != nil {
+		return m, fmt.Errorf("%s; güncelleme uygulanmadı", updatesig.Describe(err))
+	}
+	if err := json.Unmarshal(body, &m); err != nil {
 		return m, fmt.Errorf("sürüm bilgisi okunamadı")
 	}
 	return m, nil
+}
+
+func fetchUpdateFile(ctx context.Context, url string) ([]byte, error) {
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	resp, err := updateHTTP.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("sunucuya ulaşılamadı")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("sürüm bilgisi alınamadı (HTTP %d)", resp.StatusCode)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 }
 
 // CheckForUpdate, sunucudaki en son masaustu surumunu sorgular.
@@ -107,6 +128,10 @@ func (a *App) InstallUpdate() string {
 	m, err := a.fetchDesktopManifest(ctx)
 	if err != nil {
 		return err.Error()
+	}
+	// Downgrade / ayni surum engeli (imzali olsa bile eski manifest tekrar sunulabilir).
+	if !newerVersion(m.Version, version) {
+		return "Zaten güncel; manifest sürümü mevcut sürümden büyük değil."
 	}
 	f, ok := m.Files[runtime.GOOS+"/"+runtime.GOARCH]
 	if !ok || f.Name == "" || f.SHA256 == "" {
@@ -172,27 +197,5 @@ func verifyDownload(data []byte, wantSHA string, wantSize int64) string {
 	return ""
 }
 
-// newerVersion, a > b ise true ("0.2.0" > "0.1.6"; "v" oneki ve on-surum
-// eki yok sayilir). Sayisal olmayan parca 0 sayilir.
-func newerVersion(a, b string) bool {
-	pa, pb := versionParts(a), versionParts(b)
-	for i := 0; i < 3; i++ {
-		if pa[i] != pb[i] {
-			return pa[i] > pb[i]
-		}
-	}
-	return false
-}
-
-func versionParts(v string) [3]int {
-	v = strings.TrimPrefix(strings.TrimSpace(v), "v")
-	if i := strings.IndexAny(v, "-+"); i >= 0 {
-		v = v[:i]
-	}
-	var out [3]int
-	for i, p := range strings.SplitN(v, ".", 3) {
-		n, _ := strconv.Atoi(p)
-		out[i] = n
-	}
-	return out
-}
+// newerVersion, a > b ise true (ortak updatesig.Newer).
+func newerVersion(a, b string) bool { return updatesig.Newer(a, b) }

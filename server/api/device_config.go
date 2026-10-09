@@ -100,6 +100,9 @@ func (s *Server) setDeviceConfig(w http.ResponseWriter, r *http.Request) {
 	if !requireScope(w, r, ScopeClientsWrite) {
 		return
 	}
+	if !s.requirePrivilegedCaller(w, r) {
+		return
+	}
 	tenantID, ok := s.deviceConfigGate(w, r)
 	if !ok {
 		return

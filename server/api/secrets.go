@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"regexp"
 	"net/http"
 	"strings"
 
@@ -31,6 +32,10 @@ func (s *Server) listSecrets(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// secretNameRe, {{secret:ad}} basvuru ayristiricisinin (ingress.secretRefRe)
+// kabul ettigi kumenin guvenli alt kumesidir.
+var secretNameRe = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
+
 func (s *Server) createSecret(w http.ResponseWriter, r *http.Request) {
 	tenantID, ok := s.tenantFor(r)
 	if !ok {
@@ -58,6 +63,11 @@ func (s *Server) createSecret(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.TrimSpace(body.Name) == "" {
 		writeJSONError(w, http.StatusBadRequest, "bad_request", "secret adı gerekli")
+		return
+	}
+	if !secretNameRe.MatchString(body.Name) {
+		writeJSONError(w, http.StatusUnprocessableEntity, "invalid_name",
+			"secret adı 1-64 karakter olmalı ve yalnız harf, rakam, _ . - içermeli")
 		return
 	}
 	if body.Value == "" {

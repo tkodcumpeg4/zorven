@@ -26,6 +26,10 @@ type Config struct {
 	NoTerminal bool `json:"no_terminal"`
 	NoScreen   bool `json:"no_screen"`
 
+	// TerminalPlainZsh / TerminalPlainBash: uzak terminalde Zorven kabuk profilini kapat.
+	TerminalPlainZsh  bool `json:"terminal_plain_zsh,omitempty"`
+	TerminalPlainBash bool `json:"terminal_plain_bash,omitempty"`
+
 	// HideToTray, pencere kapatilinca cikmak yerine sistem tepsisine gizlensin mi.
 	HideToTray bool `json:"hide_to_tray"`
 

@@ -137,21 +137,31 @@ func (m *Manager) ProviderNames() []string {
 
 // --- İmza yardımcıları ------------------------------------------------------
 
-func (m *Manager) signToken(v any) string {
+// Jeton amaclari: HMAC'e alan ayrimi icin etiket olarak katilir; bir amac icin
+// uretilen jeton baska amacla dogrulanamaz.
+const (
+	purposeState   = "zva-state|"
+	purposeGrant   = "zva-grant|"
+	purposeSession = "zva-session|"
+)
+
+func (m *Manager) signToken(purpose string, v any) string {
 	payload, _ := json.Marshal(v)
 	body := base64.RawURLEncoding.EncodeToString(payload)
 	mac := hmac.New(sha256.New, m.secret)
+	mac.Write([]byte(purpose))
 	mac.Write([]byte(body))
 	sig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 	return body + "." + sig
 }
 
-func (m *Manager) verifyToken(tok string, out any) bool {
+func (m *Manager) verifyToken(purpose, tok string, out any) bool {
 	body, sig, found := strings.Cut(tok, ".")
 	if !found || body == "" || sig == "" {
 		return false
 	}
 	mac := hmac.New(sha256.New, m.secret)
+	mac.Write([]byte(purpose))
 	mac.Write([]byte(body))
 	want := mac.Sum(nil)
 	got, err := base64.RawURLEncoding.DecodeString(sig)
@@ -225,7 +235,7 @@ func (m *Manager) SessionInfo(r *http.Request) (email string, issued time.Time, 
 		return "", time.Time{}, false
 	}
 	var claims sessionClaims
-	if !m.verifyToken(c.Value, &claims) {
+	if !m.verifyToken(purposeSession, c.Value, &claims) {
 		return "", time.Time{}, false
 	}
 	if claims.Exp < time.Now().Unix() {
@@ -239,13 +249,13 @@ func (m *Manager) SessionInfo(r *http.Request) (email string, issued time.Time, 
 
 // IssueSessionValueAt, IssueSessionValue gibi ama verilis zamani verilir (testler).
 func (m *Manager) IssueSessionValueAt(host, email string, at time.Time) string {
-	return m.signToken(sessionClaims{Email: email, Host: strings.ToLower(host), Exp: at.Add(sessionTTL).Unix(), IatMs: at.UnixMilli()})
+	return m.signToken(purposeSession, sessionClaims{Email: email, Host: strings.ToLower(host), Exp: at.Add(sessionTTL).Unix(), IatMs: at.UnixMilli()})
 }
 
 // IssueSessionValue, host için imzalı bir _zva_session çerez DEĞERİ üretir
 // (testler ve araçlar için; normal akış /_zva/finish üzerinden ilerler).
 func (m *Manager) IssueSessionValue(host, email string) string {
-	return m.signToken(newSessionClaims(email, strings.ToLower(host)))
+	return m.signToken(purposeSession, newSessionClaims(email, strings.ToLower(host)))
 }
 
 // EmailAllowed, e-postanın izin listesine göre geçip geçmediğini döner. Liste
@@ -314,7 +324,7 @@ func (m *Manager) handleStart(w http.ResponseWriter, r *http.Request) {
 	rd := safeRD(r.URL.Query().Get("rd"))
 	host := hostOnly(r.Host)
 
-	state := m.signToken(stateClaims{
+	state := m.signToken(purposeState, stateClaims{
 		Host: host, Provider: pName, RD: rd, Exp: time.Now().Add(stateTTL).Unix(),
 	})
 
@@ -350,7 +360,7 @@ func (m *Manager) handleLogout(w http.ResponseWriter, r *http.Request) {
 
 func (m *Manager) handleFinish(w http.ResponseWriter, r *http.Request) {
 	var g grantClaims
-	if !m.verifyToken(r.URL.Query().Get("g"), &g) || g.Exp < time.Now().Unix() {
+	if !m.verifyToken(purposeGrant, r.URL.Query().Get("g"), &g) || g.Exp < time.Now().Unix() {
 		http.Error(w, "Geçersiz veya süresi dolmuş oturum jetonu.", http.StatusBadRequest)
 		return
 	}
@@ -358,7 +368,7 @@ func (m *Manager) handleFinish(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Oturum jetonu bu host için geçerli değil.", http.StatusBadRequest)
 		return
 	}
-	sess := m.signToken(newSessionClaims(g.Email, g.Host))
+	sess := m.signToken(purposeSession, newSessionClaims(g.Email, g.Host))
 	// Yalnızca izinli e-postalar "ok" sayılır; izinsiz olan callback'te zaten
 	// email_not_allowed olarak kaydedildi (bkz. HandleCallback).
 	if g.Allowed {
@@ -386,7 +396,7 @@ func (m *Manager) HandleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var st stateClaims
-	if !m.verifyToken(r.URL.Query().Get("state"), &st) || st.Exp < time.Now().Unix() {
+	if !m.verifyToken(purposeState, r.URL.Query().Get("state"), &st) || st.Exp < time.Now().Unix() {
 		http.Error(w, "Geçersiz veya süresi dolmuş state.", http.StatusBadRequest)
 		return
 	}
@@ -426,7 +436,7 @@ func (m *Manager) HandleCallback(w http.ResponseWriter, r *http.Request) {
 		m.emit(r, st.Host, st.Provider, email, false, "email_not_allowed")
 	}
 
-	grant := m.signToken(grantClaims{
+	grant := m.signToken(purposeGrant, grantClaims{
 		Provider: st.Provider, Allowed: allowed,
 		Email: email, Host: st.Host, RD: st.RD, Exp: time.Now().Add(grantTTL).Unix(),
 	})
@@ -542,8 +552,39 @@ func hostOnly(h string) string {
 
 // safeRD, açık yönlendirmeyi (open redirect) engeller: yalnızca aynı host'ta
 // mutlak yol (/...) kabul edilir; aksi halde köke düşer.
-func safeRD(rd string) string {
-	if rd == "" || !strings.HasPrefix(rd, "/") || strings.HasPrefix(rd, "//") {
+func safeRD(rd string) string { return SafeRedirectPath(rd) }
+
+func hasBadPathByte(v string) bool {
+	for i := 0; i < len(v); i++ {
+		if c := v[i]; c < 0x20 || c == 0x7f || c == '\\' {
+			return true
+		}
+	}
+	return false
+}
+
+// SafeRedirectPath, yalniz ayni-host mutlak yola ("/...") izin verir. Ters egik
+// cizgi, kontrol karakterleri, "//" ve "/\" onekleri, sema/host ve cok uzun
+// degerler reddedilir (kok "/" doner). Ingress de bu dogrulayiciyi kullanir.
+func SafeRedirectPath(rd string) string {
+	if rd == "" || len(rd) > 2048 || rd[0] != '/' {
+		return "/"
+	}
+	if len(rd) > 1 && (rd[1] == '/' || rd[1] == '\\') {
+		return "/"
+	}
+	if hasBadPathByte(rd) {
+		return "/"
+	}
+	// Yuzde-kodlu ters egik cizgi / kontrol karakteri / cift egik cizgi (%5C, %09, /%2F) de reddedilir.
+	dec, err := url.PathUnescape(rd)
+	if err != nil {
+		return "/"
+	}
+	if dec != rd && (hasBadPathByte(dec) || (len(dec) > 1 && dec[1] == '/')) {
+		return "/"
+	}
+	if u, err := url.Parse(rd); err != nil || u.Scheme != "" || u.Host != "" {
 		return "/"
 	}
 	return rd

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"io"
 	"net/http"
 	"path"
@@ -321,13 +322,13 @@ func compileActionWith(a rawAction, secrets map[string]string, newLim func(perSe
 	case "verify_webhook":
 		prov := strings.ToLower(strings.TrimSpace(a.Provider))
 		if !isKnownWebhookProvider(prov) {
-			// Bilinmeyen saglayici: kurali sessizce acik birakmak yerine dusur.
-			return policyAction{kind: actNoop}, nil
+			return failClosedAction("verify_webhook", "bilinmeyen saglayici: "+prov)
 		}
 		sec, ok := resolveSecretRef(a.SecretRef, secrets)
 		if !ok || sec == "" {
-			// Secret cozulemedi: fail-closed — kural devre disi.
-			return policyAction{kind: actNoop}, nil
+			// Secret cozulemedi (silinmis/yanlis ad/vault anahtari yok): kurali
+			// dusurmek imzasiz istegi backend'e gecirirdi, bu yuzden 503 ile kapat.
+			return failClosedAction("verify_webhook", "secret cozulemedi")
 		}
 		tol := time.Duration(a.ToleranceSec) * time.Second
 		if tol <= 0 {
@@ -337,13 +338,11 @@ func compileActionWith(a rawAction, secrets map[string]string, newLim func(perSe
 	case "waf":
 		base, ok := wafRuleset(a.Ruleset)
 		if !ok {
-			// Bilinmeyen kume: kullanici korundugunu sanmasin, kurali dusur.
-			return policyAction{kind: actNoop}, nil
+			return failClosedAction("waf", "bilinmeyen kume: "+a.Ruleset)
 		}
 		custom, ok := compileWAFPatterns(a.Patterns)
 		if !ok {
-			// Gecersiz regex: yine fail-closed.
-			return policyAction{kind: actNoop}, nil
+			return failClosedAction("waf", "gecersiz regex")
 		}
 		rules := make([]*regexp.Regexp, 0, len(base)+len(custom))
 		rules = append(rules, base...)
@@ -352,6 +351,19 @@ func compileActionWith(a rawAction, secrets map[string]string, newLim func(perSe
 	default:
 		return policyAction{kind: actNoop}, nil
 	}
+}
+
+// failClosedAction, derlenemeyen GUVENLIK kurali (webhook/WAF) icin eslesen her
+// istegi 503 ile reddeden kural uretir. Kurali sessizce dusurmek korumayi kaldirip
+// istegi backend'e gecirirdi (fail-open); 503 "yapilandirma bozuk" anlamina gelir.
+func failClosedAction(kind, reason string) (policyAction, *ratelimit.Limiter) {
+	slog.Warn("guvenlik kurali derlenemedi, eslesen istekler 503 ile reddedilecek",
+		"kural", kind, "neden", reason)
+	return policyAction{
+		kind:    actDeny,
+		status:  http.StatusServiceUnavailable,
+		message: "Güvenlik politikası yapılandırması geçersiz; istek reddedildi.",
+	}, nil
 }
 
 // --- {{secret:ad}} cozumu (FAZ 1 Part 2 / S0) ---

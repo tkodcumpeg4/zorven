@@ -2,6 +2,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -188,6 +189,13 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				"cok fazla istek, lutfen biraz sonra tekrar deneyin")
 			return
 		}
+		if r.URL.Path == healthPath && hasCredentials(r) {
+			// Kimlikli saglik istegi: gecerliyse surum/istemci sayisi da doner;
+			// gecersizse sessizce kimliksiz (yalniz status) yanita dusulur.
+			if m.healthProbe(w, r) {
+				return
+			}
+		}
 		m.Next.ServeHTTP(w, r)
 		return
 	}
@@ -195,10 +203,16 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// kendi tek-kullanimlik bilet mekanizmalariyla dogrulanirlar. Yalnizca
 	// /terminal veya /screen ile biten yollar muaf; bilet gecersizse handler
 	// 401 dondurur / baglantiyi kapatir.
-	if strings.HasSuffix(r.URL.Path, "/terminal") || strings.HasSuffix(r.URL.Path, "/screen") {
+	if isTicketWSRoute(r) {
 		m.Next.ServeHTTP(w, r)
 		return
 	}
+
+	m.serveAuthenticated(w, r)
+}
+
+// serveAuthenticated, kimlik dogrulama zinciri (oturum cerezi, API token, admin anahtari).
+func (m *Middleware) serveAuthenticated(w http.ResponseWriter, r *http.Request) {
 
 	// 1. Better Auth oturum cerezi kontrolu (better-auth.session_token veya __Secure-better-auth.session_token)
 	if m.BetterAuth != nil {
@@ -244,6 +258,11 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 							"hesabiniz hicbir organizasyonun uyesi degil")
 						return
 					}
+					if !knownRole(mr) {
+						writeJSONError(w, http.StatusForbidden, "forbidden",
+							"rolunuz bu islem icin yetkili degil")
+						return
+					}
 					activeTenant, role = t, mr
 				}
 				ctx := withTenant(r.Context(), activeTenant)
@@ -271,8 +290,15 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				if !m.csrfCheck(w, r) {
 					return
 				}
+				user, ok := m.resolveLegacySession(r.Context(), sess)
+				if !ok {
+					writeJSONError(w, http.StatusUnauthorized, "session_revoked",
+						"oturum gecersiz veya iptal edilmis; yeniden giris yapin")
+					return
+				}
 				ctx := withTenant(r.Context(), sess.TenantID)
 				ctx = m.resolveProject(ctx, r, sess.TenantID)
+				ctx = withUser(ctx, user)
 				m.Next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
@@ -388,6 +414,11 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 							"hesabiniz hicbir organizasyonun uyesi degil")
 						return
 					}
+					if !knownRole(mr) {
+						writeJSONError(w, http.StatusForbidden, "forbidden",
+							"rolunuz bu islem icin yetkili degil")
+						return
+					}
 					activeTenant, role = t, mr
 				}
 				ctx := withTenant(r.Context(), activeTenant)
@@ -475,4 +506,74 @@ func (m *Middleware) resolveProject(ctx context.Context, r *http.Request, tenant
 		return withProject(ctx, def.ID)
 	}
 	return ctx
+}
+
+// isTicketWSRoute, yalnizca gercek WS uclarinin tam desenine uyar:
+// GET /api/v1/clients/{id}/terminal ve GET /api/v1/clients/{id}/screen
+// ({id} tek, bos olmayan yol parcasi).
+func isTicketWSRoute(r *http.Request) bool {
+	if r.Method != http.MethodGet {
+		return false
+	}
+	rest, ok := strings.CutPrefix(r.URL.Path, "/api/v1/clients/")
+	if !ok {
+		return false
+	}
+	id, tail, ok := strings.Cut(rest, "/")
+	if !ok || id == "" {
+		return false
+	}
+	return tail == "terminal" || tail == "screen"
+}
+
+const healthPath = "/api/v1/health"
+
+// hasCredentials, istegin kimlik bilgisi tasiyip tasimadigina bakar (dogrulamaz).
+func hasCredentials(r *http.Request) bool {
+	if strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
+		return true
+	}
+	for _, c := range r.Cookies() {
+		if strings.HasSuffix(c.Name, "better-auth.session_token") || c.Name == session.CookieName {
+			return true
+		}
+	}
+	return false
+}
+
+// probeWriter, healthProbe icin yaniti tamponlar.
+type probeWriter struct {
+	h      http.Header
+	status int
+	body   bytes.Buffer
+}
+
+func (p *probeWriter) Header() http.Header { return p.h }
+func (p *probeWriter) WriteHeader(c int) {
+	if p.status == 0 {
+		p.status = c
+	}
+}
+func (p *probeWriter) Write(b []byte) (int, error) {
+	if p.status == 0 {
+		p.status = http.StatusOK
+	}
+	return p.body.Write(b)
+}
+
+// healthProbe, kimlik dogrulama zincirini tamponlu calistirir; basariliysa
+// (200) yaniti gercek yazara kopyalar ve true doner. Basarisizsa hicbir sey
+// yazmaz (cagiran kimliksiz yanita duser).
+func (m *Middleware) healthProbe(w http.ResponseWriter, r *http.Request) bool {
+	pw := &probeWriter{h: http.Header{}}
+	m.serveAuthenticated(pw, r)
+	if pw.status != http.StatusOK {
+		return false
+	}
+	for k, v := range pw.h {
+		w.Header()[k] = v
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(pw.body.Bytes())
+	return true
 }

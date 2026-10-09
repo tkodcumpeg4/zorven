@@ -107,6 +107,9 @@ func (s *Server) setTunnelUDP(w http.ResponseWriter, r *http.Request) {
 	if !requireScope(w, r, ScopeTunnelsWrite) {
 		return
 	}
+	if !s.requirePrivilegedCaller(w, r) {
+		return
+	}
 	tenantID, tun, ok := s.udpTunnelFor(w, r)
 	if !ok {
 		return

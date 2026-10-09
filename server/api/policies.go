@@ -48,7 +48,41 @@ func (s *Server) getPolicy(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, pol)
 }
 
+// checkPolicySecretRefs, config'teki {{secret:ad}} referanslarinin kiracida
+// (projede) var oldugunu dogrular; eksik varsa 422 yazar ve false doner.
+// Calisma zamani yine fail-closed'dir (secret sonradan silinirse 503).
+func (s *Server) checkPolicySecretRefs(w http.ResponseWriter, r *http.Request, tenantID, projID string, cfg []byte) bool {
+	refs := ingress.PolicySecretRefs(cfg)
+	if len(refs) == 0 {
+		return true
+	}
+	secrets, err := s.Store.ListSecrets(r.Context(), tenantID, projID)
+	if err != nil {
+		s.fail(w, err)
+		return false
+	}
+	have := make(map[string]struct{}, len(secrets))
+	for _, sec := range secrets {
+		have[sec.Name] = struct{}{}
+	}
+	var missing []string
+	for _, n := range refs {
+		if _, ok := have[n]; !ok {
+			missing = append(missing, n)
+		}
+	}
+	if len(missing) > 0 {
+		writeJSONError(w, http.StatusUnprocessableEntity, "unknown_secret",
+			"policy bulunmayan secret'lara referans veriyor: "+strings.Join(missing, ", "))
+		return false
+	}
+	return true
+}
+
 func (s *Server) createPolicy(w http.ResponseWriter, r *http.Request) {
+	if !s.requirePrivilegedCaller(w, r) {
+		return
+	}
 	tenantID, ok := s.tenantFor(r)
 	if !ok {
 		writeJSONError(w, http.StatusInternalServerError, "no_tenant", "istek kiraci kapsami olmadan ulasti")
@@ -78,6 +112,9 @@ func (s *Server) createPolicy(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusUnprocessableEntity, "invalid_policy", err.Error())
 		return
 	}
+	if !s.checkPolicySecretRefs(w, r, tenantID, projID, body.Config) {
+		return
+	}
 
 	pol, err := s.Store.CreatePolicy(r.Context(), tenantID, projID, body.Name, body.Config, body.Priority)
 	if err != nil {
@@ -94,6 +131,9 @@ func (s *Server) createPolicy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) updatePolicy(w http.ResponseWriter, r *http.Request) {
+	if !s.requirePrivilegedCaller(w, r) {
+		return
+	}
 	tenantID, ok := s.tenantFor(r)
 	if !ok {
 		writeJSONError(w, http.StatusInternalServerError, "no_tenant", "istek kiraci kapsami olmadan ulasti")
@@ -136,6 +176,9 @@ func (s *Server) updatePolicy(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusUnprocessableEntity, "invalid_policy", verr.Error())
 			return
 		}
+		if !s.checkPolicySecretRefs(w, r, tenantID, cur.ProjectID, body.Config) {
+			return
+		}
 		config = body.Config
 	}
 	if body.Enabled != nil {
@@ -160,6 +203,9 @@ func (s *Server) updatePolicy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deletePolicy(w http.ResponseWriter, r *http.Request) {
+	if !s.requirePrivilegedCaller(w, r) {
+		return
+	}
 	tenantID, ok := s.tenantFor(r)
 	if !ok {
 		writeJSONError(w, http.StatusInternalServerError, "no_tenant", "istek kiraci kapsami olmadan ulasti")
@@ -176,10 +222,16 @@ func (s *Server) deletePolicy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) bindPolicy(w http.ResponseWriter, r *http.Request) {
+	if !s.requirePrivilegedCaller(w, r) {
+		return
+	}
 	s.mutatePolicyBinding(w, r, true)
 }
 
 func (s *Server) unbindPolicy(w http.ResponseWriter, r *http.Request) {
+	if !s.requirePrivilegedCaller(w, r) {
+		return
+	}
 	s.mutatePolicyBinding(w, r, false)
 }
 

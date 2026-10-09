@@ -38,11 +38,7 @@ func (s *Server) issueScreenTicket(w http.ResponseWriter, r *http.Request) {
 	// İstemci belirtilmişse, istek sahibinin kiracısına ait olduğunu doğrula (IDOR önlemi)
 	// F16: politikaya tabi cagiran cihaz ADI VERMEDEN bilet alamaz — adsiz
 	// bilet kiracinin herhangi bir cihazina acilabilirdi.
-	if body.ClientID == "" {
-		if !s.requirePrivileged(w, r, tenantID) {
-			return
-		}
-	} else if !s.requireDeviceAccess(w, r, tenantID, body.ClientID) {
+	if !s.requireRemoteAccess(w, r, tenantID, body.ClientID) {
 		return
 	}
 	if body.ClientID != "" {
@@ -63,7 +59,7 @@ func (s *Server) issueScreenTicket(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	ticket := s.Tickets.issueWithRelease(tenantID, body.ClientID, release)
+	ticket := s.Tickets.issueWithRelease(ticketKindScreen, tenantID, body.ClientID, release)
 	s.logger().Info("ekran bileti verildi", "tenant_id", tenantID, "client_id", body.ClientID, "remote_addr", r.RemoteAddr)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ticket":         ticket,
@@ -100,7 +96,7 @@ func (s *Server) screenHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Bilet tek kullanımlıktır ve veren kiracıyı kriptografik olarak taşır.
 	reqTenant, _ := s.tenantFor(r)
-	tenantID, releaseSlot, valid := s.Tickets.redeemWithRelease(ticket, reqTenant, clientID)
+	tenantID, releaseSlot, valid := s.Tickets.redeemWithRelease(ticketKindScreen, ticket, reqTenant, clientID)
 	if !valid || tenantID == "" {
 		s.logger().Warn("ekran ws reddedildi: gecersiz veya suresi dolmus bilet",
 			"client_id", clientID, "remote_addr", r.RemoteAddr)

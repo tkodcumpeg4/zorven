@@ -35,6 +35,9 @@ func (s *Server) getCaptureSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) setCaptureSettings(w http.ResponseWriter, r *http.Request) {
+	if !s.requirePrivilegedCaller(w, r) {
+		return
+	}
 	// YAZMA islemi: tam istek/yanit govdesi yakalamayi acar. Salt-okur
 	// (analytics:read) token bunu yapamamali.
 	if !requireScope(w, r, ScopeTunnelsWrite) {
@@ -60,13 +63,18 @@ func (s *Server) setCaptureSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 // captureOut, bir yakalamayi panele GÜVENLİ döndürür (gövdeler metin olarak).
-func captureOut(c *reqlog.Capture) map[string]any {
+func captureOut(c *reqlog.Capture, privileged bool) map[string]any {
+	reqH, respH := c.ReqHeaders, c.RespHeaders
+	if !privileged {
+		// F-28: hassas basliklar saklanir ama yalniz owner/admin gorur.
+		reqH, respH = maskSensitiveHeaders(reqH), maskSensitiveHeaders(respH)
+	}
 	return map[string]any{
 		"id": c.ID, "tunnel_id": c.TunnelID, "hostname": c.Hostname, "client_ip": c.ClientIP,
 		"ts": c.TS, "method": c.Method, "path": c.Path, "query": c.Query,
 		"status": c.Status, "duration_ms": c.DurationMS,
-		"req_headers": c.ReqHeaders, "req_body": string(c.ReqBody), "req_body_truncated": c.ReqBodyTruncated,
-		"resp_headers": c.RespHeaders, "resp_body": string(c.RespBody), "resp_body_truncated": c.RespBodyTruncated,
+		"req_headers": reqH, "req_body": string(c.ReqBody), "req_body_truncated": c.ReqBodyTruncated,
+		"resp_headers": respH, "resp_body": string(c.RespBody), "resp_body_truncated": c.RespBodyTruncated,
 	}
 }
 
@@ -90,7 +98,52 @@ func (s *Server) getRequestDetail(w http.ResponseWriter, r *http.Request) {
 	if !s.requireCaptureDeviceAccess(w, r, tenantID, c.TunnelID) {
 		return
 	}
-	writeJSON(w, http.StatusOK, captureOut(c))
+	priv, err := s.callerPrivileged(r, tenantID)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, captureOut(c, priv))
+}
+
+// maskedHeaderValue, hassas baslik degerlerinin yerine konan maske.
+const maskedHeaderValue = "••••••"
+
+// sensitiveHeaderNames, degerleri owner/admin disina gosterilmeyen basliklar.
+var sensitiveHeaderNames = map[string]bool{
+	"authorization": true, "proxy-authorization": true, "cookie": true,
+	"set-cookie": true, "x-api-key": true, "x-auth-token": true,
+	"x-csrf-token": true, "x-xsrf-token": true,
+}
+
+func isSensitiveHeader(name string) bool {
+	n := strings.ToLower(strings.TrimSpace(name))
+	if sensitiveHeaderNames[n] {
+		return true
+	}
+	return strings.Contains(n, "api-key") || strings.Contains(n, "apikey") ||
+		strings.Contains(n, "secret") || strings.HasSuffix(n, "-token")
+}
+
+// maskSensitiveHeaders, hassas basliklarin degerlerini maskeler (baslik adi
+// kalir). Girdiyi DEGISTIRMEZ; yeni bir harita doner.
+func maskSensitiveHeaders(in map[string][]string) map[string][]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string][]string, len(in))
+	for k, v := range in {
+		if !isSensitiveHeader(k) {
+			out[k] = v
+			continue
+		}
+		m := make([]string, len(v))
+		for i := range m {
+			m[i] = maskedHeaderValue
+		}
+		out[k] = m
+	}
+	return out
 }
 
 // captureFor, yakalama deposu yoksa (nil) bulunamadi doner; panik yerine 404.
@@ -119,6 +172,11 @@ const replayResponseMax = 256 << 10 // 256 KB
 
 func (s *Server) replayRequest(w http.ResponseWriter, r *http.Request) {
 	if !requireScope(w, r, ScopeTunnelsWrite) {
+		return
+	}
+	// F-28: replay yakalanan (maskesiz) hassas basliklarla gonderilir; bu
+	// yuzden yalniz owner/admin. Uye maskeli degeri gerceginin yerine koyamaz.
+	if !s.requirePrivilegedCaller(w, r) {
 		return
 	}
 	tenantID, ok := s.tenantFor(r)

@@ -126,3 +126,21 @@ func (m *Manager) signPayloadForTest(js string) string {
 	b64 := base64.RawURLEncoding.EncodeToString([]byte(js))
 	return b64 + "." + m.sign(b64)
 }
+
+// Surumsuz (epoch'siz, eski bicim) cerez gecersiz: iptal edilemez ve kullanici baglami yoktu.
+func TestVerifyRejectsOldFormat(t *testing.T) {
+	m := newTestManager(t)
+	b64 := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"x","uid":"u","tid":"t","method":"github","exp":99999999999}`))
+	if _, err := m.Verify(b64 + "." + m.sign(b64)); err == nil {
+		t.Fatal("eski bicim cerez kabul edildi")
+	}
+}
+
+func TestVerifyCarriesEpoch(t *testing.T) {
+	m := newTestManager(t)
+	val, _ := m.Issue(Session{UserID: "u", TenantID: "t", Method: "github", Epoch: 3}, time.Hour)
+	s, err := m.Verify(val)
+	if err != nil || s.Epoch != 3 {
+		t.Fatalf("epoch tasinmali: %+v %v", s, err)
+	}
+}

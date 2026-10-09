@@ -3,7 +3,7 @@
 # `server` modülü `replace .../shared => ../shared` içerdiği için, sunucuyu
 # yalnızca `server/` + `shared/` ile (client/desktop bağımlılıkları olmadan)
 # derleyebiliriz. Bu, imajı çok daha küçük ve hızlı yapar.
-FROM golang:1.25-alpine AS builder
+FROM golang:1.26.6-alpine AS builder
 
 WORKDIR /app
 

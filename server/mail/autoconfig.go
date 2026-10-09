@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 )
@@ -230,6 +231,9 @@ func NewAutoConfigHandler(cfg ClientConfig) *AutoConfigHandler {
 	}
 	if cfg.PlatformDomain != "" {
 		h.hosts["www."+strings.ToLower(cfg.PlatformDomain)] = true
+		// MTA-STS politikasi (RFC 8461): yalniz platform alani; wildcard
+		// sertifika mta-sts.<platform>'u kapsar, mta-sts.mail.<platform>'u kapsamaz.
+		h.hosts["mta-sts."+strings.ToLower(cfg.PlatformDomain)] = true
 	}
 	return h
 }
@@ -257,6 +261,10 @@ func (h *AutoConfigHandler) kind(r *http.Request) string {
 		return ""
 	}
 	p := strings.ToLower(r.URL.Path)
+	if p == "/.well-known/mta-sts.txt" && strings.HasPrefix(hostOnly(r.Host), "mta-sts.") &&
+		h.Cfg.Host != "" && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+		return "mtasts"
+	}
 	switch p {
 	case "/mail/config-v1.1.xml", "/.well-known/autoconfig/mail/config-v1.1.xml":
 		if r.Method == http.MethodGet || r.Method == http.MethodHead {
@@ -302,7 +310,24 @@ func (h *AutoConfigHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		_, _ = w.Write(h.Cfg.AutodiscoverXML(email))
+	case "mtasts":
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write([]byte(mtaSTSPolicy(os.Getenv("ZORVEN_MTA_STS_MODE"), h.Cfg.Host)))
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// mtaSTSPolicy, RFC 8461 politika dosyasini uretir. Mod ZORVEN_MTA_STS_MODE
+// ile secilir (testing varsayilan; enforce yalniz TLS-RPT raporlari temizken).
+func mtaSTSPolicy(mode, mx string) string {
+	maxAge := 86400
+	switch mode {
+	case "enforce":
+		maxAge = 604800
+	case "none":
+	default:
+		mode = "testing"
+	}
+	return fmt.Sprintf("version: STSv1\r\nmode: %s\r\nmx: %s\r\nmax_age: %d\r\n", mode, mx, maxAge)
 }

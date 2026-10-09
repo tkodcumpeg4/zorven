@@ -111,17 +111,11 @@ func (e *Engine) InvalidateTenant(ctx context.Context, tenantID string) error {
 // CheckAllowed, gelen istegin IP adresinin tünel izin listesine uygun olup olmadığını kontrol eder.
 //
 // Dönüş kuralları:
-// - Kiracının planında FeatureIPAllowlist yoksa -> true (engelleme yapılmaz)
+// - Plan ozelligi/entitlement ingress tarafinda SORGULANMAZ: mevcut kurallar her zaman
+//   uygulanir (fail-closed). Entitlement yalniz API'de kural olusturma/etkinlestirmede denetlenir.
 // - Kiracı/Tünel için tanımlı aktif kural yoksa -> true (varsayılan açık)
 // - Kural tanımlıysa: clientIP en az bir kural ile eşleşirse -> true, aksi halde -> false
 func (e *Engine) CheckAllowed(ctx context.Context, tenantID, tunnelID, clientIPStr string) (bool, error) {
-	if e.ent != nil {
-		if err := e.ent.CheckFeature(ctx, tenantID, entitlements.FeatureIPAllowlist); err != nil {
-			// Plana gore ozellik acik degilse ingress filtrelemesi bypass edilir
-			return true, nil
-		}
-	}
-
 	e.mu.RLock()
 	tenantRules, exists := e.rules[tenantID]
 	e.mu.RUnlock()
@@ -163,11 +157,6 @@ func (e *Engine) CheckAllowed(ctx context.Context, tenantID, tunnelID, clientIPS
 // kapsayan aktif kural yoksa false. Web-door "statik liste yoksa varsayilan
 // reddet" karari icin kullanilir.
 func (e *Engine) HasRules(ctx context.Context, tenantID, tunnelID string) bool {
-	if e.ent != nil {
-		if err := e.ent.CheckFeature(ctx, tenantID, entitlements.FeatureIPAllowlist); err != nil {
-			return false
-		}
-	}
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	for _, r := range e.rules[tenantID] {

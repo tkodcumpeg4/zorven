@@ -63,30 +63,30 @@ func TestSecurity_Ticket_Tenant_And_Client_Isolation(t *testing.T) {
 			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 		}
 		// Extract ticket
-		tok := srv.Tickets.issue("ten_a", "cli_tenant_a")
+		tok := srv.Tickets.issue(ticketKindTerminal, "ten_a", "cli_tenant_a")
 		ticketA = tok
 	}
 
 	// 3. Redeeming ticket A on Tenant B's client -> MUST FAIL
-	if _, ok := srv.Tickets.redeem(ticketA, "ten_a", "cli_tenant_b"); ok {
+	if _, ok := srv.Tickets.redeem(ticketKindTerminal, ticketA, "ten_a", "cli_tenant_b"); ok {
 		t.Errorf("IDOR VULNERABILITY: Ticket issued for cli_tenant_a was accepted for cli_tenant_b!")
 	}
 
 	// 4. Redeeming ticket A with Tenant B context -> MUST FAIL
-	tokB := srv.Tickets.issue("ten_a", "cli_tenant_a")
-	if _, ok := srv.Tickets.redeem(tokB, "ten_b", "cli_tenant_a"); ok {
+	tokB := srv.Tickets.issue(ticketKindTerminal, "ten_a", "cli_tenant_a")
+	if _, ok := srv.Tickets.redeem(ticketKindTerminal, tokB, "ten_b", "cli_tenant_a"); ok {
 		t.Errorf("IDOR VULNERABILITY: Ticket issued for ten_a was accepted for ten_b!")
 	}
 
 	// 5. Redeeming valid ticket without tenant context -> SUCCESS (ticket provides tenant)
-	tokValid := srv.Tickets.issue("ten_a", "cli_tenant_a")
-	tenantID, ok := srv.Tickets.redeem(tokValid, "", "cli_tenant_a")
+	tokValid := srv.Tickets.issue(ticketKindTerminal, "ten_a", "cli_tenant_a")
+	tenantID, ok := srv.Tickets.redeem(ticketKindTerminal, tokValid, "", "cli_tenant_a")
 	if !ok || tenantID != "ten_a" {
 		t.Errorf("valid ticket redemption failed: got tenant %q, ok=%v", tenantID, ok)
 	}
 
 	// 6. Double redeem (Replay attack) -> MUST FAIL
-	if _, ok := srv.Tickets.redeem(tokValid, "", "cli_tenant_a"); ok {
+	if _, ok := srv.Tickets.redeem(ticketKindTerminal, tokValid, "", "cli_tenant_a"); ok {
 		t.Errorf("REPLAY VULNERABILITY: Ticket was accepted twice!")
 	}
 }

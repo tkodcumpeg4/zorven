@@ -195,6 +195,11 @@ func (cs *clientSession) doLocal(ctx context.Context, req protocol.HTTPRequest, 
 		cs.sendError(ctx, req.ReqID, protocol.CodeLocalUnreachable, "bu tunel icin yerel hedef tanimli degil")
 		return
 	}
+	if !validLocalPath(req.Path) {
+		cs.log.Warn("gecersiz istek yolu reddedildi", "req_id", req.ReqID)
+		cs.sendError(ctx, req.ReqID, protocol.CodeLocalUnreachable, "gecersiz istek yolu")
+		return
+	}
 	target := base + req.Path
 	if req.Query != "" {
 		target += "?" + req.Query
@@ -202,6 +207,11 @@ func (cs *clientSession) doLocal(ctx context.Context, req protocol.HTTPRequest, 
 	u, err := url.Parse(target)
 	if err != nil {
 		cs.sendError(ctx, req.ReqID, protocol.CodeLocalUnreachable, "gecersiz hedef URL: "+err.Error())
+		return
+	}
+	if bu, berr := url.Parse(base); berr != nil || u.Host != bu.Host {
+		cs.log.Warn("istek yolu yerel hedef host'unu degistiriyor", "req_id", req.ReqID)
+		cs.sendError(ctx, req.ReqID, protocol.CodeLocalUnreachable, "gecersiz istek yolu")
 		return
 	}
 	if isBlockedTargetHost(u.Hostname()) {
@@ -451,9 +461,39 @@ func isBlockedTargetHost(host string) bool {
 	return false
 }
 
+// validLocalPath, sunucudan gelen istek yolunun yerel hedef URL'sinin host'unu
+// degistirememesini saglar: "/" ile baslamali; "@", "\", sema/host ve kontrol
+// karakteri icermemeli.
+func validLocalPath(p string) bool {
+	if p == "" || p[0] != '/' {
+		return false
+	}
+	if strings.ContainsAny(p, "@\\") || strings.Contains(p, "://") {
+		return false
+	}
+	for i := 0; i < len(p); i++ {
+		if p[i] <= 0x20 || p[i] == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
 // safeDialContext, DNS Rebinding ve Port Scanning saldirilarina karsi
 // hem host adi hem de cozumlenen tum IP adreslerini ve portu dogrular.
 func safeDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	return guardedDial(ctx, network, addr, true, 0)
+}
+
+// streamDialContext, TCP/UDP akislari icin ayni hedef kisitlamasini uygular
+// (metadata/link-local, DNS cozumleme sonucu) ancak hassas port listesini
+// UYGULAMAZ: RDP/SSH/DB gibi portlara tunelleme akis tunellerinin asil amacidir
+// ve hedef kullanicinin kendi tunel tanimindan gelir.
+func streamDialContext(ctx context.Context, network, addr string, timeout time.Duration) (net.Conn, error) {
+	return guardedDial(ctx, network, addr, false, timeout)
+}
+
+func guardedDial(ctx context.Context, network, addr string, checkPort bool, timeout time.Duration) (net.Conn, error) {
 	host, portStr, err := net.SplitHostPort(addr)
 	if err != nil {
 		return nil, err
@@ -463,9 +503,11 @@ func safeDialContext(ctx context.Context, network, addr string) (net.Conn, error
 		return nil, errors.New("SSRF korumasi: yasakli hedef adres: " + host)
 	}
 
-	p, err := strconv.Atoi(portStr)
-	if err == nil && isRestrictedPort(p) {
-		return nil, errors.New("port korumasi: hassas servis portuna tunelleme engellendi: " + portStr)
+	if checkPort {
+		p, err := strconv.Atoi(portStr)
+		if err == nil && isRestrictedPort(p) {
+			return nil, errors.New("port korumasi: hassas servis portuna tunelleme engellendi: " + portStr)
+		}
 	}
 
 	// DNS Rebinding korumasi: eger host dogrudan IP degilse, DNS cozumlemesi yap
@@ -480,6 +522,6 @@ func safeDialContext(ctx context.Context, network, addr string) (net.Conn, error
 		}
 	}
 
-	var d net.Dialer
+	d := net.Dialer{Timeout: timeout}
 	return d.DialContext(ctx, network, addr)
 }

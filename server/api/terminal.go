@@ -6,10 +6,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
-	"github.com/tkodcumpeg4/zorven/shared/protocol"
 )
 
 // issueTerminalTicket, POST /api/v1/terminal-ticket — admin middleware'inden
@@ -26,6 +26,8 @@ func (s *Server) issueTerminalTicket(w http.ResponseWriter, r *http.Request) {
 
 	var body struct {
 		ClientID string `json:"client_id"`
+		Shell    string `json:"shell"`
+		Attach   string `json:"attach"`
 	}
 	if r.Body != nil && r.ContentLength > 0 {
 		_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body)
@@ -37,11 +39,7 @@ func (s *Server) issueTerminalTicket(w http.ResponseWriter, r *http.Request) {
 	// İstemci belirtilmişse, istek sahibinin kiracısına ait olduğunu doğrula (IDOR önlemi)
 	// F16: politikaya tabi cagiran cihaz ADI VERMEDEN bilet alamaz — adsiz
 	// bilet kiracinin herhangi bir cihazina acilabilirdi.
-	if body.ClientID == "" {
-		if !s.requirePrivileged(w, r, tenantID) {
-			return
-		}
-	} else if !s.requireDeviceAccess(w, r, tenantID, body.ClientID) {
+	if !s.requireRemoteAccess(w, r, tenantID, body.ClientID) {
 		return
 	}
 	if body.ClientID != "" {
@@ -51,7 +49,23 @@ func (s *Server) issueTerminalTicket(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	ticket := s.Tickets.issue(tenantID, body.ClientID)
+	if len(body.Shell) > 32 {
+		writeJSONError(w, http.StatusBadRequest, "invalid_shell", "gecersiz kabuk")
+		return
+	}
+	owner := termOwner(r)
+	if body.Attach != "" {
+		// Yeniden baglanma: oturum hala yasiyor ve bu kimlige mi ait? Degilse
+		// panel bunu "oturum bitti" olarak gosterir (yeni kabuk ACILMAZ).
+		if body.ClientID == "" || s.termReg().lookup(body.Attach, tenantID, body.ClientID, owner) == nil {
+			writeJSONError(w, http.StatusGone, "session_gone", "terminal oturumu artik yok")
+			return
+		}
+	} else if body.ClientID != "" && s.termReg().countFor(tenantID, body.ClientID, owner) >= termMaxPerOwner {
+		writeJSONError(w, http.StatusTooManyRequests, "too_many_terminals", "bu istemcide cok fazla acik terminal var")
+		return
+	}
+	ticket := s.Tickets.issueTerminalWithShell(tenantID, body.ClientID, body.Shell, body.Attach, owner)
 	s.logger().Info("terminal bileti verildi", "tenant_id", tenantID, "client_id", body.ClientID, "remote_addr", r.RemoteAddr)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ticket":     ticket,
@@ -86,7 +100,9 @@ func (s *Server) terminalHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Bilet tek kullanımlıktır ve veren kiracıyı kriptografik olarak taşır.
 	reqTenant, _ := s.tenantFor(r)
-	tenantID, valid := s.Tickets.redeem(ticket, reqTenant, clientID)
+	tinfo := s.Tickets.peekTerminal(ticket) // redeem bileti tuketir; once oku
+	ticketShell := tinfo.Shell
+	tenantID, valid := s.Tickets.redeem(ticketKindTerminal, ticket, reqTenant, clientID)
 	if !valid || tenantID == "" {
 		s.logger().Warn("terminal ws reddedildi: gecersiz veya suresi dolmus bilet",
 			"client_id", clientID, "remote_addr", r.RemoteAddr)
@@ -112,6 +128,23 @@ func (s *Server) terminalHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Kabuk secimi (opsiyonel): ?shell=<id>. Istemci kabuk listesi bildirdiyse
+	// ID o listede olmali; istemci ayrica kendi listesini tekrar denetler. Eski
+	// istemcilerde (liste yok) alan yok sayilir, varsayilan kabuk acilir.
+	shell := r.URL.Query().Get("shell")
+	if shell == "" {
+		shell = ticketShell
+	}
+	if shell != "" {
+		if len(sess.Shells) == 0 {
+			shell = ""
+		} else if !sess.HasShell(shell) {
+			writeJSONError(w, http.StatusBadRequest, "invalid_shell",
+				"Bu istemcide boyle bir kabuk yok.")
+			return
+		}
+	}
+
 	// InsecureSkipVerify: true ile origin kontrolu atlanir.
 	// Bu guvenlidir cunku kimlik dogrulamasi cookie/oturum degil, TEK KULLANIMLIK
 	// 30 saniyelik bilet ile yapilmistir (bkz. tickets.go).
@@ -129,24 +162,59 @@ func (s *Server) terminalHandler(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
-	sessionID := "term_" + randomHex(6)
-	s.logger().Info("terminal ws oturumu baslatildi", "client_id", clientID, "session_id", sessionID)
-
-	out := make(chan protocol.TerminalOutput, 64)
-	exit := make(chan protocol.TerminalExit, 1)
-
-	if err := sess.OpenTerminal(ctx, sessionID, 80, 24, out, exit); err != nil {
-		s.logger().Error("istemcide terminal oturumu acilamadi",
-			"client_id", clientID, "session_id", sessionID, "hata", err)
-		conn.Close(websocket.StatusInternalError, "terminal acilamadi")
-		return
+	reg := s.termReg()
+	var pt *persistTerm
+	resumed := false
+	if tinfo.Attach != "" {
+		pt = reg.lookup(tinfo.Attach, tenantID, clientID, tinfo.Owner)
+		if pt == nil || pt.tun != sess {
+			conn.Close(websocket.StatusCode(4410), "session_gone")
+			return
+		}
+		resumed = true
+	} else {
+		sessionID := "term_" + randomHex(12)
+		pt, err = reg.open(sess, sessionID, tenantID, clientID, tinfo.Owner, shell)
+		if err != nil {
+			s.logger().Error("istemcide terminal oturumu acilamadi",
+				"client_id", clientID, "session_id", sessionID, "hata", err)
+			conn.Close(websocket.StatusInternalError, "terminal acilamadi")
+			return
+		}
 	}
+	s.logger().Info("terminal ws baglandi", "client_id", clientID, "session_id", pt.id, "resumed", resumed)
+
+	replay, data, exitCh, exited := pt.attach()
+	var killed atomic.Bool
 	defer func() {
-		s.logger().Info("terminal ws oturumu sonlandirildi", "client_id", clientID, "session_id", sessionID)
-		sess.CloseTerminal(context.Background(), sessionID)
+		if killed.Load() {
+			reg.kill(pt)
+		} else {
+			pt.detach(data)
+		}
+		s.logger().Info("terminal ws ayrildi", "client_id", clientID, "session_id", pt.id, "kapatildi", killed.Load())
 	}()
 
-	// Tarayıcı bağlantısı kesilirse veya kilitlenirse oturumu hızlıca sonlandır.
+	writeJSONMsg := func(v any) error {
+		msg, _ := json.Marshal(v)
+		return conn.Write(ctx, websocket.MessageText, msg)
+	}
+	if writeJSONMsg(map[string]any{"type": "session", "id": pt.id, "resumed": resumed}) != nil {
+		return
+	}
+	if len(replay) > 0 {
+		if writeJSONMsg(map[string]any{"type": "output", "data": replay}) != nil {
+			return
+		}
+	}
+	if exited != nil {
+		_ = writeJSONMsg(map[string]any{"type": "exit", "code": exited.Code, "message": exited.Message})
+		killed.Store(true)
+		return
+	}
+
+	// Tarayici baglantisi kesilirse veya kilitlenirse WS'i hizlica birak
+	// (oturum yasamaya devam eder).
 	go func() {
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
@@ -166,22 +234,25 @@ func (s *Server) terminalHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// Istemci -> dashboard: cikti ve exit'i WSS'e yaz.
+	// Oturum -> dashboard: cikti ve exit'i WSS'e yaz.
 	go func() {
+		defer cancel()
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case m := <-out:
-				msg, _ := json.Marshal(map[string]any{"type": "output", "data": m.Data})
-				if err := conn.Write(ctx, websocket.MessageText, msg); err != nil {
-					cancel()
+			case b, ok := <-data:
+				if !ok {
+					// Ayni oturuma baska bir sekme baglandi.
+					conn.Close(websocket.StatusCode(4409), "baska sekmede acildi")
 					return
 				}
-			case m := <-exit:
-				msg, _ := json.Marshal(map[string]any{"type": "exit", "code": m.Code, "message": m.Message})
-				conn.Write(ctx, websocket.MessageText, msg)
-				cancel()
+				if writeJSONMsg(map[string]any{"type": "output", "data": b}) != nil {
+					return
+				}
+			case m := <-exitCh:
+				_ = writeJSONMsg(map[string]any{"type": "exit", "code": m.Code, "message": m.Message})
+				killed.Store(true)
 				return
 			}
 		}
@@ -189,7 +260,7 @@ func (s *Server) terminalHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Dashboard -> istemci: gelen mesajlari coz ve oturuma ilet.
 	for {
-		_, data, err := conn.Read(ctx)
+		_, raw, err := conn.Read(ctx)
 		if err != nil {
 			return
 		}
@@ -200,15 +271,19 @@ func (s *Server) terminalHandler(w http.ResponseWriter, r *http.Request) {
 			Cols uint16 `json:"cols"`
 			Rows uint16 `json:"rows"`
 		}
-		if json.Unmarshal(data, &msg) != nil {
+		if json.Unmarshal(raw, &msg) != nil {
 			continue
 		}
 
 		switch msg.Type {
 		case "input":
-			sess.TerminalInput(ctx, sessionID, msg.Data)
+			sess.TerminalInput(ctx, pt.id, msg.Data)
 		case "resize":
-			sess.TerminalResize(ctx, sessionID, msg.Cols, msg.Rows)
+			sess.TerminalResize(ctx, pt.id, msg.Cols, msg.Rows)
+		case "close":
+			// Sekme kapatildi / "Baglantiyi kes": kabugu gercekten sonlandir.
+			killed.Store(true)
+			return
 		}
 	}
 }

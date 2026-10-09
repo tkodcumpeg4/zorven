@@ -2,6 +2,8 @@ module github.com/tkodcumpeg4/zorven/desktop
 
 go 1.25.0
 
+toolchain go1.26.6
+
 require (
 	fyne.io/systray v1.12.2
 	github.com/minio/selfupdate v0.6.0

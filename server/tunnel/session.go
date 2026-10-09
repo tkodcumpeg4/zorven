@@ -45,6 +45,11 @@ type Session struct {
 	IsService   bool
 	AppKind     string // "desktop" | "" (hello.app_kind)
 
+	// Shells / DefaultShell, ajanin hello ile bildirdigi uzak terminal kabuklari.
+	// Eski istemcilerde bos (kabuk secimi sunulmaz). El sikismada bir kez yazilir.
+	Shells       []protocol.ShellInfo
+	DefaultShell string
+
 	metricsMu     sync.RWMutex
 	latestMetrics *protocol.Metrics
 
@@ -554,7 +559,7 @@ func (s *Session) StreamRequestBody(ctx context.Context, reqID uint64, body io.R
 
 // OpenTerminal, istemcide kabuk acar ve cikti/exit kanallarina abone olur.
 // Cagiran, is bitince CloseTerminal cagirmalidir.
-func (s *Session) OpenTerminal(ctx context.Context, sessionID string, cols, rows uint16,
+func (s *Session) OpenTerminal(ctx context.Context, sessionID, shell string, cols, rows uint16,
 	out chan<- protocol.TerminalOutput, exit chan<- protocol.TerminalExit) error {
 
 	s.termMu.Lock()
@@ -567,6 +572,7 @@ func (s *Session) OpenTerminal(ctx context.Context, sessionID string, cols, rows
 		SessionID: sessionID,
 		Cols:      cols,
 		Rows:      rows,
+		Shell:     shell,
 	}, protocol.TypeTerminalOpen)
 }
 

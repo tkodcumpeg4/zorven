@@ -25,24 +25,38 @@ func TestSecretRefResolvedAtCompileTime(t *testing.T) {
 	}
 }
 
-// Secret bulunamazsa kural DUSMELI (fail-closed) — sessizce acik kalmamali.
-func TestSecretRefMissingDisablesRule(t *testing.T) {
-	cp, _ := compilePolicy([]byte(whPolicy), 10, nil)
-	if cp != nil {
-		t.Fatalf("cozulemeyen secret ile kural etkin kaldi: %d kural", len(cp.rules))
+// assertFailClosed, derlenemeyen guvenlik kuralinin 503 reddine donustugunu
+// ve istegi gecirmedigini dogrular (F-02).
+func assertFailClosed(t *testing.T, cp *compiledPolicy, what string) {
+	t.Helper()
+	if cp == nil || len(cp.rules) != 1 {
+		t.Fatalf("%s: kural fail-closed olarak korunmadi (sessizce dustu)", what)
 	}
-	cp2, _ := compilePolicy([]byte(whPolicy), 10, map[string]string{"baska": "x"})
-	if cp2 != nil {
-		t.Fatal("yanlis isimli secret ile kural etkin kaldi")
+	act := cp.rules[0].action
+	if act.kind != actDeny || act.status != 503 {
+		t.Fatalf("%s: beklenen deny 503, gelen kind=%v status=%d", what, act.kind, act.status)
+	}
+	rt := routerWith(cp)
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/webhooks/x", strings.NewReader("{}"))
+	out := rt.evaluatePolicies("example.com", req, "1.2.3.4", "tun_1", false)
+	if out.denyStatus != 503 {
+		t.Fatalf("%s: imzasiz istek reddedilmedi: %+v", what, out)
 	}
 }
 
-// Bilinmeyen saglayici da kurali dusurmeli.
-func TestUnknownProviderDisablesRule(t *testing.T) {
+// Secret bulunamazsa kural fail-closed (503) olmali — imzasiz istek gecmemeli.
+func TestSecretRefMissingFailsClosed(t *testing.T) {
+	cp, _ := compilePolicy([]byte(whPolicy), 10, nil)
+	assertFailClosed(t, cp, "secret yok")
+	cp2, _ := compilePolicy([]byte(whPolicy), 10, map[string]string{"baska": "x"})
+	assertFailClosed(t, cp2, "yanlis isimli secret")
+}
+
+// Bilinmeyen saglayici da fail-closed olmali.
+func TestUnknownProviderFailsClosed(t *testing.T) {
 	raw := strings.Replace(whPolicy, `"provider":"github"`, `"provider":"myprovider"`, 1)
-	if cp, _ := compilePolicy([]byte(raw), 10, map[string]string{"gh": "s"}); cp != nil {
-		t.Fatal("bilinmeyen saglayici ile kural etkin kaldi")
-	}
+	cp, _ := compilePolicy([]byte(raw), 10, map[string]string{"gh": "s"})
+	assertFailClosed(t, cp, "bilinmeyen saglayici")
 }
 
 // policySecretRefs benzersiz adlari toplamali.

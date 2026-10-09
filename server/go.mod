@@ -2,6 +2,8 @@ module github.com/tkodcumpeg4/zorven/server
 
 go 1.25.0
 
+toolchain go1.26.6
+
 require (
 	github.com/emersion/go-message v0.18.2
 	github.com/emersion/go-smtp v0.25.0

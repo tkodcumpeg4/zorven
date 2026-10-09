@@ -437,12 +437,19 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 			// Ziyaretçi OAuth (tünel mode=oauth): tünel arkasındaki servise erişen
 			// dış kullanıcıları Google/GitHub ile doğrular. İmza sırrı ve en az bir
 			// sağlayıcı creds'i yoksa kendiliğinden devre dışı (oauth modu fail-closed).
-			visitorSecret := os.Getenv("BETTER_AUTH_SECRET")
+			visitorSecret, visitorWarn, secErr := resolveVisitorSecret(
+				os.Getenv("BETTER_AUTH_SECRET"), apiSrv.PlatformDomain)
+			if secErr != nil {
+				return secErr
+			}
+			if visitorWarn {
+				log.Warn("BETTER_AUTH_SECRET tanimli degil; yalniz gelistirme icin sabit ziyaretci anahtari kullaniliyor")
+			}
 			visitorHost := strings.TrimSpace(os.Getenv("ZORVEN_VISITOR_AUTH_HOST"))
 			if visitorHost == "" && apiSrv.PlatformDomain != "" {
 				visitorHost = "app." + apiSrv.PlatformDomain
 			}
-			visitorMgr := visitorauth.New([]byte(visitorSecret), visitorHost,
+			visitorMgr := visitorauth.New(deriveKey([]byte(visitorSecret), keyPurposeVisitor), visitorHost,
 				map[string]*visitorauth.Provider{
 					"google": {
 						Name:         "google",
@@ -473,7 +480,7 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				log,
 			)
 			proxy.Visitor = visitorMgr
-			proxy.BasicSecret = []byte(visitorSecret)
+			proxy.BasicSecret = deriveKey([]byte(visitorSecret), keyPurposeBasicAuth)
 			proxy.AccessEvents = accessPersister
 			visitorMgr.OnEvent = proxy.RecordVisitorEvent
 			if visitorMgr.Enabled() {
@@ -681,6 +688,8 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 					w.Header().Set("X-Content-Type-Options", "nosniff")
 					w.Header().Set("X-Frame-Options", "DENY")
 					w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+					// F-20: CSP Report-Only + Permissions-Policy (yalniz kontrol/site; tunel yanitina degil).
+					setControlSecurityHeaders(w.Header(), analyticsOrigins(analyticsHosts))
 					// HSTS yalniz TLS'te ve yalniz kontrol hostlari icin. includeSubDomains
 					// YOK: kiraci tunel alt alanlarinin davranisini burada belirlemeyiz.
 					if r.TLS != nil && !ingress.IsIPHost(r.Host) {
@@ -1067,17 +1076,32 @@ func parseAllowList(flag []string, env string) map[string]bool {
 // yukler; yoksa bir kez uretip kaydeder. Boylece sunucu yeniden baslatildiginda
 // mevcut oturumlar gecerli kalir (anahtar degismedigi surece).
 func resolveSessionManager(ctx context.Context, st store.Store) (*session.Manager, error) {
-	secret, err := st.GetSetting(ctx, settingSessionSecret)
+	stored, err := st.GetSetting(ctx, settingSessionSecret)
+	var secret string
 	if errors.Is(err, store.ErrNotFound) {
 		secret, err = session.GenerateSecret()
 		if err != nil {
 			return nil, err
 		}
-		if err := st.SetSetting(ctx, settingSessionSecret, secret); err != nil {
+		if err := st.SetSetting(ctx, settingSessionSecret, pgstore.SealString(secret)); err != nil {
 			return nil, err
 		}
 	} else if err != nil {
 		return nil, err
+	} else {
+		// F-17: "enc:v1:" onekli deger sifreli; onek yoksa eski duz metin okunur ve
+		// anahtar varsa ilk acilista sifreli yeniden yazilir.
+		secret, err = pgstore.OpenString(stored)
+		if err != nil {
+			return nil, fmt.Errorf("oturum gizli anahtari cozulemedi (ZORVEN_SECRET_KEY?): %w", err)
+		}
+		if !pgstore.IsSealed(stored) {
+			if sealed := pgstore.SealString(secret); sealed != stored {
+				if err := st.SetSetting(ctx, settingSessionSecret, sealed); err != nil {
+					slog.Warn("oturum gizli anahtari sifreli yeniden yazilamadi", "err", err)
+				}
+			}
+		}
 	}
 	raw, err := base64.StdEncoding.DecodeString(secret)
 	if err != nil {

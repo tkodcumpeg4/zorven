@@ -71,8 +71,8 @@ func TestHasRules(t *testing.T) {
 	}
 	e2 := NewEngine(ms, &mockEntitlementService{ipAllowlistAllowed: false})
 	_ = e2.Reload(ctx)
-	if e2.HasRules(ctx, "ten", "tun_a") {
-		t.Fatal("plan ozelligi yoksa statik liste etkin degil")
+	if !e2.HasRules(ctx, "ten", "tun_a") {
+		t.Fatal("plan ozelligi yoksa bile mevcut statik liste etkin kalir")
 	}
 }
 
@@ -194,10 +194,14 @@ func TestEngine_CheckAllowed(t *testing.T) {
 		t.Errorf("kurali olmayan baska kiraci varsayilan acik olmaliydi, ok=%v", ok)
 	}
 
-	// 8. Planda FeatureIPAllowlist kapali ise: filtre bypass edilmeli
+	// 8. Planda FeatureIPAllowlist kapali olsa da mevcut kurallar uygulanmali (F-09)
 	ent.ipAllowlistAllowed = false
 	ok, err = engine.CheckAllowed(ctx, tenantID, tunnel1, "192.168.2.1")
+	if err != nil || ok {
+		t.Errorf("ozellik planda kapaliyken mevcut kural uygulanmali (izin listesi disi -> red), ok=%v err=%v", ok, err)
+	}
+	ok, err = engine.CheckAllowed(ctx, tenantID, tunnel1, "10.50.0.1")
 	if err != nil || !ok {
-		t.Errorf("ozellik planda kapaliyken filtre bypass edilmeliydi, ok=%v", ok)
+		t.Errorf("ozellik kapaliyken izin listesindeki IP gecmeli, ok=%v err=%v", ok, err)
 	}
 }

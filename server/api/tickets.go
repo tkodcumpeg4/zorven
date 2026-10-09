@@ -11,8 +11,18 @@ import (
 // cagrisi ile WS baglantisi arasindaki birkac saniyeyi kapatmali.
 const ticketTTL = 30 * time.Second
 
+// Bilet turleri: terminal ve ekran biletleri birbirinin yerine kullanilamaz.
+const (
+	ticketKindTerminal = "terminal"
+	ticketKindScreen   = "screen"
+)
+
 // TicketInfo, biletin kime ve hangi istemciye ait oldugunu tutar.
 type TicketInfo struct {
+	Kind      string
+	Shell     string // terminal biletleri: secilen kabuk ID'si (opsiyonel)
+	Attach    string // terminal biletleri: yeniden baglanilacak oturum ID'si (opsiyonel)
+	Owner     string // terminal biletleri: bileti alan kimlik (oturum sahibi)
 	TenantID  string
 	ClientID  string
 	ExpiresAt time.Time
@@ -38,18 +48,19 @@ func NewTicketStore() *TicketStore {
 }
 
 // issue, yeni bir bilet uretir ve kiraci/istemciye baglar.
-func (ts *TicketStore) issue(tenantID, clientID string) string {
-	return ts.issueWithRelease(tenantID, clientID, nil)
+func (ts *TicketStore) issue(kind, tenantID, clientID string) string {
+	return ts.issueWithRelease(kind, tenantID, clientID, nil)
 }
 
 // issueWithRelease, slot tahsis fonksiyonu ile yeni bir bilet uretir.
-func (ts *TicketStore) issueWithRelease(tenantID, clientID string, release func()) string {
+func (ts *TicketStore) issueWithRelease(kind, tenantID, clientID string, release func()) string {
 	b := make([]byte, 24)
 	rand.Read(b)
 	tok := hex.EncodeToString(b)
 
 	ts.mu.Lock()
 	ts.tickets[tok] = TicketInfo{
+		Kind:      kind,
 		TenantID:  tenantID,
 		ClientID:  clientID,
 		ExpiresAt: time.Now().Add(ticketTTL),
@@ -60,13 +71,13 @@ func (ts *TicketStore) issueWithRelease(tenantID, clientID string, release func(
 }
 
 // redeem, bileti dogrular ve TEK KULLANIMLIK oldugu icin siler.
-func (ts *TicketStore) redeem(tok string, expectedTenantID, expectedClientID string) (string, bool) {
-	tenantID, _, ok := ts.redeemWithRelease(tok, expectedTenantID, expectedClientID)
+func (ts *TicketStore) redeem(kind, tok string, expectedTenantID, expectedClientID string) (string, bool) {
+	tenantID, _, ok := ts.redeemWithRelease(kind, tok, expectedTenantID, expectedClientID)
 	return tenantID, ok
 }
 
 // redeemWithRelease, bileti dogrular, siler ve varsa bagli release fonksiyonunu doner.
-func (ts *TicketStore) redeemWithRelease(tok string, expectedTenantID, expectedClientID string) (string, func(), bool) {
+func (ts *TicketStore) redeemWithRelease(kind, tok string, expectedTenantID, expectedClientID string) (string, func(), bool) {
 	if tok == "" {
 		return "", nil, false
 	}
@@ -80,6 +91,12 @@ func (ts *TicketStore) redeemWithRelease(tok string, expectedTenantID, expectedC
 	delete(ts.tickets, tok) // tek kullanimlik
 
 	if time.Now().After(info.ExpiresAt) {
+		if info.Release != nil {
+			info.Release()
+		}
+		return "", nil, false
+	}
+	if info.Kind != kind {
 		if info.Release != nil {
 			info.Release()
 		}

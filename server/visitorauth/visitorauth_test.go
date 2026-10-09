@@ -34,7 +34,7 @@ func TestEnabled(t *testing.T) {
 
 func TestSessionRoundTrip(t *testing.T) {
 	m := testManager()
-	tok := m.signToken(sessionClaims{Email: "a@b.com", Host: "api.example.com", Exp: time.Now().Add(time.Hour).Unix()})
+	tok := m.signToken(purposeSession, sessionClaims{Email: "a@b.com", Host: "api.example.com", Exp: time.Now().Add(time.Hour).Unix()})
 
 	r := httptest.NewRequest("GET", "https://api.example.com/x", nil)
 	r.AddCookie(&http.Cookie{Name: sessionCookie, Value: tok})
@@ -46,7 +46,7 @@ func TestSessionRoundTrip(t *testing.T) {
 
 func TestSessionRejectsTampered(t *testing.T) {
 	m := testManager()
-	tok := m.signToken(sessionClaims{Email: "a@b.com", Host: "api.example.com", Exp: time.Now().Add(time.Hour).Unix()})
+	tok := m.signToken(purposeSession, sessionClaims{Email: "a@b.com", Host: "api.example.com", Exp: time.Now().Add(time.Hour).Unix()})
 	// imzayı boz
 	bad := tok[:len(tok)-2] + "xy"
 	r := httptest.NewRequest("GET", "https://api.example.com/x", nil)
@@ -58,7 +58,7 @@ func TestSessionRejectsTampered(t *testing.T) {
 
 func TestSessionRejectsExpired(t *testing.T) {
 	m := testManager()
-	tok := m.signToken(sessionClaims{Email: "a@b.com", Host: "api.example.com", Exp: time.Now().Add(-time.Minute).Unix()})
+	tok := m.signToken(purposeSession, sessionClaims{Email: "a@b.com", Host: "api.example.com", Exp: time.Now().Add(-time.Minute).Unix()})
 	r := httptest.NewRequest("GET", "https://api.example.com/x", nil)
 	r.AddCookie(&http.Cookie{Name: sessionCookie, Value: tok})
 	if _, ok := m.SessionEmail(r); ok {
@@ -68,7 +68,7 @@ func TestSessionRejectsExpired(t *testing.T) {
 
 func TestSessionRejectsWrongHost(t *testing.T) {
 	m := testManager()
-	tok := m.signToken(sessionClaims{Email: "a@b.com", Host: "baska.example.com", Exp: time.Now().Add(time.Hour).Unix()})
+	tok := m.signToken(purposeSession, sessionClaims{Email: "a@b.com", Host: "baska.example.com", Exp: time.Now().Add(time.Hour).Unix()})
 	r := httptest.NewRequest("GET", "https://api.example.com/x", nil)
 	r.AddCookie(&http.Cookie{Name: sessionCookie, Value: tok})
 	if _, ok := m.SessionEmail(r); ok {
@@ -125,7 +125,7 @@ func TestStartRedirectsToProvider(t *testing.T) {
 
 func TestFinishSetsCookieAndRedirects(t *testing.T) {
 	m := testManager()
-	grant := m.signToken(grantClaims{Email: "a@b.com", Host: "api.example.com", RD: "/gizli", Exp: time.Now().Add(time.Minute).Unix()})
+	grant := m.signToken(purposeGrant, grantClaims{Email: "a@b.com", Host: "api.example.com", RD: "/gizli", Exp: time.Now().Add(time.Minute).Unix()})
 	r := httptest.NewRequest("GET", "https://api.example.com/_zva/finish?g="+grant, nil)
 	w := httptest.NewRecorder()
 	m.handleFinish(w, r)
@@ -148,11 +148,64 @@ func TestFinishSetsCookieAndRedirects(t *testing.T) {
 
 func TestFinishRejectsWrongHost(t *testing.T) {
 	m := testManager()
-	grant := m.signToken(grantClaims{Email: "a@b.com", Host: "baska.example.com", RD: "/", Exp: time.Now().Add(time.Minute).Unix()})
+	grant := m.signToken(purposeGrant, grantClaims{Email: "a@b.com", Host: "baska.example.com", RD: "/", Exp: time.Now().Add(time.Minute).Unix()})
 	r := httptest.NewRequest("GET", "https://api.example.com/_zva/finish?g="+grant, nil)
 	w := httptest.NewRecorder()
 	m.handleFinish(w, r)
 	if w.Code == http.StatusFound {
 		t.Fatal("host uyuşmazlığında çerez yazılmamalı")
+	}
+}
+
+func TestSafeRedirectPath(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"", "/"},
+		{"/", "/"},
+		{"/gizli?a=1", "/gizli?a=1"},
+		{"/a/b#x", "/a/b#x"},
+		{"//evil.com", "/"},
+		{"/\\evil.com", "/"},
+		{"/%5Cevil.com", "/"},
+		{"/%5cevil.com", "/"},
+		{"/\t/evil.com", "/"},
+		{"/%09/evil.com", "/"},
+		{"/%2Fevil.com", "/"},
+		{"/a\\b", "/"},
+		{"/a\nb", "/"},
+		{"/\x00", "/"},
+		{"https://evil.com", "/"},
+		{"evil.com", "/"},
+		{"javascript:alert(1)", "/"},
+		{"/%zz", "/"},
+		{"/" + strings.Repeat("a", 3000), "/"},
+	}
+	for _, c := range cases {
+		if got := SafeRedirectPath(c.in); got != c.want {
+			t.Errorf("SafeRedirectPath(%q)=%q, beklenen %q", c.in, got, c.want)
+		}
+		if got := safeRD(c.in); got != c.want {
+			t.Errorf("safeRD(%q)=%q, beklenen %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestTokenPurposeSeparation(t *testing.T) {
+	m := testManager()
+	exp := time.Now().Add(time.Minute).Unix()
+	state := m.signToken(purposeState, stateClaims{Host: "api.example.com", Exp: exp})
+	var g grantClaims
+	if m.verifyToken(purposeGrant, state, &g) {
+		t.Fatal("state jetonu grant olarak kabul edilmemeli")
+	}
+	if m.verifyToken(purposeSession, state, &g) {
+		t.Fatal("state jetonu oturum olarak kabul edilmemeli")
+	}
+	var st stateClaims
+	if !m.verifyToken(purposeState, state, &st) {
+		t.Fatal("state jetonu kendi amacıyla doğrulanmalı")
+	}
+	grant := m.signToken(purposeGrant, grantClaims{Email: "a@b.com", Host: "api.example.com", Exp: exp})
+	if m.verifyToken(purposeSession, grant, &g) || m.verifyToken(purposeState, grant, &st) {
+		t.Fatal("grant jetonu başka amaçla kabul edilmemeli")
 	}
 }

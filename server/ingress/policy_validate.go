@@ -30,6 +30,10 @@ func ValidatePolicyConfig(raw []byte) error {
 	return nil
 }
 
+// PolicySecretRefs, config icinde gecen benzersiz {{secret:ad}} adlarini doner
+// (API kayit-zamani dogrulamasi icin).
+func PolicySecretRefs(raw []byte) []string { return policySecretRefs(raw) }
+
 var rateKeyHeaderRe = regexp.MustCompile(`^header:[A-Za-z0-9-]+$`)
 
 func validatePolicyRule(r rawPolicyRule) error {

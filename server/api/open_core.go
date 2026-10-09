@@ -9,6 +9,7 @@ package api
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/tkodcumpeg4/zorven/server/store"
 )
@@ -58,4 +59,52 @@ func (s *Server) requirePrivileged(w http.ResponseWriter, r *http.Request, tenan
 	writeJSONError(w, http.StatusForbidden, "forbidden",
 		"bu islem yalnizca owner veya admin tarafindan yapilabilir")
 	return false
+}
+
+// requirePrivilegedCaller, kiraci baglamini cozup requirePrivileged'e devreder.
+// Kiraci baglami yoksa karar vermez (asil handler no_tenant hatasini yazar).
+func (s *Server) requirePrivilegedCaller(w http.ResponseWriter, r *http.Request) bool {
+	tenantID, ok := s.tenantFor(r)
+	if !ok {
+		return true
+	}
+	return s.requirePrivileged(w, r, tenantID)
+}
+
+// requireRemoteAccess, uzak terminal/ekran bileti icin yetkiyi denetler. Acikta
+// cihaz politikasi (sifir guven) yoktur: uzak kabuk yalniz owner/admin (veya
+// kullaniciya bagli olmayan kiraci kimligi) icindir.
+func (s *Server) requireRemoteAccess(w http.ResponseWriter, r *http.Request, tenantID, _ string) bool {
+	return s.requirePrivileged(w, r, tenantID)
+}
+
+// knownRole, rolun owner/admin/member'dan biri olup olmadigi; bunlarin disindaki
+// (or. "viewer") roller hicbir yetki almaz.
+func knownRole(role string) bool {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case store.RoleOwner, "admin", "member":
+		return true
+	}
+	return false
+}
+
+// callerPrivileged, cagiranin owner/admin (veya kullaniciya bagli olmayan
+// kimlik) olup olmadigini doner; hata yalniz rol sorgusu basarisizsa doner.
+func (s *Server) callerPrivileged(r *http.Request, tenantID string) (bool, error) {
+	if isPlatformAdmin(r.Context()) {
+		return true, nil
+	}
+	u, ok := userFromContext(r.Context())
+	if !ok {
+		return true, nil
+	}
+	role := u.Role
+	if role == "" || role == "api_token" {
+		var err error
+		role, err = s.Store.GetMemberRole(r.Context(), tenantID, u.ID)
+		if err != nil {
+			return false, err
+		}
+	}
+	return isPrivilegedRole(role), nil
 }

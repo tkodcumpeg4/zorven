@@ -41,6 +41,9 @@ func (s *Server) createIPRule(w http.ResponseWriter, r *http.Request) {
 	if !requireScope(w, r, ScopeIPAllowWrite) {
 		return
 	}
+	if !s.requirePrivilegedCaller(w, r) {
+		return
+	}
 	tenantID, ok := s.tenantFor(r)
 	if !ok {
 		writeJSONError(w, http.StatusInternalServerError, "no_tenant", "istek kiraci kapsami olmadan ulasti")
@@ -108,6 +111,9 @@ func (s *Server) updateIPRule(w http.ResponseWriter, r *http.Request) {
 	if !requireScope(w, r, ScopeIPAllowWrite) {
 		return
 	}
+	if !s.requirePrivilegedCaller(w, r) {
+		return
+	}
 	tenantID, ok := s.tenantFor(r)
 	if !ok {
 		writeJSONError(w, http.StatusInternalServerError, "no_tenant", "istek kiraci kapsami olmadan ulasti")
@@ -128,6 +134,15 @@ func (s *Server) updateIPRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Kurali (yeniden) etkinlestirmek yeni kural eklemekle esdeger: plan yetkisi gerekir.
+	// Pasife alma ve aciklama guncelleme plan ozelligi olmadan da serbesttir.
+	if body.Enabled != nil && *body.Enabled && s.Entitlements != nil {
+		if err := s.Entitlements.CheckFeature(r.Context(), tenantID, entitlements.FeatureIPAllowlist); err != nil {
+			writeEntitlementError(w, err)
+			return
+		}
+	}
+
 	rule, err := s.Store.UpdateIPRule(r.Context(), tenantID, id, body.Enabled, body.Description)
 	if err != nil {
 		s.fail(w, err)
@@ -144,6 +159,9 @@ func (s *Server) updateIPRule(w http.ResponseWriter, r *http.Request) {
 // deleteIPRule, IP izin kuralini siler.
 func (s *Server) deleteIPRule(w http.ResponseWriter, r *http.Request) {
 	if !requireScope(w, r, ScopeIPAllowWrite) {
+		return
+	}
+	if !s.requirePrivilegedCaller(w, r) {
 		return
 	}
 	tenantID, ok := s.tenantFor(r)

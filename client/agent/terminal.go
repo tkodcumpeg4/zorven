@@ -2,8 +2,6 @@ package agent
 
 import (
 	"context"
-	"os"
-	"runtime"
 	"sync"
 
 	"github.com/aymanbagabas/go-pty"
@@ -22,6 +20,10 @@ type terminalManager struct {
 	mu        sync.Mutex
 	sessions  map[string]*terminalSession
 	onChanged func() // oturum sayisi degistiginde cagrilir (nil olabilir)
+
+	shells    shellSet // ajanin kesfettigi kabuklar (izin listesi)
+	plainZsh  bool     // true: Zorven zsh profili kullanilmaz
+	plainBash bool     // true: Zorven bash rcfile'i kullanilmaz
 }
 
 type terminalSession struct {
@@ -31,8 +33,9 @@ type terminalSession struct {
 	once sync.Once
 }
 
-func newTerminalManager(cs *clientSession) *terminalManager {
-	return &terminalManager{cs: cs, sessions: make(map[string]*terminalSession)}
+func newTerminalManager(cs *clientSession, shells shellSet, plainZsh, plainBash bool) *terminalManager {
+	return &terminalManager{cs: cs, sessions: make(map[string]*terminalSession),
+		shells: shells, plainZsh: plainZsh, plainBash: plainBash}
 }
 
 // count, aktif terminal oturumu sayisini doner.
@@ -42,29 +45,26 @@ func (tm *terminalManager) count() int {
 	return len(tm.sessions)
 }
 
-// shellCommand, platforma uygun varsayilan kabugu doner.
-func shellCommand() string {
-	if runtime.GOOS == "windows" {
-		if ps, ok := os.LookupEnv("COMSPEC"); ok && ps != "" {
-			return ps // genelde cmd.exe
-		}
-		return "powershell.exe"
-	}
-	if sh, ok := os.LookupEnv("SHELL"); ok && sh != "" {
-		return sh
-	}
-	return "/bin/sh"
-}
-
 // open, yeni bir kabuk oturumu baslatir ve ciktisini sunucuya akitir.
 func (tm *terminalManager) open(ctx context.Context, msg protocol.TerminalOpen) {
+	// GUVENLIK: yalnizca ajanin kendi kesfettigi kabuklar kabul edilir; sunucudan
+	// gelen "shell" bir yol degil, o listedeki bir ID'dir.
+	sh, ok := tm.shells.find(msg.Shell)
+	if !ok {
+		tm.sendExit(ctx, msg.SessionID, 1, errUnknownShell.Error()+": "+msg.Shell)
+		return
+	}
+
 	p, err := pty.New()
 	if err != nil {
 		tm.sendExit(ctx, msg.SessionID, 1, "pty acilamadi: "+err.Error())
 		return
 	}
 
-	cmd := p.Command(shellCommand())
+	plan := prepareLaunch(sh, tm.plainZsh, tm.plainBash)
+	cmd := p.Command(plan.Path, plan.Args[1:]...)
+	cmd.Env = plan.Env
+	cmd.Dir = plan.Dir
 	if err := cmd.Start(); err != nil {
 		p.Close()
 		tm.sendExit(ctx, msg.SessionID, 1, "kabuk baslatilamadi: "+err.Error())

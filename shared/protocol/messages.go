@@ -141,6 +141,20 @@ type Hello struct {
 
 	// Metrics, istemcinin ilk baglanti anindaki canli donanim metrikleri.
 	Metrics *Metrics `json:"metrics,omitempty"`
+
+	// Shells / DefaultShell (uzak terminal kabuk secici): ajanin bu makinede
+	// KENDI buldugu kabuklar ve varsayilani (ShellInfo.ID). Eski istemciler
+	// gondermez; sunucu o zaman kabuk secimi sunmaz (geriye uyumlu).
+	Shells       []ShellInfo `json:"shells,omitempty"`
+	DefaultShell string      `json:"default_shell,omitempty"`
+}
+
+// ShellInfo, istemcide bulunan bir kabugu tanimlar. TerminalOpen.Shell bu
+// listedeki ID'lerden biri olmalidir; ajan listesinde olmayan degeri reddeder.
+type ShellInfo struct {
+	ID   string `json:"id"`   // zsh | bash | fish | sh | pwsh | powershell | cmd | wsl ...
+	Name string `json:"name"` // gosterim adi
+	Path string `json:"path"` // ajan makinesindeki tam yol (yalnizca bilgi)
 }
 
 // Metrics, istemcinin canlı donanım kullanım verilerini taşır.
@@ -391,6 +405,10 @@ type TerminalOpen struct {
 	SessionID string      `json:"session_id"`
 	Cols      uint16      `json:"cols"`
 	Rows      uint16      `json:"rows"`
+	// Shell (opsiyonel), ajanin bildirdigi kabuk listesinden bir ID. Bos ise
+	// ajan varsayilani kullanir. Ajan listesinde olmayan degeri REDDEDER (yol
+	// asla sunucudan alinmaz). Eski ajanlar bu alani yok sayar.
+	Shell string `json:"shell,omitempty"`
 }
 
 // TerminalInput, kullanicinin tus vuruslari (sunucu -> istemci).

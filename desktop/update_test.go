@@ -1,7 +1,10 @@
 package main
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"runtime"
 	"testing"
@@ -48,5 +51,30 @@ func TestVerifyDownload(t *testing.T) {
 func TestNewerVersionPatch(t *testing.T) {
 	if !newerVersion("0.2.3", "0.2.1") || newerVersion("0.2.1", "0.2.3") || newerVersion("0.2.3", "0.2.3") {
 		t.Error("yama surumu karsilastirmasi hatali")
+	}
+}
+
+func TestParseSignedManifest(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	_, otherPriv, _ := ed25519.GenerateKey(rand.Reader)
+	keys := []string{base64.StdEncoding.EncodeToString(pub)}
+	body := []byte(`{"version":"0.3.0","files":{}}`)
+	sign := func(k ed25519.PrivateKey, b []byte) []byte {
+		return []byte(base64.StdEncoding.EncodeToString(ed25519.Sign(k, b)))
+	}
+	if m, err := parseSignedManifest(body, sign(priv, body), keys); err != nil || m.Version != "0.3.0" {
+		t.Fatalf("dogru imza reddedildi: %v", err)
+	}
+	if _, err := parseSignedManifest(body, sign(otherPriv, body), keys); err == nil {
+		t.Fatal("yanlis anahtar imzasi kabul edildi")
+	}
+	if _, err := parseSignedManifest(body, nil, keys); err == nil {
+		t.Fatal("eksik imza kabul edildi")
+	}
+	if _, err := parseSignedManifest([]byte(`{"version":"9.9.9"}`), sign(priv, body), keys); err == nil {
+		t.Fatal("degistirilmis manifest kabul edildi")
+	}
+	if _, err := parseSignedManifest(body, sign(priv, body), []string{}); err == nil {
+		t.Fatal("anahtarsiz yapilandirmada kabul edildi")
 	}
 }

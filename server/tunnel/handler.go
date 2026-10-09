@@ -215,6 +215,7 @@ func (h *Handler) handshake(ctx context.Context, s *Session) error {
 	s.Version, s.Platform = hello.ClientVersion, hello.Platform
 	s.AppKind = hello.AppKind
 	s.IsService = hello.IsService
+	s.Shells, s.DefaultShell = sanitizeShells(hello.Shells, hello.DefaultShell)
 	if hello.Metrics != nil {
 		s.SetMetrics(hello.Metrics)
 	}
@@ -474,7 +475,13 @@ func sanitizeTunnelName(s string) string {
 			b.WriteRune('-')
 		}
 	}
-	res := strings.Trim(b.String(), "-")
+	res := b.String()
+	// Ardisik tireler teke iner: "--" kiraci ayracidir (ad--<slug>), ad
+	// kismi bunu iceremez (F-15).
+	for strings.Contains(res, "--") {
+		res = strings.ReplaceAll(res, "--", "-")
+	}
+	res = strings.Trim(res, "-")
 	if res == "" {
 		return "port"
 	}

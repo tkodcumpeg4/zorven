@@ -37,6 +37,8 @@ func main() {
 		noTerminal     bool
 		noScreen       bool
 		noAutoUpdate   bool
+		plainZsh       bool
+		plainBash      bool
 		printURL       bool
 
 		// ephemeralTTLSec (FAZ 2 / F07): yalnizca "ephemeral" alt komutu doldurur.
@@ -135,19 +137,21 @@ func main() {
 		log := slog.New(logHandler)
 
 		ag := &agent.Agent{
-			ServerAddr:      activeServer,
-			Token:           activeToken,
-			LocalURL:        target,
-			RequestedTarget: target,
-			RequestedTTLSec: ephemeralTTLSec,
-			Insecure:        activeInsecure,
-			CACertPath:      activeCACert,
-			Log:             log,
-			NoTerminal:      finalNoTerminal,
-			NoScreen:        finalNoScreen,
-			Version:         version,
-			NoAutoUpdate:    noAutoUpdate,
-			LogLevel:        levelVar,
+			ServerAddr:        activeServer,
+			Token:             activeToken,
+			LocalURL:          target,
+			RequestedTarget:   target,
+			RequestedTTLSec:   ephemeralTTLSec,
+			Insecure:          activeInsecure,
+			CACertPath:        activeCACert,
+			Log:               log,
+			NoTerminal:        finalNoTerminal,
+			NoScreen:          finalNoScreen,
+			Version:           version,
+			NoAutoUpdate:      noAutoUpdate,
+			TerminalPlainZsh:  plainZsh,
+			TerminalPlainBash: plainBash,
+			LogLevel:          levelVar,
 		}
 
 		// Canli HTTP isteklerini terminale bas
@@ -218,6 +222,8 @@ func main() {
 		f.BoolVar(&noTerminal, "no-terminal", false, "uzaktan terminal erisimini kapat")
 		f.BoolVar(&noScreen, "no-screen", false, "uzaktan ekran paylasimini kapat")
 		f.BoolVar(&noAutoUpdate, "no-auto-update", false, "otomatik guncellemeyi kapat")
+		f.BoolVar(&plainZsh, "terminal-plain-zsh", false, "uzak terminalde Zorven zsh profilini (istem, oneri, vurgulama) kullanma; zsh duz baslar")
+		f.BoolVar(&plainBash, "terminal-plain-bash", false, "uzak terminalde Zorven bash rcfile profilini kullanma")
 		f.BoolVar(&printURL, "print-url", false, "gosterge yerine baglantida makine-okur 'zorven-url: <url>' satirlari yaz (SDK'lar icin)")
 	}
 	addTunnelFlags(root)
@@ -390,9 +396,8 @@ func main() {
 			}
 			fmt.Printf("Guncelleme kontrol ediliyor (mevcut surum: %s, sunucu: %s)...\n", version, srv)
 			if err := ag.CheckUpdateNow(cmd.Context()); err != nil {
-				return err
+				return fmt.Errorf("guncelleme yapilamadi: %w", err)
 			}
-			fmt.Println("Guncel. (yeni surum yoktu veya guncelleme uygulanip yeniden baslatildi)")
 			return nil
 		},
 	}

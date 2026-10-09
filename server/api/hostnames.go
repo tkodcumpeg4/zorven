@@ -301,7 +301,7 @@ func (s *Server) createCustomHostname(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fqdn := strings.ToLower(strings.TrimSpace(body.FQDN))
+	fqdn := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(body.FQDN)), ".")
 	if err := domain.ValidateDomain(fqdn, s.PlatformDomain); err != nil {
 		writeJSONError(w, http.StatusUnprocessableEntity, "invalid_domain", err.Error())
 		return
@@ -482,6 +482,11 @@ func (s *Server) verifyHostname(w http.ResponseWriter, r *http.Request) {
 	}
 
 	verifiedH, err := s.Store.VerifyHostname(r.Context(), tenantID, id)
+	if errors.Is(err, store.ErrHostnameTaken) {
+		writeJSONError(w, http.StatusConflict, "hostname_taken",
+			h.FQDN+" baska bir kiracida zaten dogrulanmis")
+		return
+	}
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -494,6 +499,9 @@ func (s *Server) verifyHostname(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) deleteHostname(w http.ResponseWriter, r *http.Request) {
 	if !requireScope(w, r, ScopeHostnamesWrite) {
+		return
+	}
+	if !s.requirePrivilegedCaller(w, r) {
 		return
 	}
 	tenantID, ok := s.tenantFor(r)

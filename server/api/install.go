@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -15,14 +17,50 @@ var installShTemplate string
 //go:embed templates/install.ps1
 var installPs1Template string
 
-// serveInstallSh, Linux ve macOS icin dinamik bash kurulum scriptini doner.
-func (s *Server) serveInstallSh(w http.ResponseWriter, r *http.Request) {
-	token := strings.TrimSpace(r.URL.Query().Get("token"))
-	server := strings.TrimSpace(r.URL.Query().Get("server"))
+var (
+	installTokenRe = regexp.MustCompile(`^(?:zrv|rpsh|zorven)_live_[A-Za-z0-9_-]{1,128}$`)
+	installHostRe  = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?(?::([0-9]{1,5}))?$`)
+)
+
+// validInstallServer, host[:port] bicimini ve port araligini (1-65535) dogrular.
+func validInstallServer(v string) bool {
+	m := installHostRe.FindStringSubmatch(v)
+	if m == nil {
+		return false
+	}
+	if m[1] != "" {
+		n, err := strconv.Atoi(m[1])
+		if err != nil || n < 1 || n > 65535 {
+			return false
+		}
+	}
+	return true
+}
+
+// installParams, sorgu parametrelerini dogrular; gecersizse 400 yazar ve ok=false doner.
+func installParams(w http.ResponseWriter, r *http.Request) (token, server string, ok bool) {
+	token = strings.TrimSpace(r.URL.Query().Get("token"))
+	server = strings.TrimSpace(r.URL.Query().Get("server"))
 	if server == "" {
 		server = r.Host
 	}
+	if token != "" && !installTokenRe.MatchString(token) {
+		http.Error(w, "gecersiz token bicimi", http.StatusBadRequest)
+		return "", "", false
+	}
+	if !validInstallServer(server) {
+		http.Error(w, "gecersiz sunucu adresi", http.StatusBadRequest)
+		return "", "", false
+	}
+	return token, server, true
+}
 
+// serveInstallSh, Linux ve macOS icin dinamik bash kurulum scriptini doner.
+func (s *Server) serveInstallSh(w http.ResponseWriter, r *http.Request) {
+	token, server, ok := installParams(w, r)
+	if !ok {
+		return
+	}
 	content := strings.ReplaceAll(installShTemplate, "__INJECTED_TOKEN__", token)
 	content = strings.ReplaceAll(content, "__INJECTED_SERVER__", server)
 
@@ -33,12 +71,10 @@ func (s *Server) serveInstallSh(w http.ResponseWriter, r *http.Request) {
 
 // serveInstallPs1, Windows icin dinamik PowerShell kurulum scriptini doner.
 func (s *Server) serveInstallPs1(w http.ResponseWriter, r *http.Request) {
-	token := strings.TrimSpace(r.URL.Query().Get("token"))
-	server := strings.TrimSpace(r.URL.Query().Get("server"))
-	if server == "" {
-		server = r.Host
+	token, server, ok := installParams(w, r)
+	if !ok {
+		return
 	}
-
 	content := strings.ReplaceAll(installPs1Template, "__INJECTED_TOKEN__", token)
 	content = strings.ReplaceAll(content, "__INJECTED_SERVER__", server)
 

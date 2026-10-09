@@ -10,7 +10,9 @@ package ingress
 //     webhook dogrulamasi govdeyi okur, o da sadece eslesen kuralda.
 //   - Taranan alanlar: URL yolu, sorgu dizesi (ham + URL-decode edilmis) ve secili
 //     basliklar. Saldirilar sik sik URL-encode edildigi icin ikisi de taranir.
-//   - Tarama wafScanLimit ile sinirlanir; cok uzun sorgu dizeleri CPU yakamaz.
+//   - Alanlar TAMAMEN taranir (kesme yok; kesmek dolguyla atlatmaya izin verirdi).
+//     CPU korumasi icin tek bir alan wafHardLimit'i (64 KB) asarsa taranmadan
+//     403 ile reddedilir.
 //   - Hangi kuralin eslestigi YANITA YAZILMAZ (bilgi sizdirmaz), yalnizca loglanir.
 
 import (
@@ -20,8 +22,12 @@ import (
 	"strings"
 )
 
-// wafScanLimit, tek bir alandan taranacak azami bayt.
-const wafScanLimit = 8 << 10 // 8 KB
+// wafHardLimit, tek bir alanin azami bayt boyu. Alan bunu asarsa istek
+// reddedilir (wafOversizeRule); bunun altindaki her alan tamamen taranir.
+const wafHardLimit = 64 << 10 // 64 KB
+
+// wafOversizeRule, tarama sinirini asan alanlar icin loglanan sahte kural adi.
+const wafOversizeRule = "oversize-field"
 
 // wafScannedHeaders, taranacak baslik listesi. Tum basliklari taramak pahali ve
 // gereksiz; saldiri yuku pratikte bu uclunde tasinir.
@@ -86,14 +92,6 @@ func compileWAFPatterns(pats []string) ([]*regexp.Regexp, bool) {
 	return out, true
 }
 
-// clip, taranacak metni sinira kirpar.
-func clip(s string) string {
-	if len(s) > wafScanLimit {
-		return s[:wafScanLimit]
-	}
-	return s
-}
-
 // wafScan, istegin taranacak alanlarini kurallardan gecirir.
 // Eslesme varsa eslesme kaynagini (loglamak icin) ve true doner.
 func wafScan(r *http.Request, rules []*regexp.Regexp) (string, bool) {
@@ -102,17 +100,24 @@ func wafScan(r *http.Request, rules []*regexp.Regexp) (string, bool) {
 	}
 
 	fields := make([]string, 0, 3+len(wafScannedHeaders))
-	fields = append(fields, clip(r.URL.Path))
+	fields = append(fields, r.URL.Path)
 	if q := r.URL.RawQuery; q != "" {
-		fields = append(fields, clip(q))
+		fields = append(fields, q)
 		// URL-decode edilmis hali: saldirilar sik sik encode edilerek gecirilir.
 		if dec, err := url.QueryUnescape(q); err == nil && dec != q {
-			fields = append(fields, clip(dec))
+			fields = append(fields, dec)
 		}
 	}
 	for _, h := range wafScannedHeaders {
 		if v := r.Header.Get(h); v != "" {
-			fields = append(fields, clip(v))
+			fields = append(fields, v)
+		}
+	}
+
+	// Ust sinir: bunun altinda her sey tamamen taranir; ustu fail-closed.
+	for _, f := range fields {
+		if len(f) > wafHardLimit {
+			return wafOversizeRule, true
 		}
 	}
 

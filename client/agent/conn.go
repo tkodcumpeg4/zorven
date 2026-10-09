@@ -37,7 +37,11 @@ type Agent struct {
 	Log        *slog.Logger
 	NoTerminal bool // true ise uzak kabuk (PTY) erisimi tamamen reddedilir
 	NoScreen   bool // true ise uzak ekran paylasimi tamamen reddedilir
-	IsService  bool // true ise arka plan sistem servisi olarak calisir
+	// TerminalPlainZsh / TerminalPlainBash true ise uzak terminalde Zorven
+	// zsh / bash profili (ZDOTDIR / --rcfile) kullanilmaz; kabuk duz baslar.
+	TerminalPlainZsh  bool
+	TerminalPlainBash bool
+	IsService         bool // true ise arka plan sistem servisi olarak calisir
 	// AppKind, "desktop" ise hello'da bildirilir (masaustu uygulamasi).
 	AppKind string
 
@@ -51,6 +55,11 @@ type Agent struct {
 	LogLevel *slog.LevelVar
 	// updating, es zamanli guncelleme tetiklerini serilestiren bayrak.
 	updating atomic.Bool
+	// forceUpdate: elle `zorven update` (sunucu ayarindan bagimsiz); lastUpdateErr sonucunu tasir.
+	forceUpdate   atomic.Bool
+	// updateKeys: test icin acik anahtar listesi gecersiz kilma (nil = updatesig.PublicKeys).
+	updateKeys []string
+	lastUpdateErr error
 
 	// RequestedTarget, tek komutla acilacak port/hedef (or. "http://localhost:8080").
 	RequestedTarget string
@@ -88,6 +97,7 @@ type Agent struct {
 	lastStatus Status     // son emit edilen durum (refreshSessions icin)
 	terminal   *terminalManager
 	screen     *screenManager
+	shells     shellSet // son el sikismada kesfedilen kabuklar
 }
 
 // setupTLS, --ca-cert verilmisse o sertifikayi guven havuzuna ekler.
@@ -299,8 +309,14 @@ func (a *Agent) clientVersion() string {
 }
 
 func (a *Agent) handshake(ctx context.Context, conn *websocket.Conn) error {
+	// Kabuklari her baglantida yeniden kesfet (arada yeni kabuk kurulmus olabilir).
+	shells := discoverShells()
+	a.mu.Lock()
+	a.shells = shells
+	a.mu.Unlock()
+
 	hello, err := protocol.Marshal(protocol.Hello{
-		Type:          protocol.TypeHello,
+		Type:            protocol.TypeHello,
 		ClientVersion:   a.clientVersion(),
 		ProtocolVersion: protocol.Version,
 		AppKind:         a.AppKind,
@@ -314,6 +330,8 @@ func (a *Agent) handshake(ctx context.Context, conn *websocket.Conn) error {
 		Hostname:        deviceHostname(),
 		IPs:             localIPs(),
 		Metrics:         metrics.Collect(),
+		Shells:          shells.List,
+		DefaultShell:    shells.Default,
 	}, protocol.TypeHello)
 	if err != nil {
 		return err
@@ -384,7 +402,10 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) error {
 	cs.flowControl = a.flowControl // el sikismada pazarlandi
 	cs.onRequest = a.OnRequest
 	cs.SetTargets(a.tunnels)
-	tm := newTerminalManager(cs)
+	a.mu.Lock()
+	shells := a.shells
+	a.mu.Unlock()
+	tm := newTerminalManager(cs, shells, a.TerminalPlainZsh, a.TerminalPlainBash)
 	sm := newScreenManager(cs)
 
 	a.mu.Lock()

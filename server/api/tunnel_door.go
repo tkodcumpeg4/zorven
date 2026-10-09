@@ -155,6 +155,9 @@ func (s *Server) setTunnelDoor(w http.ResponseWriter, r *http.Request) {
 	if !requireScope(w, r, ScopeTunnelsWrite) {
 		return
 	}
+	if !s.requirePrivilegedCaller(w, r) {
+		return
+	}
 	tenantID, tun, ok := s.doorTunnelFor(w, r)
 	if !ok {
 		return
@@ -254,6 +257,9 @@ func (s *Server) listDoorGrants(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) revokeDoorGrant(w http.ResponseWriter, r *http.Request) {
 	if !requireScope(w, r, ScopeTunnelsWrite) {
+		return
+	}
+	if !s.requirePrivilegedCaller(w, r) {
 		return
 	}
 	tenantID, tun, ok := s.doorTunnelFor(w, r)

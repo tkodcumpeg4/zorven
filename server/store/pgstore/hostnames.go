@@ -71,9 +71,16 @@ func (s *Store) AddCustomHostname(ctx context.Context, tenantID, tunnelID, fqdn,
 		VerifyToken: verifyToken,
 		CreatedAt:   time.Now().UTC(),
 	}
-	_, err := s.pool.Exec(ctx,
+	// Dogrulanmamis ozel ad kismi unique indekse girmez (F-11); bu yuzden ayni
+	// ad baska bir yerde platform adi ya da DOGRULANMIS ozel domain olarak
+	// varsa eklemeyi burada reddediyoruz. Ayni kiracidaki kopyayi
+	// idx_hostnames_custom_tenant_fqdn (0069) yakalar.
+	tag, err := s.pool.Exec(ctx,
 		`INSERT INTO hostnames (id, tenant_id, tunnel_id, fqdn, type, verified, verify_token, created_at, project_id)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+		 SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9
+		 WHERE NOT EXISTS (
+		   SELECT 1 FROM hostnames
+		   WHERE lower(fqdn) = lower($4) AND (type <> 'custom' OR verified))`,
 		h.ID, h.TenantID, tunnelVal, h.FQDN, h.Type, h.Verified, h.VerifyToken, h.CreatedAt, h.ProjectID)
 	if err != nil {
 		var pgErr *pgconn.PgError
@@ -81,6 +88,9 @@ func (s *Store) AddCustomHostname(ctx context.Context, tenantID, tunnelID, fqdn,
 			return store.Hostname{}, store.ErrHostnameTaken
 		}
 		return store.Hostname{}, fmt.Errorf("custom hostname eklenemedi: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return store.Hostname{}, store.ErrHostnameTaken
 	}
 	return h, nil
 }
@@ -125,6 +135,11 @@ func (s *Store) VerifyHostname(ctx context.Context, tenantID, id string) (store.
 		id, tenantID).
 		Scan(&h.ID, &h.TenantID, &h.TunnelID, &h.FQDN, &h.Type, &h.Verified, &h.VerifyToken, &h.CreatedAt, &h.ProjectID)
 	if err != nil {
+		// Kismi unique index (0067): baska kiracida ayni FQDN zaten dogrulanmis.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return store.Hostname{}, store.ErrHostnameTaken
+		}
 		return store.Hostname{}, store.ErrNotFound
 	}
 	return h, nil
@@ -143,10 +158,14 @@ func (s *Store) GetHostnameByID(ctx context.Context, tenantID, id string) (store
 }
 
 // GetHostnameByFQDN, ACME sertifika kontrolu veya genel lookup icin global arama yapar.
+// Dogrulanmamis ozel domain kopyalari birden cok kiracida olabildigi icin (F-11)
+// yetkili satir (platform adi veya dogrulanmis ozel domain) once secilir.
 func (s *Store) GetHostnameByFQDN(ctx context.Context, fqdn string) (store.Hostname, error) {
 	var h store.Hostname
 	err := s.pool.QueryRow(ctx,
-		`SELECT `+hostnameCols+` FROM hostnames WHERE lower(fqdn) = lower($1)`,
+		`SELECT `+hostnameCols+` FROM hostnames WHERE lower(fqdn) = lower($1)
+		 ORDER BY (type <> 'custom' OR verified) DESC, created_at
+		 LIMIT 1`,
 		fqdn).
 		Scan(&h.ID, &h.TenantID, &h.TunnelID, &h.FQDN, &h.Type, &h.Verified, &h.VerifyToken, &h.CreatedAt, &h.ProjectID)
 	if err != nil {

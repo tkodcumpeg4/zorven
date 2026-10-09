@@ -289,7 +289,8 @@ func (s *Store) AdminSetTunnelFrozen(ctx context.Context, tunnelID string, froze
 func (s *Store) AdminFreezeByFQDN(ctx context.Context, fqdn string, frozen bool) error {
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE tunnels SET frozen = $2
-		 WHERE id = (SELECT tunnel_id FROM hostnames WHERE lower(fqdn) = lower($1) LIMIT 1)`,
+		 WHERE id = (SELECT tunnel_id FROM hostnames WHERE lower(fqdn) = lower($1)
+		   ORDER BY (type <> 'custom' OR verified) DESC, created_at LIMIT 1)`,
 		fqdn, frozen)
 	if err != nil {
 		return fmt.Errorf("hostname ile dondurma basarisiz: %w", err)

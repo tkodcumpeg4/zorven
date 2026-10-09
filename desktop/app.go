@@ -132,17 +132,22 @@ func (a *App) connect(target string) string {
 
 	var ag *agent.Agent
 	ag = &agent.Agent{
-		ServerAddr:      cfg.ServerAddr,
-		Token:           cfg.Token,
-		LocalURL:        target,
-		RequestedTarget: target,
-		Insecure:        cfg.Insecure,
-		CACertPath:      cfg.CACertPath,
-		NoTerminal:      cfg.NoTerminal,
-		NoScreen:        cfg.NoScreen,
-		Version:         version,
-		AppKind:         "desktop",
-		Log:             a.log,
+		ServerAddr:        cfg.ServerAddr,
+		Token:             cfg.Token,
+		LocalURL:          target,
+		RequestedTarget:   target,
+		Insecure:          cfg.Insecure,
+		CACertPath:        cfg.CACertPath,
+		NoTerminal:        cfg.NoTerminal,
+		NoScreen:          cfg.NoScreen,
+		TerminalPlainZsh:  cfg.TerminalPlainZsh,
+		TerminalPlainBash: cfg.TerminalPlainBash,
+		Version:           version,
+		AppKind:           "desktop",
+		// Masaustu kendi guncelleyicisini kullanir (desktop.json); gomulu ajan
+		// CLI ikilisini bu exe'nin uzerine yazmamali.
+		NoAutoUpdate: true,
+		Log:               a.log,
 		// Eski (iptal edilmis) ajanin gec gelen "durduruldu" durumu yeni
 		// baglantinin durumunu ezmesin: yalnizca aktif ajan yayin yapar.
 		OnStatus: func(s agent.Status) {

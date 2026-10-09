@@ -17,6 +17,7 @@ import (
 	"github.com/tkodcumpeg4/zorven/server/auth"
 	"github.com/tkodcumpeg4/zorven/server/ratelimit"
 	"github.com/tkodcumpeg4/zorven/server/store"
+	"github.com/tkodcumpeg4/zorven/server/visitorauth"
 	"github.com/tkodcumpeg4/zorven/shared/protocol"
 )
 
@@ -188,14 +189,7 @@ func (h *Handler) basicFailed(key string) { h.basicLimiter().Allow(key) }
 
 // safeRDPath, yalniz ayni-host goreli yola izin verir (acik yonlendirme engeli).
 func safeRDPath(rd string) string {
-	if rd == "" || len(rd) > 2048 || rd[0] != '/' || strings.HasPrefix(rd, "//") {
-		return "/"
-	}
-	for i := 0; i < len(rd); i++ {
-		if c := rd[i]; c < 0x20 || c == 0x7f || c == '\\' {
-			return "/"
-		}
-	}
+	rd = visitorauth.SafeRedirectPath(rd)
 	if strings.HasPrefix(rd, "/_zvb/") || strings.HasPrefix(rd, "/_zva/") {
 		return "/"
 	}

@@ -65,3 +65,26 @@ func TestUpdatePolicyPartialAndValidation(t *testing.T) {
 		t.Fatalf("ad/priority guncellenmedi: %d %+v", rec.Code, stub.pol)
 	}
 }
+
+func (p *policyStub) ListSecrets(context.Context, string, string) ([]store.Secret, error) {
+	return []store.Secret{{Name: "var-olan"}}, nil
+}
+
+// Var olmayan {{secret:ad}} referansi 422 olmali; var olan kabul edilmeli (F-02).
+func TestUpdatePolicyUnknownSecretRef422(t *testing.T) {
+	cfg := json.RawMessage(`{"rules":[{"match":{},"action":{"type":"deny"}}]}`)
+	stub := &policyStub{pol: store.Policy{ID: "pol_1", TenantID: "ten_a", Name: "p", Config: cfg, Enabled: true, Priority: 50}}
+	s := &Server{Store: stub}
+
+	bad := `{"config":{"rules":[{"match":{},"action":{"type":"verify_webhook","provider":"github","secret_ref":"{{secret:yok-boyle}}"}}]}}`
+	if rec := putPolicy(t, s, bad); rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("bilinmeyen secret 422 olmali: %d %s", rec.Code, rec.Body.String())
+	}
+	if string(stub.pol.Config) != string(cfg) {
+		t.Fatal("gecersiz referansli config kaydedildi")
+	}
+	good := strings.Replace(bad, "yok-boyle", "var-olan", 1)
+	if rec := putPolicy(t, s, good); rec.Code != http.StatusOK {
+		t.Fatalf("var olan secret kabul edilmeli: %d %s", rec.Code, rec.Body.String())
+	}
+}

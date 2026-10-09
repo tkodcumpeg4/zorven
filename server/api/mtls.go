@@ -44,6 +44,9 @@ func (s *Server) setTunnelMTLS(w http.ResponseWriter, r *http.Request) {
 	if !requireScope(w, r, ScopeTunnelsWrite) {
 		return
 	}
+	if !s.requirePrivilegedCaller(w, r) {
+		return
+	}
 	tenantID, ok := s.tenantFor(r)
 	if !ok {
 		writeJSONError(w, http.StatusInternalServerError, "no_tenant", "istek kiraci kapsami olmadan ulasti")

@@ -94,7 +94,7 @@ func (cs *clientSession) handleStreamOpen(m protocol.StreamOpen) {
 		network = "udp"
 	}
 
-	conn, err := (&net.Dialer{Timeout: streamDialTimeout}).Dial(network, addr)
+	conn, err := streamDialContext(context.Background(), network, addr, streamDialTimeout)
 	if err != nil {
 		cs.sendStreamAck(m.ReqID, protocol.CodeLocalUnreachable, "yerel hedefe baglanilamadi: "+err.Error())
 		return

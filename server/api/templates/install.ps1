@@ -13,8 +13,8 @@ $ErrorActionPreference = "Stop"
 # NOT: Sablon sentinel'i (__INJECTED_..__) sunucuda ReplaceAll ile degistirilir;
 # bu yuzden GUARD karsilastirmasindaki sentinel'i PARCALI yaziyoruz ki degismesin
 # (aksi halde "deger != deger" hep false olur ve enjekte edilen deger kullanilmaz).
-$InjectedToken = "__INJECTED_TOKEN__"
-$InjectedServer = "__INJECTED_SERVER__"
+$InjectedToken = '__INJECTED_TOKEN__'
+$InjectedServer = '__INJECTED_SERVER__'
 $SentinelToken = "__INJECTED" + "_TOKEN__"
 $SentinelServer = "__INJECTED" + "_SERVER__"
 

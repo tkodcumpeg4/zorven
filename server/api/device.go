@@ -8,11 +8,13 @@ import (
 	"io"
 	"math/big"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/tkodcumpeg4/zorven/server/auth"
+	"github.com/tkodcumpeg4/zorven/server/ratelimit"
 )
 
 // deviceCodeTTL, bir eslestirme talebinin gecerli kalma suresi.
@@ -42,7 +44,16 @@ type DeviceAuth struct {
 	mu       sync.Mutex
 	byDevice map[string]*deviceReq
 	byUser   map[string]*deviceReq
+	// fails, basarisiz user_code denemelerini kullanici/IP basina sinirlar (F-29).
+	fails *ratelimit.Limiter
 }
+
+// deviceApproveMaxFails / deviceApproveFailWindow: pencere basina izin verilen
+// basarisiz onay denemesi (8 karakterlik kodun tahmin edilmesini engeller).
+const (
+	deviceApproveMaxFails   = 10
+	deviceApproveFailWindow = 10 * time.Minute
+)
 
 // NewDeviceAuth, bos bir kayit defteri olusturur ve suresi dolanlari temizleyen
 // arka plan dongusunu baslatir.
@@ -50,6 +61,7 @@ func NewDeviceAuth() *DeviceAuth {
 	d := &DeviceAuth{
 		byDevice: make(map[string]*deviceReq),
 		byUser:   make(map[string]*deviceReq),
+		fails:    ratelimit.New(float64(deviceApproveMaxFails)/deviceApproveFailWindow.Seconds(), deviceApproveMaxFails),
 	}
 	go d.gcLoop()
 	return d
@@ -227,12 +239,27 @@ func (s *Server) deviceApprove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Basarisiz deneme siniri: kullanici (yoksa IP) basina.
+	failKey := "ip:" + clientIP(r)
+	if u, uok := userFromContext(r.Context()); uok && u != nil && u.ID != "" {
+		failKey = "user:" + u.ID
+	}
+	if s.Devices.fails != nil && s.Devices.fails.Remaining(failKey) < 1 {
+		w.Header().Set("Retry-After", strconv.Itoa(int(deviceApproveFailWindow.Seconds()/deviceApproveMaxFails)))
+		writeJSONError(w, http.StatusTooManyRequests, "rate_limited",
+			"cok fazla basarisiz kod denemesi, lutfen biraz sonra tekrar deneyin")
+		return
+	}
+
 	// Talebi kilit altinda "approving" olarak SAHIPLEN: ayni kodu es zamanli
 	// iki onay iki ayri istemci (ve iki token) uretmesin.
 	s.Devices.mu.Lock()
 	req, ok := s.Devices.byUser[code]
 	if !ok || time.Since(req.CreatedAt) > deviceCodeTTL {
 		s.Devices.mu.Unlock()
+		if s.Devices.fails != nil {
+			s.Devices.fails.Allow(failKey) // basarisiz deneme jetonu harca
+		}
 		writeJSONError(w, http.StatusNotFound, "invalid_user_code", "Kod bulunamadi veya suresi doldu.")
 		return
 	}

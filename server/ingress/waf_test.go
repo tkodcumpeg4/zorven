@@ -95,30 +95,42 @@ func TestWAFCustomPattern(t *testing.T) {
 	}
 }
 
-// Gecersiz regex kurali DUSURMELI — kullanici korundugunu sanmamali.
-func TestWAFInvalidPatternDisablesRule(t *testing.T) {
+// Gecersiz regex fail-closed (503) olmali — kullanici korundugunu sanmamali.
+func TestWAFInvalidPatternFailsClosed(t *testing.T) {
 	raw := `{"rules":[{"match":{"path_prefix":"/"},"action":{"type":"waf","patterns":["[bozuk"]}}]}`
-	if cp, _ := compilePolicy([]byte(raw), 10, nil); cp != nil {
-		t.Fatal("gecersiz regex ile kural etkin kaldi")
-	}
+	cp, _ := compilePolicy([]byte(raw), 10, nil)
+	assertFailClosed(t, cp, "gecersiz regex")
 }
 
-// Bilinmeyen kume de kurali dusurmeli.
-func TestWAFUnknownRulesetDisablesRule(t *testing.T) {
+// Bilinmeyen kume de fail-closed olmali.
+func TestWAFUnknownRulesetFailsClosed(t *testing.T) {
 	raw := `{"rules":[{"match":{"path_prefix":"/"},"action":{"type":"waf","ruleset":"yok-boyle"}}]}`
-	if cp, _ := compilePolicy([]byte(raw), 10, nil); cp != nil {
-		t.Fatal("bilinmeyen kume ile kural etkin kaldi")
-	}
+	cp, _ := compilePolicy([]byte(raw), 10, nil)
+	assertFailClosed(t, cp, "bilinmeyen kume")
 }
 
-// Cok uzun sorgu dizesi tarama sinirinda kesilmeli (CPU korumasi).
-func TestWAFScanLimit(t *testing.T) {
+// Alanlar tamamen taranir (dolgu ile atlatma yok, F-08); yalniz ust sinir asilirsa red.
+func TestWAFOversizeFieldRejected(t *testing.T) {
 	rt := wafRouter(t, wafPolicy)
-	// Sinirin OTESINE yerlestirilen yuk taranmaz — bu bilincli bir takas.
-	long := strings.Repeat("a", wafScanLimit+100) + "union%20select"
-	out := wafHit(rt, "http://example.com/x?q="+long, nil)
+	pad := strings.Repeat("a", 9000)
+	out := wafHit(rt, "http://example.com/x?pad="+pad+"&q=%3Cscript%3E", nil)
+	if !out.wafBlocked || out.wafRule == wafOversizeRule {
+		t.Errorf("9000 karakter dolgu + payload tarama ile engellenmedi: %+v", out)
+	}
+	// 9000 karakterlik zararsiz Cookie gecmeli.
+	out = wafHit(rt, "http://example.com/x", map[string]string{"Cookie": "s=" + pad})
 	if out.wafBlocked {
-		t.Error("tarama siniri uygulanmadi (sinir otesi taranmis)")
+		t.Error("9000 karakterlik zararsiz Cookie engellendi")
+	}
+	// 70 KB alan oversize ile reddedilir.
+	out = wafHit(rt, "http://example.com/x?q="+strings.Repeat("a", 70<<10), nil)
+	if !out.wafBlocked || out.wafRule != wafOversizeRule {
+		t.Errorf("sinir asan alan engellenmedi: %+v", out)
+	}
+	// Sinir icindeki zararsiz istek gecmeli.
+	out = wafHit(rt, "http://example.com/x?q="+strings.Repeat("a", 1000), nil)
+	if out.wafBlocked {
+		t.Error("sinir icindeki zararsiz istek engellendi")
 	}
 }
 

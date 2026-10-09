@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"strings"
 )
 
@@ -59,6 +60,10 @@ func GetInstructions(fqdn, verifyToken, platformDomain string) VerificationInstr
 	}
 }
 
+// reservedDomainSuffixes, genel DNS'te anlamli olmayan ic ag son ekleridir.
+// (.test/.example bilincli olarak ENGELLENMEZ: staging/e2e testleri kullanir.)
+var reservedDomainSuffixes = []string{".localhost", ".local", ".internal"}
+
 // ValidateDomain, verilen FQDN'in gecerli bir custom domain olup olmadigini kontrol eder.
 func ValidateDomain(fqdn, platformDomain string) error {
 	fqdn = strings.ToLower(strings.TrimSpace(fqdn))
@@ -70,6 +75,18 @@ func ValidateDomain(fqdn, platformDomain string) error {
 
 	if strings.Contains(fqdn, " ") || strings.Contains(fqdn, "/") || strings.Contains(fqdn, ":") {
 		return ErrInvalidDomain
+	}
+
+	if ip, perr := netip.ParseAddr(fqdn); perr == nil && ip.IsValid() {
+		return fmt.Errorf("%w: IP adresi alan adi olamaz", ErrInvalidDomain)
+	}
+	if fqdn == "localhost" {
+		return fmt.Errorf("%w: localhost kullanilamaz", ErrInvalidDomain)
+	}
+	for _, suf := range reservedDomainSuffixes {
+		if strings.HasSuffix(fqdn, suf) {
+			return fmt.Errorf("%w: ayrilmis/ic ag alan adi son eki (%s)", ErrInvalidDomain, suf)
+		}
 	}
 
 	parts := strings.Split(fqdn, ".")
@@ -100,14 +117,14 @@ func ValidateDomain(fqdn, platformDomain string) error {
 func VerifyCustomDomain(ctx context.Context, fqdn, verifyToken, platformDomain string, verifier DNSVerifier) error {
 	fqdn = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(fqdn), "."))
 	expectedCNAMETarget := strings.ToLower(strings.TrimSuffix("cname."+platformDomain, "."))
-	altCNAMETarget := strings.ToLower(strings.TrimSuffix(platformDomain, "."))
 
 	// 1. CNAME Kontrolu
 	cname, err := verifier.LookupCNAME(ctx, fqdn)
 	if err == nil {
 		normCNAME := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(cname), "."))
-		if (expectedCNAMETarget != "" && normCNAME == expectedCNAMETarget) ||
-			(altCNAMETarget != "" && (normCNAME == altCNAMETarget || strings.HasSuffix(normCNAME, "."+altCNAMETarget))) {
+		// Yalniz belgelenmis hedef birebir kabul edilir (baska *.platform
+		// hedefleri, ornegin baskasinin tuneli, sahiplik kaniti degildir).
+		if expectedCNAMETarget != "" && normCNAME == expectedCNAMETarget {
 			return nil // CNAME eslesti!
 		}
 	}

@@ -208,6 +208,10 @@ type Client struct {
 	LastSeenAt *time.Time        `json:"last_seen_at,omitempty"`
 	IsService  bool              `json:"is_service,omitempty"`
 	AppKind    string            `json:"app_kind,omitempty"` // "desktop" | ""
+	// Shells / DefaultShell: ajanin bildirdigi uzak terminal kabuklari (yalnizca
+	// canli istemci; eski istemcilerde yok). Panel kabuk secicisi icin.
+	Shells       []protocol.ShellInfo `json:"shells,omitempty"`
+	DefaultShell string              `json:"default_shell,omitempty"`
 	// UpdateAvailable/LatestVersion: bagli istemcinin surumu yayinlanan
 	// manifest'ten eskiyse doldurulur (DB'de tutulmaz).
 	UpdateAvailable bool   `json:"update_available,omitempty"`
@@ -875,6 +879,14 @@ type Store interface {
 
 	// GetMemberRole, kullanicinin kiracidaki gercek rolu; uyelik yoksa "".
 	GetMemberRole(ctx context.Context, tenantID, userID string) (string, error)
+	// GetLegacyMemberRole, GitHub (eski tip) kullanicinin tenant_members'taki gercek
+	// rolu; kullanici silinmis veya uye degilse "".
+	GetLegacyMemberRole(ctx context.Context, tenantID, userID string) (string, error)
+	// GetSessionEpoch, imzali oturum cerezi icin sunucu tarafi iptal sayaci (yoksa 0).
+	// subject = TenantID + ":" + UserID.
+	GetSessionEpoch(ctx context.Context, subject string) (int64, error)
+	// BumpSessionEpoch, sayaci artirir: o ozneye ait tum eski cerezler gecersiz olur.
+	BumpSessionEpoch(ctx context.Context, subject string) error
 
 	// ListReservedPortTunnels, public_port atanmis TUM tunelleri (kiracidan
 	// bagimsiz) doner. Ham TCP/UDP dinleyici yoneticisi ve port tahsisi kullanir.

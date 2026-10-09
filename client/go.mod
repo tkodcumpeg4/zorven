@@ -2,6 +2,8 @@ module github.com/tkodcumpeg4/zorven/client
 
 go 1.25.0
 
+toolchain go1.26.6
+
 require (
 	github.com/aymanbagabas/go-pty v0.2.3
 	github.com/coder/websocket v1.8.15

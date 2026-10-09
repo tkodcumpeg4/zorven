@@ -17,8 +17,11 @@ func TestMiddlewareCSRFCookieWrites(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	fk := newLegacyFake()
+	fk.roles["ten_x:u1"] = "owner"
 	m := &Middleware{
 		Sessions:     sm,
+		Store:        fk,
 		TrustedHosts: TrustedOriginHosts("zorven.app", []string{"zorven.app", "panel.zorven.app"}),
 		Next: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusNoContent)

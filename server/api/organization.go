@@ -95,6 +95,10 @@ func (s *Server) deleteOrganization(w http.ResponseWriter, r *http.Request) {
 			sess.Close("organization deleted")
 		}
 	}
+	// Oturum onbellegi (~30 sn) silinen organizasyonu aktif org olarak tutmasin (F-47).
+	if s.BetterAuth != nil {
+		s.BetterAuth.InvalidateAll()
+	}
 	// Tuneller gitti; yonlendirme tablosu tazelenmeli.
 	s.tunnelsChanged()
 	writeJSON(w, http.StatusOK, map[string]any{"status": "deleted", "disconnected_clients": len(clientIDs)})

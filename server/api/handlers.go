@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/tkodcumpeg4/zorven/server/auth"
 	"github.com/tkodcumpeg4/zorven/server/domain"
 	"github.com/tkodcumpeg4/zorven/server/door"
@@ -87,6 +88,10 @@ type Server struct {
 
 	// Tickets, terminal ve ekran WS'leri icin tek kullanimlik biletler.
 	Tickets *TicketStore
+
+	// terms, tarayici baglantisindan bagimsiz yasayan terminal oturumlari
+	// (sekme sayfa degisince korunur). Ilk kullanimda kurulur.
+	terms *termRegistry
 
 	// Entitlements, plan limitlerini ve yetkilerini denetleyen servis.
 	Entitlements entitlements.EntitlementService
@@ -376,12 +381,15 @@ func (s *Server) projectFor(r *http.Request) (string, bool) {
 
 // --- health / me -----------------------------------------------------------
 
-func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
-		"status":            "ok",
-		"version":           s.Version,
-		"connected_clients": s.Hub.Count(),
-	})
+func (s *Server) health(w http.ResponseWriter, r *http.Request) {
+	out := map[string]any{"status": "ok"}
+	// Surum ve istemci sayisi yalniz kimlikli isteklere (F-41); middleware
+	// public yolda kimlik gecerliyse baglam doldurur.
+	if _, ok := tenantFromContext(r.Context()); ok {
+		out["version"] = s.Version
+		out["connected_clients"] = s.Hub.Count()
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // serverStartedAt, süreç başlangıcı (uptime hesabı için). Paket yüklenince set edilir
@@ -430,6 +438,14 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 
 	if u, ok := userFromContext(r.Context()); ok && u != nil {
 		out["method"] = "better-auth"
+		if s.Sessions != nil {
+			// GitHub imzali cerezi de artik kullanici baglami tasir.
+			if c, err := r.Cookie(session.CookieName); err == nil {
+				if sess, err := s.Sessions.Verify(c.Value); err == nil && sess.Method == "github" && sess.UserID == u.ID {
+					out["method"] = "github"
+				}
+			}
+		}
 		out["user"] = map[string]any{
 			"id":    u.ID,
 			"email": u.Email,
@@ -628,10 +644,12 @@ func (s *Server) enrich(c store.Client) store.Client {
 		c.LastSeenAt = &ls
 		c.IsService = sess.IsService
 		c.AppKind = sess.AppKind
+		c.Shells, c.DefaultShell = sess.Shells, sess.DefaultShell
 		c.Metrics = sess.Metrics()
 	} else if st, ok := s.Hub.Statuses()[c.ID]; ok {
 		c.Status, c.Version, c.RemoteAddr = "online", st.Version, st.RemoteAddr
 		c.AppKind = st.AppKind
+		c.Shells, c.DefaultShell = st.Shells, st.DefaultShell
 		ls := st.LastSeen
 		c.LastSeenAt = &ls
 	} else {
@@ -703,6 +721,13 @@ func (s *Server) createClient(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusUnprocessableEntity, "invalid_name", "name bos olamaz")
 		return
 	}
+	// "--" kiraci ayracidir (ad--<slug>); istemci adindan otomatik ad uretildigi
+	// icin serbest birakilirsa baska kiracinin ad alani taklit edilebilir (F-15).
+	if strings.Contains(body.Name, "--") {
+		writeJSONError(w, http.StatusUnprocessableEntity, "invalid_name",
+			"name ardisik tire (--) iceremez; bu ayrac kiraci adlari icin ayrilmistir")
+		return
+	}
 
 	full, tokenID, hash, err := auth.GenerateClient()
 	if err != nil {
@@ -760,6 +785,9 @@ func (s *Server) deleteClient(w http.ResponseWriter, r *http.Request) {
 	if !requireScope(w, r, ScopeClientsWrite) {
 		return
 	}
+	if !s.requirePrivilegedCaller(w, r) {
+		return
+	}
 	id := r.PathValue("id")
 	tenantID, ok := s.tenantFor(r)
 	if !ok {
@@ -786,6 +814,9 @@ func (s *Server) deleteClient(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) rotateToken(w http.ResponseWriter, r *http.Request) {
 	if !requireScope(w, r, ScopeClientsWrite) {
+		return
+	}
+	if !s.requirePrivilegedCaller(w, r) {
 		return
 	}
 	id := r.PathValue("id")
@@ -1147,6 +1178,9 @@ func (s *Server) deleteTunnel(w http.ResponseWriter, r *http.Request) {
 	if !requireScope(w, r, ScopeTunnelsWrite) {
 		return
 	}
+	if !s.requirePrivilegedCaller(w, r) {
+		return
+	}
 	id := r.PathValue("id")
 	tenantID, ok := s.tenantFor(r)
 	if !ok {
@@ -1218,6 +1252,9 @@ func (s *Server) getTunnelAccess(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) setTunnelAccess(w http.ResponseWriter, r *http.Request) {
 	if !requireScope(w, r, ScopeTunnelsWrite) {
+		return
+	}
+	if !s.requirePrivilegedCaller(w, r) {
 		return
 	}
 	tenantID, ok := s.tenantFor(r)
@@ -1605,6 +1642,12 @@ func (s *Server) logger() *slog.Logger {
 
 func (s *Server) fail(w http.ResponseWriter, err error) {
 	if errors.Is(err, store.ErrNotFound) {
+		writeJSONError(w, http.StatusNotFound, "not_found", "kayit bulunamadi")
+		return
+	}
+	// Postgres: NUL/gecersiz metin gosterimi (22021, 22P02) = bozuk yol parametresi.
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && (pgErr.Code == "22021" || pgErr.Code == "22P02") {
 		writeJSONError(w, http.StatusNotFound, "not_found", "kayit bulunamadi")
 		return
 	}

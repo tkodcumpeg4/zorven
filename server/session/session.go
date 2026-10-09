@@ -3,8 +3,10 @@
 // yazar ve HMAC-SHA256 ile imzalar; her istekte yalnizca imza dogrulanir.
 //
 // Neden DB tablosu degil: MVP tek sahipli ve az sayida oturum var; imzali cerez
-// hem cgo gerektirmez hem de her istekte DB'ye gitmeyi onler. Iptal gerekince
-// sunucu gizli anahtari degistirilir -> tum oturumlar aninda gecersiz olur.
+// hem cgo gerektirmez. Cerez yalniz kimlik/kapsam + iptal sayaci (Epoch) tasir;
+// rol ve uyelik her istekte middleware'de DB'den cozulur, logout ise
+// session_epochs sayacini artirarak eski cerezleri iptal eder. Gizli anahtari
+// degistirmek de tum oturumlari aninda gecersiz kilar.
 package session
 
 import (
@@ -46,7 +48,16 @@ type payload struct {
 	TID    string `json:"tid"`    // tenants.id — YETKI KAPSAMI BUDUR
 	Method string `json:"method"` // "github"
 	Exp    int64  `json:"exp"`    // unix saniye
+	// Ver, cerez bicim surumu. 2'den kucuk (eski, epoch'suz) cerezler gecersiz:
+	// iptal edilemezlerdi ve github cerezleri kullanici baglami tasimiyordu.
+	Ver int `json:"v"`
+	// Ep, sunucu tarafi iptal sayaci (session_epochs). Sunucudaki deger cerezdekinden
+	// buyukse (logout vb.) cerez gecersizdir; karsilastirma middleware'dedir.
+	Ep int64 `json:"ep"`
 }
+
+// cookieVersion, gecerli cerez bicim surumu.
+const cookieVersion = 2
 
 // Issue, verilen oturum icin ttl sureli imzali bir cerez degeri uretir.
 //
@@ -58,7 +69,7 @@ func (m *Manager) Issue(s Session, ttl time.Duration) (string, error) {
 	}
 	p := payload{
 		Sub: s.Login, UID: s.UserID, TID: s.TenantID, Method: s.Method,
-		Exp: time.Now().Add(ttl).Unix(),
+		Exp: time.Now().Add(ttl).Unix(), Ver: cookieVersion, Ep: s.Epoch,
 	}
 	body, err := json.Marshal(p)
 	if err != nil {
@@ -77,6 +88,9 @@ type Session struct {
 	TenantID string
 	Login    string
 	Method   string
+	// Epoch, cerez uretildigindeki iptal sayaci; sunucudaki guncel deger ile
+	// karsilastirilir (bkz. store.GetSessionEpoch).
+	Epoch int64
 }
 
 var errBadSession = errors.New("gecersiz oturum")
@@ -109,7 +123,10 @@ func (m *Manager) Verify(value string) (Session, error) {
 	if p.TID == "" {
 		return Session{}, errBadSession
 	}
-	return Session{UserID: p.UID, TenantID: p.TID, Login: p.Sub, Method: p.Method}, nil
+	if p.Ver < cookieVersion {
+		return Session{}, errBadSession
+	}
+	return Session{UserID: p.UID, TenantID: p.TID, Login: p.Sub, Method: p.Method, Epoch: p.Ep}, nil
 }
 
 func (m *Manager) sign(b64 string) string {

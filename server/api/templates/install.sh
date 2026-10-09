@@ -22,8 +22,8 @@ echo -e "${NC}"
 # NOT: sentinel (__INJECTED_..__) sunucuda ReplaceAll ile degistirilir; guard'da
 # sentinel'i PARCALI yaziyoruz ("__INJECTED""_..__") ki degismesin — aksi halde
 # "deger != deger" hep dogru olmaz ve enjekte edilen deger kullanilmaz.
-INJECTED_TOKEN="__INJECTED_TOKEN__"
-INJECTED_SERVER="__INJECTED_SERVER__"
+INJECTED_TOKEN='__INJECTED_TOKEN__'
+INJECTED_SERVER='__INJECTED_SERVER__'
 SENTINEL_TOKEN="__INJECTED""_TOKEN__"
 SENTINEL_SERVER="__INJECTED""_SERVER__"
 

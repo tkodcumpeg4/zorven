@@ -38,7 +38,7 @@ const (
 	githubUserURL      = "https://api.github.com/user"
 
 	oauthStateCookie = "zorven_oauth_state"
-	sessionTTL       = 7 * 24 * time.Hour
+	sessionTTL       = 24 * time.Hour
 	stateTTL         = 10 * time.Minute
 	callbackPath     = "/api/v1/auth/github/callback"
 )
@@ -184,8 +184,13 @@ func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 6. Oturum cerezini yaz (KIRACI dahil) ve dashboard'a don.
+	epoch, err := s.Store.GetSessionEpoch(r.Context(), sessionSubject(tenant.ID, u.ID))
+	if err != nil {
+		http.Redirect(w, r, "/?auth_error=server", http.StatusSeeOther)
+		return
+	}
 	cookieVal, err := s.Sessions.Issue(session.Session{
-		UserID: u.ID, TenantID: tenant.ID, Login: login, Method: "github",
+		UserID: u.ID, TenantID: tenant.ID, Login: login, Method: "github", Epoch: epoch,
 	}, sessionTTL)
 	if err != nil {
 		http.Redirect(w, r, "/?auth_error=server", http.StatusSeeOther)
@@ -204,8 +209,9 @@ func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
-// logout, oturum cerezini siler.
+// logout, oturum cerezini siler ve sunucu tarafinda iptal eder (eski cerez 401 olur).
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
+	s.revokeLegacySession(r)
 	http.SetCookie(w, &http.Cookie{
 		Name:     session.CookieName,
 		Value:    "",
