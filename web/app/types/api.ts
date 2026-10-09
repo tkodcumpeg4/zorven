@@ -96,6 +96,13 @@ export interface Policy {
   bindings?: PolicyBinding[]
 }
 
+// ClientShell, uzak cihazda secilebilir bir kabuk (terminal secici).
+export interface ClientShell {
+  id: string
+  name: string
+  path: string
+}
+
 export interface Client {
   id: string                 // "cli_a1b2c3"
   project_id?: string
@@ -117,6 +124,8 @@ export interface Client {
   ips?: string[]
   agent_version?: string
   last_metrics?: Metrics     // en son BİLİNEN metrikler (offline iken de dolu)
+  shells?: ClientShell[]     // opsiyonel: cihazdaki kullanılabilir kabuklar
+  default_shell?: string     // opsiyonel: varsayılan kabuk kimliği
 }
 
 // Device, istemci kaydı + kalıcı cihaz bilgisi + canlı durum (F14).

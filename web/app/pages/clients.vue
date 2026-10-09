@@ -385,8 +385,10 @@ const currentCmd = computed(() => {
                     <Icon name="lucide:monitor" class="size-4" />
                   </NuxtLink>
                   <button
-                    class="cursor-pointer rounded p-1.5 text-fg-muted transition-colors duration-150 hover:bg-danger/10 hover:text-danger"
+                    class="cursor-pointer rounded p-1.5 text-fg-muted transition-colors duration-150 hover:bg-danger/10 hover:text-danger disabled:cursor-not-allowed disabled:opacity-40"
                     :aria-label="t('clients.deleteAria', { name: c.name })"
+                    :disabled="!isPrivileged"
+                    :title="isPrivileged ? undefined : t('common.adminOnly')"
                     @click="remove(c)"
                   >
                     <Icon name="lucide:trash-2" class="size-4" />

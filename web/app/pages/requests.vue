@@ -5,6 +5,7 @@ const api = useApi()
 const toast = useToast()
 const { duration, bytes, clock } = useFormat()
 const { t } = useI18n()
+const { isPrivileged } = useRole()
 
 const rows = ref<RequestLog[]>([])
 const tunnels = ref<Tunnel[]>([])
@@ -258,7 +259,7 @@ function exportData(fmt: 'csv' | 'json') {
         <button
           class="flex cursor-pointer items-center gap-1.5 rounded border px-2.5 py-1.5 font-mono text-[11px] transition-colors disabled:opacity-50"
           :class="captureEnabled ? 'border-accent/40 bg-accent/10 text-accent' : 'border-line text-fg-muted hover:bg-surface-2'"
-          :aria-pressed="captureEnabled" :disabled="captureBusy" :title="t('requests.captureHint')" @click="toggleCapture"
+          :aria-pressed="captureEnabled" :disabled="captureBusy || !isPrivileged" :title="isPrivileged ? t('requests.captureHint') : t('common.adminOnly')" @click="toggleCapture"
         >
           <Icon :name="captureEnabled ? 'lucide:circle-dot' : 'lucide:circle'" class="size-3" />
           {{ captureEnabled ? t('requests.captureActive') : t('requests.captureIdle') }}

@@ -16,6 +16,13 @@ const canManage = computed(() => {
   return r === 'owner' || r === 'admin'
 })
 
+// IP allowlist: yazma owner/admin; yeni kural ayrica plan ozelligi ister
+// (plan dusunce mevcut kurallar uygulanmaya devam eder, yeni kural eklenemez).
+const { isPrivileged } = useRole()
+const ipPlanBlocked = computed(() => !platformAdmin.value && !!currentPlan.value && currentPlan.value.has_ip_allowlist === false)
+const canAddRule = computed(() => isPrivileged.value && !ipPlanBlocked.value)
+const ipAddHint = computed(() => !isPrivileged.value ? t('common.adminOnly') : ipPlanBlocked.value ? t('tokens.ipPlanBlocked') : undefined)
+
 function canChangeToken(tok: APIToken): boolean {
   if (canManage.value) return true
   return !!tok.user_id && tok.user_id === currentUser.value?.id
@@ -330,7 +337,9 @@ function isExpired(expiresAt?: string | null) {
         <button
           v-else-if="activeTab === 'ip'"
           type="button"
-          class="flex cursor-pointer items-center gap-1.5 rounded-lg bg-accent px-3.5 py-2 text-xs font-semibold text-on-accent transition-all duration-150 hover:opacity-90 active:scale-95 shadow-sm"
+          class="flex cursor-pointer items-center gap-1.5 rounded-lg bg-accent px-3.5 py-2 text-xs font-semibold text-on-accent transition-all duration-150 hover:opacity-90 active:scale-95 shadow-sm disabled:cursor-not-allowed disabled:opacity-50"
+          :disabled="!canAddRule"
+          :title="ipAddHint"
           @click="showCreateRuleModal = true"
         >
           <Icon name="lucide:plus" class="size-4" />
@@ -541,6 +550,7 @@ function isExpired(expiresAt?: string | null) {
             <span class="text-fg-subtle">{{ t('tokens.yourIp') }}</span>
             <span class="font-mono font-bold text-accent">{{ detectedIp }}</span>
             <button
+              v-if="canAddRule"
               type="button"
               class="cursor-pointer text-accent hover:underline text-[11px] ml-1 font-medium"
               @click="ruleCidr = detectedIp + '/32'; showCreateRuleModal = true"
@@ -553,6 +563,11 @@ function isExpired(expiresAt?: string | null) {
             <span>{{ t('tokens.detectingIp') }}</span>
           </div>
         </div>
+      </div>
+
+      <div v-if="ipPlanBlocked" class="flex items-start gap-2.5 rounded-lg border border-warn/40 bg-warn/10 p-3">
+        <Icon name="lucide:alert-triangle" class="mt-0.5 size-4 shrink-0 text-warn" />
+        <p class="text-xs leading-relaxed text-warn">{{ t('tokens.ipPlanBlocked') }}</p>
       </div>
 
       <!-- IP Kuralları Tablosu -->
@@ -575,6 +590,7 @@ function isExpired(expiresAt?: string | null) {
           <p class="text-sm font-medium text-fg">{{ t('tokens.noRules') }}</p>
           <p class="text-xs text-fg-muted mt-1 max-w-md mx-auto">{{ t('tokens.noRulesHint') }}</p>
           <button
+            v-if="canAddRule"
             type="button"
             class="mt-4 inline-flex cursor-pointer items-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-xs font-semibold text-on-accent"
             @click="showCreateRuleModal = true"
@@ -623,8 +639,8 @@ function isExpired(expiresAt?: string | null) {
                     :class="rule.enabled
                       ? 'border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-500/40 dark:bg-emerald-950/30 dark:text-emerald-300'
                       : 'border-line bg-surface-2 text-fg-muted'"
-                    :disabled="updatingRuleId === rule.id"
-                    :title="t('tokens.toggleStatusTitle')"
+                    :disabled="updatingRuleId === rule.id || !isPrivileged"
+                    :title="isPrivileged ? t('tokens.toggleStatusTitle') : t('common.adminOnly')"
                     @click="handleToggleRule(rule)"
                   >
                     <span class="size-1.5 rounded-full" :class="rule.enabled ? 'bg-emerald-600 dark:bg-emerald-400' : 'bg-fg-muted'" />
@@ -638,8 +654,8 @@ function isExpired(expiresAt?: string | null) {
                   <button
                     type="button"
                     class="cursor-pointer rounded-lg border border-line px-2.5 py-1 text-[11px] font-medium text-fg-muted hover:border-danger/40 hover:text-danger hover:bg-surface-2 transition-colors"
-                    :disabled="deletingRuleId === rule.id"
-                    :title="t('tokens.deleteRuleTitle')"
+                    :disabled="deletingRuleId === rule.id || !isPrivileged"
+                    :title="isPrivileged ? t('tokens.deleteRuleTitle') : t('common.adminOnly')"
                     @click="handleDeleteRule(rule)"
                   >
                     <Icon v-if="deletingRuleId === rule.id" name="lucide:loader-2" class="size-3 animate-spin inline mr-1" />

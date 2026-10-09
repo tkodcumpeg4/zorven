@@ -81,12 +81,17 @@ async function handleFreeze(fqdn: string, frozen: boolean) {
 }
 
 onMounted(() => {
+  // Platform admin degilse /admin/* istegi atilmaz; ana sayfaya yonlendir (API de 403 verir).
+  if (!platformAdmin.value) {
+    navigateTo('/', { replace: true })
+    return
+  }
   loadData()
 })
 </script>
 
 <template>
-  <div class="space-y-6">
+  <div v-if="platformAdmin" class="space-y-6">
     <header class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
       <div>
         <div class="flex items-center gap-2">

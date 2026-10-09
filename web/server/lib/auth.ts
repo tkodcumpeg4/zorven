@@ -1,8 +1,8 @@
 import { betterAuth } from "better-auth"
 import { organization, bearer, twoFactor } from "better-auth/plugins"
 import pg from "pg"
-import { randomBytes } from "crypto"
-import { APIError } from "better-auth/api"
+import { randomBytes, createHash } from "crypto"
+import { APIError, createAuthMiddleware } from "better-auth/api"
 import { sendMail } from "./mailer"
 import { stripBrandKeywords, slugRejectReason } from "./brand"
 import {
@@ -14,15 +14,30 @@ import {
 
 const { Pool } = pg
 
-const connectionString =
-  process.env.DATABASE_URL ||
-  process.env.ZORVEN_DB_DSN ||
-  "postgres://rpshell:rpshell@localhost:5432/rpshell"
+// Uretimde eksik gizli anahtar/DSN sessizce gelistirme varsayilanina dusmez:
+// acik hata ile baslatma reddedilir. Gelistirmede uyari loglanir.
+const isProd = process.env.NODE_ENV === "production"
 
-const secret =
-  process.env.BETTER_AUTH_SECRET ||
-  process.env.ZORVEN_SESSION_SECRET ||
-  "rpshell-dev-session-secret-key-change-in-production-min-32-chars"
+function requireEnvOrDevDefault(value: string | undefined, name: string, devDefault: string): string {
+  if (value) return value
+  if (isProd) {
+    throw new Error(`${name} tanimli degil: uretimde zorunlu, baslatma reddedildi`)
+  }
+  console.warn(`[auth] ${name} tanimli degil; yalniz gelistirme icin varsayilan kullaniliyor`)
+  return devDefault
+}
+
+const connectionString = requireEnvOrDevDefault(
+  process.env.DATABASE_URL || process.env.ZORVEN_DB_DSN,
+  "DATABASE_URL (veya ZORVEN_DB_DSN)",
+  "postgres://rpshell:rpshell@localhost:5432/rpshell",
+)
+
+const secret = requireEnvOrDevDefault(
+  process.env.BETTER_AUTH_SECRET || process.env.ZORVEN_SESSION_SECRET,
+  "BETTER_AUTH_SECRET (veya ZORVEN_SESSION_SECRET)",
+  "rpshell-dev-session-secret-key-change-in-production-min-32-chars",
+)
 
 // Signup hook'unun kullandigi ayri bir havuz (Better Auth'un ic havuzuna
 // karismadan ham SQL calistirmak icin).
@@ -80,8 +95,28 @@ async function organizationLimitReached(userId: string): Promise<boolean> {
 // Kullanicinin sectigi organizasyon slug'i marka deseni veya rezerve ad ise
 // olusturma/guncelleme reddedilir (kiraci adresleri ad--slug.<domain> oldugu
 // icin "zorven-login" gibi slug'lar kimlik avi icin kullanilabilirdi).
+// Gecerli slug bicimi: kucuk harf/rakam/tire, bas-son harf ya da rakam, en fazla
+// 42 karakter, ardisik tire ("--") yok ("--" tunel adi ile slug'i ayiran
+// ayiracidir: ad--slug.<domain>).
+const ORG_SLUG_RE = /^[a-z0-9]([a-z0-9-]{0,40}[a-z0-9])?$/
+
+// Serbest metni slug bicimine indirger: kucuk harf, gecersiz -> tire,
+// ardisik tireler tek, bas/son tire kirpilir.
+function normalizeSlugPart(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+}
+
 async function assertSlugAllowed(slug: string | undefined): Promise<void> {
   if (!slug) return
+  if (!ORG_SLUG_RE.test(slug) || slug.includes("--")) {
+    throw new APIError("BAD_REQUEST", {
+      message:
+        "Kisa ad yalniz kucuk harf, rakam ve tek tire icerebilir (bas/son karakter harf ya da rakam, en fazla 42 karakter).",
+    })
+  }
   const reason = await slugRejectReason(slug, async (name) => {
     try {
       const { rows } = await hookPool.query(
@@ -112,12 +147,12 @@ function genId(prefix: string): string {
 async function uniqueOrgSlug(email: string): Promise<string> {
   // Marka sozcugu iceren e-posta onegi ("zorven@...") kayit akisini bozmadan
   // donusturulur: sozcuk cikarilir, rastgele ek zaten eklenecek (bkz. brand.ts).
-  const base = stripBrandKeywords(
-    (email.split("@")[0] || "team")
-      .toLowerCase()
-      .replace(/[^a-z0-9-]+/g, "-")
-      .replace(/^-+|-+$/g, "") || "team",
-  )
+  // Sonuc her zaman ORG_SLUG_RE'ye uyar (nokta/alt cizgi/buyuk harf/"--" yok);
+  // taban 30 karakterle sinirlanir: taban + "-" + 6 hex <= 42.
+  const base =
+    normalizeSlugPart(
+      stripBrandKeywords(normalizeSlugPart(email.split("@")[0] || "team") || "team"),
+    ).slice(0, 30).replace(/-+$/g, "") || "team"
   for (let i = 0; i < 6; i++) {
     const suffix = randomBytes(3).toString("hex")
     const slug = `${base}-${suffix}`
@@ -215,7 +250,63 @@ if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
   }
 }
 
+// F-46: kullanilmis TOTP kodunun ayni pencerede tekrar kabulu engellenir.
+// Better Auth bunu kendisi yapmaz; basarili dogrulamadan sonra kodun ozetini
+// kisa sure (30sn adim x ±1 pencere icin 120sn) bellekte tutar. Tek surec
+// calistigi icin bellek yeterli; anahtar kullanici/oturum cerezine ozgudur.
+const usedTotp = new Map<string, number>()
+const TOTP_REPLAY_TTL_MS = 120_000
+// Kullaniciyi tanimlayan deger: giris 2. adiminda Better Auth'un two-factor ara
+// cerezi (adi "two_factor" icerir; prefix/__Secure- degisebilir), 2FA
+// etkinlestirmede oturum cerezi. Hicbiri yoksa null: engel uygulanmaz.
+function totpSubject(headers: Headers | undefined): string | null {
+  const raw = headers?.get("cookie")
+  if (!raw) return null
+  let session: string | null = null
+  for (const part of raw.split(";")) {
+    const i = part.indexOf("=")
+    if (i < 0) continue
+    const name = part.slice(0, i).trim()
+    const val = part.slice(i + 1).trim()
+    if (!val) continue
+    if (name.includes("two_factor")) return "tf:" + val
+    if (name.includes("session_token")) session = "st:" + val
+  }
+  return session
+}
+function totpKey(subject: string, code: unknown): string {
+  return createHash("sha256").update(subject + "|" + String(code ?? "").trim()).digest("hex")
+}
+function pruneUsedTotp(now: number): void {
+  for (const [k, exp] of usedTotp) if (exp <= now) usedTotp.delete(k)
+}
+
 export const auth = betterAuth({
+  hooks: {
+    before: createAuthMiddleware(async (ctx) => {
+      if (ctx.path !== "/two-factor/verify-totp") return
+      const now = Date.now()
+      pruneUsedTotp(now)
+      const subject = totpSubject(ctx.headers)
+      if (!subject) return
+      const exp = usedTotp.get(totpKey(subject, (ctx.body as { code?: unknown } | undefined)?.code))
+      if (exp && exp > now) {
+        throw new APIError("BAD_REQUEST", {
+          message: "Bu dogrulama kodu zaten kullanildi; authenticator'daki yeni kodu bekleyin.",
+        })
+      }
+    }),
+    after: createAuthMiddleware(async (ctx) => {
+      if (ctx.path !== "/two-factor/verify-totp") return
+      if (ctx.context.returned instanceof APIError) return
+      const subject = totpSubject(ctx.headers)
+      if (!subject) return
+      usedTotp.set(
+        totpKey(subject, (ctx.body as { code?: unknown } | undefined)?.code),
+        Date.now() + TOTP_REPLAY_TTL_MS,
+      )
+    }),
+  },
   database: new Pool({
     connectionString,
   }),

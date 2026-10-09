@@ -2,6 +2,8 @@
 const {
   authed,
   ready,
+  sessionError,
+  retrySession,
   githubEnabled,
   googleEnabled,
   needs2FA,
@@ -204,6 +206,21 @@ async function handleKeySubmit() {
     <div class="flex items-center gap-2.5 text-sm text-fg-muted">
       <Icon name="lucide:loader-circle" class="size-4 animate-spin" aria-hidden="true" />
       {{ t('auth.sessionChecking') }}
+    </div>
+  </div>
+
+  <!-- Oturum doğrulanamadı (429/5xx/ağ): sonsuz bekleme yerine açık hata + yeniden dene -->
+  <div v-else-if="sessionError && !authed" class="grid min-h-[60vh] place-items-center px-5">
+    <div class="w-full max-w-md rounded-xl border border-line bg-surface/80 p-6 text-center shadow-xl backdrop-blur-md">
+      <Icon name="lucide:alert-triangle" class="mx-auto size-6 text-warn" aria-hidden="true" />
+      <p class="mt-3 text-sm text-fg">{{ sessionError }}</p>
+      <button
+        type="button"
+        class="mt-4 cursor-pointer rounded-lg bg-accent px-4 py-2 text-sm font-medium text-on-accent hover:opacity-90"
+        @click="retrySession"
+      >
+        {{ t('auth.sessionRetry') }}
+      </button>
     </div>
   </div>
 

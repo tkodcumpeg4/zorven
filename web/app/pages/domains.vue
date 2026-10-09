@@ -6,6 +6,7 @@ const { t } = useI18n()
 const toast = useToast()
 const { relativeTime } = useFormat()
 const { platformAdmin, tenantSlug, platformDomain } = useAuth()
+const { isPrivileged } = useRole()
 
 const hostnames = ref<Hostname[]>([])
 const tunnels = ref<Tunnel[]>([])
@@ -613,8 +614,10 @@ async function remove(h: Hostname) {
 
                   <!-- Silme butonu -->
                   <button
-                    class="cursor-pointer rounded p-1.5 text-fg-muted transition-colors duration-150 hover:bg-danger/10 hover:text-danger"
+                    class="cursor-pointer rounded p-1.5 text-fg-muted transition-colors duration-150 hover:bg-danger/10 hover:text-danger disabled:cursor-not-allowed disabled:opacity-40"
                     :aria-label="t('domains.deleteDomain', { fqdn: h.fqdn })"
+                    :disabled="!isPrivileged"
+                    :title="isPrivileged ? undefined : t('common.adminOnly')"
                     @click="remove(h)"
                   >
                     <Icon name="lucide:trash-2" class="size-4" />

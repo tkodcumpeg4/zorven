@@ -3,6 +3,7 @@ import type { Policy, PolicyRule, PolicyAction, Tunnel, Hostname } from '~/types
 
 const api = useApi()
 const toast = useToast()
+const { isPrivileged } = useRole()
 const { t } = useI18n()
 
 const ACTION_TYPES: PolicyAction['type'][] = [
@@ -229,6 +230,7 @@ onMounted(load)
         <p class="mt-1 text-sm text-fg-muted">{{ t('policies.subtitle') }}</p>
       </div>
       <button
+        v-if="isPrivileged"
         class="inline-flex items-center gap-1.5 rounded-lg bg-accent px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-accent/90 active:scale-95"
         @click="openCreate"
       >
@@ -236,6 +238,8 @@ onMounted(load)
         {{ t('policies.create') }}
       </button>
     </div>
+
+    <p v-if="!isPrivileged" class="mb-4 rounded-lg border border-line bg-surface px-3 py-2 text-xs text-fg-muted">{{ t('common.adminOnlyReadonly') }}</p>
 
       <div v-if="loading" class="py-12 text-center text-fg-muted">
         <Icon name="lucide:loader-circle" class="mx-auto size-6 animate-spin" />
@@ -262,7 +266,7 @@ onMounted(load)
                 {{ (p.bindings?.length || 0) }} {{ t('policies.bindingsCount') }}
               </p>
             </div>
-            <div class="flex items-center gap-1">
+            <div v-if="isPrivileged" class="flex items-center gap-1">
               <button class="rounded-md px-2 py-1 text-xs text-fg-muted hover:text-fg" @click="openBind(p)">
                 <Icon name="lucide:link" class="size-3.5" /> {{ t('policies.bind') }}
               </button>

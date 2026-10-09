@@ -4,3 +4,9 @@ const { locale } = useI18n()
 useHead({ htmlAttrs: { lang: computed(() => (locale.value === 'tr' ? 'tr' : 'en')) } })
 </script>
 
+<template>
+  <NuxtLayout>
+    <NuxtPage />
+  </NuxtLayout>
+  <ToastContainer />
+</template>

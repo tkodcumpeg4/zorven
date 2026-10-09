@@ -27,7 +27,10 @@
     "search": "Ara",
     "unlimited": "Sınırsız",
     "retry": "Tekrar Dene",
-    "done": "Tamam"
+    "done": "Tamam",
+    "adminOnly": "Yalnızca sahip veya yönetici",
+    "adminOnlyReadonly": "Burada salt okunur erişiminiz var. Yalnızca sahip ve yöneticiler oluşturabilir, düzenleyebilir veya silebilir.",
+    "remoteAccessDenied": "Erişim reddedildi. Üyeler uzak terminal/ekranı yalnızca bir erişim politikası izin verirse açabilir; sahip veya yöneticiye danışın."
   },
   "nav": {
     "overview": "Genel Bakış",
@@ -165,7 +168,10 @@
     "github_code": "GitHub yetkilendirme kodu alınamadı.",
     "github_server": "Sunucu hatası. Lütfen tekrar deneyin.",
     "thrownOrgRename": "Organizasyon adı değiştirilemedi",
-    "orgLimitReached": "Planınızın izin verdiği organizasyon sayısına ulaştınız. Daha fazla organizasyon için planınızı yükseltin."
+    "orgLimitReached": "Planınızın izin verdiği organizasyon sayısına ulaştınız. Daha fazla organizasyon için planınızı yükseltin.",
+    "sessionRateLimited": "Şu anda çok fazla istek var. Lütfen biraz bekleyip tekrar deneyin.",
+    "sessionUnavailable": "Oturumunuz doğrulanamadı. Bağlantınızı kontrol edip tekrar deneyin.",
+    "sessionRetry": "Tekrar dene"
   },
   "overview": {
     "title": "Genel Bakış",
@@ -1175,7 +1181,38 @@
     "backToClients": "istemciler",
     "shellWarnPre": "Bu, uzak makinede",
     "shellStrong": "gerçek bir kabuk",
-    "shellWarnPost": "çalıştırır. Yazdığınız komutlar o makinede yürütülür."
+    "shellWarnPost": "çalıştırır. Yazdığınız komutlar o makinede yürütülür.",
+    "sessionEnded": "oturum sonlandı, çıkış kodu {code}",
+    "newSessionNote": "— yeni oturum açılıyor —",
+    "reconnectedNote": "— yeniden bağlanıldı; yeni bir kabuk oturumu başladı —",
+    "disconnectedNote": "— bağlantı kesildi —",
+    "errGaveUp": "Sunucuya yeniden bağlanılamadı.",
+    "searchPlaceholder": "Ara",
+    "search": "Terminalde ara",
+    "noMatch": "Yok",
+    "matchCase": "Büyük/küçük harf duyarlı",
+    "findPrev": "Önceki eşleşme",
+    "findNext": "Sonraki eşleşme",
+    "closeSearch": "Aramayı kapat",
+    "reconnectingBanner": "Bağlantı koptu — yeniden bağlanılıyor",
+    "retryIn": "{s} sn · deneme {n}/{max}",
+    "sessionGone": "Oturum sona erdi.",
+    "newSession": "Yeni oturum aç",
+    "stateReconnecting": "Yeniden bağlanıyor…",
+    "tabDefault": "Oturum",
+    "renameHint": "Yeniden adlandırmak için çift tıklayın",
+    "closeTab": "Sekmeyi kapat",
+    "tabs": "Terminal sekmeleri",
+    "shell": "Kabuk",
+    "newTab": "Yeni sekme",
+    "maxTabs": "En fazla {n} sekme açılabilir",
+    "noTabs": "Açık terminal sekmesi yok.",
+    "takenOver": "Bu oturum başka bir tarayıcı sekmesinde açıldı.",
+    "menu": "Terminal ayarları",
+    "fontSize": "Yazı boyutu",
+    "fontSmaller": "Yazıyı küçült",
+    "fontLarger": "Yazıyı büyüt",
+    "copyOnSelect": "Seçince kopyala"
   },
   "mail": {
     "title": "Webmail",

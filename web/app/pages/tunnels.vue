@@ -8,6 +8,7 @@ const toast = useToast()
 const { relativeTime } = useFormat()
 const { openUpgrade, loadBillingData } = useBilling()
 const { githubEnabled, googleEnabled, platformDomain } = useAuth()
+const { isPrivileged } = useRole()
 const anyOAuthProvider = computed(() => githubEnabled.value || googleEnabled.value)
 // Rezerve-port bağlantı adresi için platform apex (ör. app.zorven.app → zorven.app).
 // Once sunucunun bildirdigi platform domaini; yoksa gecerli host (IP/localhost
@@ -127,9 +128,12 @@ const replicaSaving = ref(false)
 
 // Ham TCP/UDP tünellerinde "UDP ve Oyun" sekmesi de görünür (FAZ 4 / F24).
 const settingsTabs = computed<SettingsTab[]>(() => {
-  const base: SettingsTab[] = ['general', 'protocol', 'access', 'stats', 'ip', 'ha', 'traffic', 'metrics']
+  // member: erisim/IP/HA/trafik/UDP ayarlari sunucuda owner/admin'e ozel (403) — sekmeler gizlenir.
+  const base: SettingsTab[] = isPrivileged.value
+    ? ['general', 'protocol', 'access', 'stats', 'ip', 'ha', 'traffic', 'metrics']
+    : ['general', 'protocol', 'stats', 'metrics']
   const p = accessTunnel.value?.proto
-  return p === 'tcp' || p === 'udp' ? [...base, 'raw'] : base
+  return isPrivileged.value && (p === 'tcp' || p === 'udp') ? [...base, 'raw'] : base
 })
 
 // FAZ 4 / F24 — UDP sınırları + istatistik + oyun sunucusu durumu
@@ -254,7 +258,7 @@ const alertForm = reactive({ enabled: false, error_rate_pct: 10, window_min: 5, 
 
 async function openSettings(tn: Tunnel, tab: SettingsTab = 'general') {
   accessTunnel.value = tn
-  settingsTab.value = tab
+  settingsTab.value = !isPrivileged.value && ['access', 'ip', 'ha', 'traffic', 'raw'].includes(tab) ? 'general' : tab
   accessLoading.value = true
   accessForm.mode = 'none'
   accessForm.enabled = true
@@ -1049,6 +1053,8 @@ async function remove(tn: Tunnel) {
                     class="cursor-pointer rounded p-1.5 text-fg-muted transition-colors
                            duration-150 hover:bg-danger/10 hover:text-danger"
                     :aria-label="t('tunnels.deleteTunnel', { name: namesOf(tn)[0] ?? tn.id })"
+                    :disabled="!isPrivileged"
+                    :title="isPrivileged ? undefined : t('common.adminOnly')"
                     @click="remove(tn)"
                   >
                     <Icon name="lucide:trash-2" class="size-4" />
@@ -1624,7 +1630,7 @@ async function remove(tn: Tunnel) {
             </template>
 
             <div class="flex justify-end">
-              <button :disabled="alertSaving || alertLoading" class="rounded bg-accent px-4 py-1.5 text-sm font-medium text-on-accent transition-opacity hover:opacity-90 disabled:opacity-50" @click="saveAlert">
+              <button :disabled="alertSaving || alertLoading || !isPrivileged" :title="isPrivileged ? undefined : t('common.adminOnly')" class="rounded bg-accent px-4 py-1.5 text-sm font-medium text-on-accent transition-opacity hover:opacity-90 disabled:opacity-50" @click="saveAlert">
                 {{ alertSaving ? t('common.saving') : t('common.save') }}
               </button>
             </div>
@@ -1648,7 +1654,7 @@ async function remove(tn: Tunnel) {
             <div v-if="statsEmpty" class="flex flex-col items-center gap-2 rounded border border-dashed border-line px-4 py-8 text-center">
               <svg class="size-7 text-fg-subtle" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6l7-3z" /><path d="M9.5 12l1.8 1.8L15 10" /></svg>
               <p class="text-xs text-fg-muted">{{ accessForm.mode === 'none' ? t('tunnels.statsEmptyOff') : t('tunnels.statsEmptyNoData') }}</p>
-              <button v-if="accessForm.mode === 'none'" class="rounded border border-line px-3 py-1 text-xs text-fg transition-colors hover:border-accent hover:text-accent" @click="settingsTab = 'access'">{{ t('tunnels.statsGoAccess') }}</button>
+              <button v-if="accessForm.mode === 'none' && isPrivileged" class="rounded border border-line px-3 py-1 text-xs text-fg transition-colors hover:border-accent hover:text-accent" @click="settingsTab = 'access'">{{ t('tunnels.statsGoAccess') }}</button>
             </div>
             <template v-else>
               <div class="grid grid-cols-2 gap-2 sm:grid-cols-3">

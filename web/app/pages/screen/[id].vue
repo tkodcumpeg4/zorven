@@ -329,7 +329,9 @@ async function open(maxWidth: number) {
   } catch (e: any) {
     state.value = 'error'
     const code = e?.data?.error?.code
-    const msg = e?.data?.error?.message || (e instanceof Error ? e.message : t('screen.errConnect'))
+    const msg = e?.statusCode === 403 || e?.status === 403
+      ? t('common.remoteAccessDenied')
+      : e?.data?.error?.message || (e instanceof Error ? e.message : t('screen.errConnect'))
     errorMsg.value = msg
     if (code === 'screen_stream_limit_reached') {
       openUpgrade(msg, 'screen')

@@ -49,31 +49,55 @@ const twoFactorEnabled = ref(false)
 const tenantSlug = computed(() => tenant.value?.slug ?? '')
 const userLogin = computed(() => user.value?.name || user.value?.email || '')
 
+// Oturum dogrulanamadi (429/5xx/ag): giris ekrani yerine acik hata + yeniden dene gosterilir.
+const sessionError = ref('')
+// Organizasyon listesi oturum (kullanici) basina bir kez cekilir; her sayfada 429 yemesin.
+let orgsLoadedFor = ''
+
 let initPromise: Promise<void> | null = null
+
+const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
+
+/** 429 / 5xx / ag hatasi: geri cekilerek yeniden denemeye deger gecici hata. */
+function isTransient(status: number | undefined): boolean {
+  return status === undefined || status === 429 || status >= 500
+}
+function errStatus(e: any): number | undefined {
+  return e?.statusCode ?? e?.status ?? e?.response?.status
+}
 
 export function useAuth() {
   const { key, set: setKey, clear: clearKey } = useAdminKey()
 
   /** Organizasyonları Better Auth üzerinden çeker */
-  async function loadOrganizations(): Promise<OrganizationItem[]> {
-    try {
-      const res = await authClient.organization.list()
-      if (res && res.data && Array.isArray(res.data)) {
-        organizations.value = res.data.map((o: any) => ({
-          id: o.id,
-          name: o.name,
-          slug: o.slug,
-          logo: o.logo ?? null,
-        }))
+  async function loadOrganizations(force = false): Promise<OrganizationItem[]> {
+    const uid = user.value?.id || '-'
+    if (!force && orgsLoadedFor === uid && organizations.value.length) return organizations.value
+    // 429'da geri cekilerek tekrar dene (500ms, 1s, 2s); hata olursa mevcut listeyi koru.
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try {
+        const res = await authClient.organization.list()
+        if (res && res.data && Array.isArray(res.data)) {
+          organizations.value = res.data.map((o: any) => ({
+            id: o.id,
+            name: o.name,
+            slug: o.slug,
+            logo: o.logo ?? null,
+          }))
+          orgsLoadedFor = uid
+          break
+        }
+        if (!isTransient((res as any)?.error?.status) || attempt === 3) break
+      } catch {
+        if (attempt === 3) break
       }
-    } catch {
-      // sessizce geç
+      await sleep(500 * 2 ** attempt)
     }
     return organizations.value
   }
 
   /** /api/v1/me ile mevcut yetkiyi doğrular */
-  async function check(): Promise<boolean> {
+  async function check(attempt = 0): Promise<boolean> {
     try {
       const headers: Record<string, string> = {}
       if (key.value) {
@@ -81,6 +105,7 @@ export function useAuth() {
         const { adminTenant } = useAdminTenant()
         if (adminTenant.value) headers['X-Tenant-ID'] = adminTenant.value
       }
+      sessionError.value = ''
       const me = await $fetch<{
         authenticated: boolean
         method?: Exclude<AuthMethod, null>
@@ -117,6 +142,16 @@ export function useAuth() {
         clearAdminTenant()
         return check()
       }
+      // Gecici hata (429/5xx/ag): giris ekranina dusmeden geri cekilerek tekrar dene;
+      // sonunda hala basarisizsa acik hata mesaji goster (sessionError).
+      const st = errStatus(e)
+      if (isTransient(st)) {
+        if (attempt < 3) {
+          await sleep(600 * 2 ** attempt)
+          return check(attempt + 1)
+        }
+        sessionError.value = st === 429 ? gt('auth.sessionRateLimited') : gt('auth.sessionUnavailable')
+      }
       authed.value = false
       method.value = null
       user.value = null
@@ -139,11 +174,22 @@ export function useAuth() {
       } catch {
         // Config alınamazsa buton gizli kalır
       }
-      const ok = await check()
-      if (!ok && key.value) clearKey()
-      ready.value = true
+      try {
+        const ok = await check()
+        // Gecici hatada kayitli anahtari silme: yeniden denenebilsin.
+        if (!ok && key.value && !sessionError.value) clearKey()
+      } finally {
+        ready.value = true
+      }
     })()
     return initPromise
+  }
+
+  /** Oturum dogrulamasi gecici hatayla basarisiz olduysa yeniden dener. */
+  async function retrySession(): Promise<void> {
+    ready.value = false
+    initPromise = null
+    await init()
   }
 
   /**
@@ -340,7 +386,7 @@ export function useAuth() {
     if (res?.error) {
       throw new Error(res.error.message || gt('auth.thrownOrgRename'))
     }
-    await loadOrganizations()
+    await loadOrganizations(true)
   }
 
   /** Yeni bir organizasyon oluşturur */
@@ -354,6 +400,7 @@ export function useAuth() {
       throw new Error(res.error.message || gt('auth.thrownOrgCreate'))
     }
     if (res?.data?.id) {
+      await loadOrganizations(true)
       await switchOrganization(res.data.id)
     }
   }
@@ -390,6 +437,8 @@ export function useAuth() {
     user.value = null
     tenant.value = null
     organizations.value = []
+    orgsLoadedFor = ''
+    sessionError.value = ''
     platformAdmin.value = false
     needs2FA.value = false
     twoFactorEnabled.value = false
@@ -408,6 +457,8 @@ export function useAuth() {
     platformDomain: readonly(platformDomain),
     googleEnabled: readonly(googleEnabled),
     ready: readonly(ready),
+    sessionError: readonly(sessionError),
+    retrySession,
     needs2FA: readonly(needs2FA),
     twoFactorEnabled: readonly(twoFactorEnabled),
     init,
