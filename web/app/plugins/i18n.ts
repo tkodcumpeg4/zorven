@@ -15,15 +15,18 @@ export function gt(key: string, named?: Record<string, unknown>): string {
 
 // Panel çok dilli (TR varsayılan + EN). @nuxtjs/i18n modülü Rolldown/Vite 8 ile
 // çakıştığı için vue-i18n doğrudan kuruluyor. Dil tercihi localStorage'da.
+// Kayıtlı tercih yoksa tarayıcı dili kullanılır: Türkçe -> tr, diğer her dil -> en.
 export default defineNuxtPlugin((nuxtApp) => {
   let initial = 'tr'
   if (import.meta.client) {
+    let saved: string | null = null
     try {
-      const s = localStorage.getItem('zorven_lang')
-      if (s === 'en' || s === 'tr') initial = s
+      saved = localStorage.getItem('zorven_lang')
     } catch {
       /* gizli sekme/erişim yok */
     }
+    if (saved === 'en' || saved === 'tr') initial = saved
+    else initial = browserLang()
   }
   const i18n = createI18n({
     legacy: false,
@@ -35,3 +38,13 @@ export default defineNuxtPlugin((nuxtApp) => {
   nuxtApp.vueApp.use(i18n)
   _global = i18n.global as any
 })
+
+/** Tarayıcının tercih ettiği dillerden ilk tanınanı seçer; Türkçe değilse İngilizce. */
+export function browserLang(langs: readonly string[] = navigator.languages?.length ? navigator.languages : [navigator.language]): 'tr' | 'en' {
+  for (const l of langs) {
+    const p = (l || '').toLowerCase().split('-')[0]
+    if (p === 'tr') return 'tr'
+    if (p) return 'en'
+  }
+  return 'tr'
+}

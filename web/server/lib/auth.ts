@@ -1,8 +1,9 @@
 import { betterAuth } from "better-auth"
 import { organization, bearer, twoFactor } from "better-auth/plugins"
 import pg from "pg"
-import { randomBytes, createHash } from "crypto"
-import { APIError, createAuthMiddleware } from "better-auth/api"
+import { randomBytes } from "crypto"
+import { APIError } from "better-auth/api"
+import { authHooks } from "./auth-hooks"
 import { sendMail } from "./mailer"
 import { stripBrandKeywords, slugRejectReason } from "./brand"
 import {
@@ -209,17 +210,22 @@ async function provisionNewUser(userId: string, email: string, name: string): Pr
 
 /**
  * Guvenilir origin listesi: BETTER_AUTH_URL, platform apex/www/panel/app ve
- * gelistirme localhost'lari. Statik: istekten (Origin basligindan) TURETILMEZ.
+ * gelistirme localhost'lari (yalniz NODE_ENV!=production). Statik: istekten (Origin basligindan) TURETILMEZ.
  */
 export function trustedOriginList(env: Record<string, string | undefined> = process.env): string[] {
-  const list = [
-    "https://localhost:8443",
-    "https://127.0.0.1:8443",
-    "http://localhost:3000",
-    "http://localhost:3002",
-    "http://127.0.0.1:3000",
-    "http://127.0.0.1:3002",
-  ]
+  const list: string[] = []
+  // Loopback origin'ler YALNIZ gelistirmede (uretimde bir saldirgan kendi
+  // makinesindeki localhost'tan guvenilir origin gibi davranamasin).
+  if (env.NODE_ENV !== "production") {
+    list.push(
+      "https://localhost:8443",
+      "https://127.0.0.1:8443",
+      "http://localhost:3000",
+      "http://localhost:3002",
+      "http://127.0.0.1:3000",
+      "http://127.0.0.1:3002",
+    )
+  }
   if (env.BETTER_AUTH_URL) {
     try {
       list.push(new URL(env.BETTER_AUTH_URL).origin)
@@ -250,63 +256,8 @@ if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
   }
 }
 
-// F-46: kullanilmis TOTP kodunun ayni pencerede tekrar kabulu engellenir.
-// Better Auth bunu kendisi yapmaz; basarili dogrulamadan sonra kodun ozetini
-// kisa sure (30sn adim x ±1 pencere icin 120sn) bellekte tutar. Tek surec
-// calistigi icin bellek yeterli; anahtar kullanici/oturum cerezine ozgudur.
-const usedTotp = new Map<string, number>()
-const TOTP_REPLAY_TTL_MS = 120_000
-// Kullaniciyi tanimlayan deger: giris 2. adiminda Better Auth'un two-factor ara
-// cerezi (adi "two_factor" icerir; prefix/__Secure- degisebilir), 2FA
-// etkinlestirmede oturum cerezi. Hicbiri yoksa null: engel uygulanmaz.
-function totpSubject(headers: Headers | undefined): string | null {
-  const raw = headers?.get("cookie")
-  if (!raw) return null
-  let session: string | null = null
-  for (const part of raw.split(";")) {
-    const i = part.indexOf("=")
-    if (i < 0) continue
-    const name = part.slice(0, i).trim()
-    const val = part.slice(i + 1).trim()
-    if (!val) continue
-    if (name.includes("two_factor")) return "tf:" + val
-    if (name.includes("session_token")) session = "st:" + val
-  }
-  return session
-}
-function totpKey(subject: string, code: unknown): string {
-  return createHash("sha256").update(subject + "|" + String(code ?? "").trim()).digest("hex")
-}
-function pruneUsedTotp(now: number): void {
-  for (const [k, exp] of usedTotp) if (exp <= now) usedTotp.delete(k)
-}
-
 export const auth = betterAuth({
-  hooks: {
-    before: createAuthMiddleware(async (ctx) => {
-      if (ctx.path !== "/two-factor/verify-totp") return
-      const now = Date.now()
-      pruneUsedTotp(now)
-      const subject = totpSubject(ctx.headers)
-      if (!subject) return
-      const exp = usedTotp.get(totpKey(subject, (ctx.body as { code?: unknown } | undefined)?.code))
-      if (exp && exp > now) {
-        throw new APIError("BAD_REQUEST", {
-          message: "Bu dogrulama kodu zaten kullanildi; authenticator'daki yeni kodu bekleyin.",
-        })
-      }
-    }),
-    after: createAuthMiddleware(async (ctx) => {
-      if (ctx.path !== "/two-factor/verify-totp") return
-      if (ctx.context.returned instanceof APIError) return
-      const subject = totpSubject(ctx.headers)
-      if (!subject) return
-      usedTotp.set(
-        totpKey(subject, (ctx.body as { code?: unknown } | undefined)?.code),
-        Date.now() + TOTP_REPLAY_TTL_MS,
-      )
-    }),
-  },
+  hooks: authHooks,
   database: new Pool({
     connectionString,
   }),
