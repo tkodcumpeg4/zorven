@@ -51,9 +51,11 @@ func TrustedOriginHosts(platformDomain string, controlHosts []string) []string {
 	for _, h := range controlHosts {
 		add(h)
 	}
-	add("localhost")
-	add("127.0.0.1")
-	add("::1")
+	if !IsProductionDomain(platformDomain) {
+		add("localhost")
+		add("127.0.0.1")
+		add("::1")
+	}
 	return out
 }
 
@@ -77,27 +79,78 @@ func normalizeOriginHost(h string) string {
 	return strings.TrimSuffix(h, ".")
 }
 
-// requestOriginHost, istegin Origin (yoksa Referer) basligindan host'u doner.
-// Ikisi de yoksa veya Origin "null" ise "".
-func requestOriginHost(r *http.Request) string {
+// IsProductionDomain: platform domain tanimli ve localhost/.localhost/.test
+// degilse uretim sayilir (loopback Origin ve http yalniz gelistirmede kabul edilir).
+func IsProductionDomain(pd string) bool {
+	pd = strings.ToLower(strings.TrimSpace(pd))
+	if pd == "" || pd == "localhost" || strings.HasSuffix(pd, ".localhost") ||
+		strings.HasSuffix(pd, ".test") || pd == "127.0.0.1" || pd == "::1" {
+		return false
+	}
+	return true
+}
+
+// requestOrigin, istegin Origin (yoksa Referer) basligindan sema, host ve
+// etkin portu doner. Ikisi de yoksa, Origin "null" veya sema http/https degilse
+// host "" olur.
+func requestOrigin(r *http.Request) (scheme, host, port string) {
 	src := r.Header.Get("Origin")
 	if src == "" {
 		src = r.Header.Get("Referer")
 	}
 	if src == "" || src == "null" {
-		return ""
+		return "", "", ""
 	}
 	u, err := url.Parse(src)
 	if err != nil || (u.Scheme != "https" && u.Scheme != "http") {
-		return ""
+		return "", "", ""
 	}
-	return strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	return u.Scheme, strings.TrimSuffix(strings.ToLower(u.Hostname()), "."), effectivePort(u.Scheme, u.Port())
+}
+
+// effectivePort, bos portu semanin varsayilan portuna tamamlar.
+func effectivePort(scheme, port string) string {
+	if port != "" {
+		return port
+	}
+	if scheme == "http" {
+		return "80"
+	}
+	return "443"
+}
+
+// hostPort, "Host[:port]" degerinden portu doner ("" = belirtilmemis).
+func hostPort(h string) string {
+	if _, p, err := net.SplitHostPort(strings.TrimSpace(h)); err == nil {
+		return p
+	}
+	return ""
+}
+
+func isLoopbackHost(h string) bool {
+	return h == "localhost" || h == "127.0.0.1" || h == "::1"
 }
 
 // originTrusted, istegin Origin/Referer'inin guvenilir olup olmadigini soyler.
 func (m *Middleware) originTrusted(r *http.Request) bool {
-	oh := requestOriginHost(r)
+	scheme, oh, oport := requestOrigin(r)
 	if oh == "" {
+		return false
+	}
+	// Loopback (Vite dev sunucusu vb.) YALNIZ gelistirme platform domaininde
+	// (localhost/.localhost/.test) guvenilirdir; uretimde hicbir port kabul edilmez.
+	if isLoopbackHost(oh) {
+		return !IsProductionDomain(m.PlatformDomain)
+	}
+	// Uretimde panel yalniz https'ten servis edilir: http Origin (ag icindeki
+	// saldirgan / sema dusurme) reddedilir. Gelistirmede http kabul edilir.
+	if scheme != "https" && IsProductionDomain(m.PlatformDomain) {
+		return false
+	}
+	// Port: kontrol host'lari tek dinleyicide servis edilir; Origin portu
+	// istegin Host portuyla (belirtilmemisse Origin semasinin varsayilaniyla)
+	// ayni olmali. Farkli portta calisan baska bir servis panel Origin'i olamaz.
+	if oport != effectivePort(scheme, hostPort(r.Host)) {
 		return false
 	}
 	// Ayni origin: /api/v1 yalnizca kontrol host'larinda (veya IP) servis
@@ -110,7 +163,7 @@ func (m *Middleware) originTrusted(r *http.Request) bool {
 			return true
 		}
 	}
-	return oh == "localhost" || oh == "127.0.0.1" || oh == "::1"
+	return false
 }
 
 // csrfCheck, cerezle kimliklenen bir istegi denetler. Gecerse true; aksi halde

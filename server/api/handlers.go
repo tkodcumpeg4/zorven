@@ -117,6 +117,9 @@ type Server struct {
 	MailClient *mail.ClientConfig
 }
 
+// WriteEntitlementError, kota/entitlement hatasini API bicimiyle yazar (dis paketler icin).
+func WriteEntitlementError(w http.ResponseWriter, err error) { writeEntitlementError(w, err) }
+
 func writeEntitlementError(w http.ResponseWriter, err error) {
 	var entErr *entitlements.EntitlementError
 	if errors.As(err, &entErr) {

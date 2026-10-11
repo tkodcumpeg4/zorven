@@ -85,10 +85,24 @@ func TestMiddlewareCSRFCookieWrites(t *testing.T) {
 	}
 }
 
+// Gelistirme platform domaininde (e2e.test) loopback host'lari listede kalir.
+func TestTrustedOriginHostsDevKeepsLoopback(t *testing.T) {
+	hosts := TrustedOriginHosts("e2e.test", nil)
+	found := false
+	for _, h := range hosts {
+		if h == "localhost" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("dev domaininde localhost beklenirdi: %v", hosts)
+	}
+}
+
 func TestTrustedOriginHostsExcludesTunnels(t *testing.T) {
-	hosts := TrustedOriginHosts("Zorven.App.", []string{"panel.zorven.app:443", "[::1]"})
+	hosts := TrustedOriginHosts("Zorven.App.", []string{"panel.zorven.app:443"})
 	want := map[string]bool{"zorven.app": true, "www.zorven.app": true, "panel.zorven.app": true,
-		"app.zorven.app": true, "localhost": true, "127.0.0.1": true, "::1": true}
+		"app.zorven.app": true}
 	if len(hosts) != len(want) {
 		t.Fatalf("beklenmeyen liste: %v", hosts)
 	}

@@ -351,6 +351,11 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 			var betterAuthVerifier *auth.BetterAuthVerifier
 			if pgSt, ok := st.(*pgstore.Store); ok && pgSt.Pool() != nil {
 				betterAuthVerifier = auth.NewBetterAuthVerifier(pgSt.Pool(), 30*time.Second)
+				if sec := firstNonEmpty(os.Getenv("BETTER_AUTH_SECRET"), os.Getenv("ZORVEN_SESSION_SECRET")); sec != "" {
+					betterAuthVerifier.SetSecret(sec)
+				} else {
+					log.Warn("BETTER_AUTH_SECRET tanimli degil: Better Auth cerez imzasi dogrulanamiyor (imzasiz cerez kabul); Bearer oturum token'i kapali")
+				}
 				apiSrv.BetterAuth = betterAuthVerifier
 				log.Info("Better Auth oturum dogrulayici etkinlestirildi")
 			}
@@ -379,6 +384,7 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				Sessions:     sessions,
 				BetterAuth:   betterAuthVerifier,
 				TrustedHosts: api.TrustedOriginHosts(apiSrv.PlatformDomain, controlHosts),
+				PlatformDomain: apiSrv.PlatformDomain,
 				PublicPaths: map[string]bool{
 					"/api/v1/health":               true,
 					"/api/v1/status":               true,
@@ -597,7 +603,16 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				if betterAuthVerifier != nil {
 					cache = betterAuthVerifier
 				}
-				authProxy = newAuthProxy(u, cache)
+				gate := &memberQuotaGate{Quota: entitlementSvc}
+				if betterAuthVerifier != nil {
+					gate.ActiveOrg = func(ctx context.Context, tok string) string {
+						if sess, err := betterAuthVerifier.VerifySession(ctx, tok); err == nil && sess != nil {
+							return sess.ActiveOrganizationID
+						}
+						return ""
+					}
+				}
+				authProxy = newAuthProxy(u, cache, gate)
 				log.Info("Better Auth upstream proxy etkin", "upstream", authUpstream)
 			}
 
@@ -815,6 +830,12 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 						apiSrv.MailClient = cc
 						mailAuto = mail.NewAutoConfigHandler(*cc)
 						platformHostList = append(platformHostList, mailAuto.Hosts()...)
+						// autoconfig.mail.<platform> gibi iki seviyeli adlar wildcard'a
+						// girmez; kendi ACME sertifikalarini alsinlar (yoksa telefon/Outlook
+						// otomatik ayari TLS ad uyusmazligiyla basarisiz olur).
+						if dualCertMgr != nil {
+							dualCertMgr.SetExtraACMEHosts(mailAuto.Hosts())
+						}
 					}
 				}
 				baseNextProtos := []string{"h2", "http/1.1", "acme-tls/1"}

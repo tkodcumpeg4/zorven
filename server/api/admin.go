@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -118,26 +120,46 @@ func ResolveAdminKey(ctx context.Context, st store.Store, explicit string, log *
 	if err != nil {
 		return AdminKey{}, err
 	}
+	// Anahtar stdout'a/loglara YAZILMAZ (Docker/journal'a sizardi): 0600 izinli
+	// bir dosyaya yazilir, yalniz yolu loglanir. Dosya yazilamazsa anahtar DB'ye
+	// kaydedilmeden hata doner (anahtar kaybolmasin).
+	path, err := writeGeneratedAdminKey(full)
+	if err != nil {
+		return AdminKey{}, fmt.Errorf("uretilen admin anahtari dosyaya yazilamadi (ZORVEN_ADMIN_KEY ile anahtari kendiniz verebilirsiniz): %w", err)
+	}
 	if err := st.SetSetting(ctx, store.SettingAdminTokenID, newID); err != nil {
 		return AdminKey{}, err
 	}
 	if err := st.SetSetting(ctx, store.SettingAdminTokenHash, newHash); err != nil {
 		return AdminKey{}, err
 	}
-
-	// Anahtar YALNIZCA burada gorunur. Sunucu bundan sonra hash'ini bilir.
-	fmt.Print("\n" +
-		"  ┌──────────────────────────────────────────────────────────────────┐\n" +
-		"  │  ADMIN ANAHTARI URETILDI — BU BIR KEZ GOSTERILIR                 │\n" +
-		"  └──────────────────────────────────────────────────────────────────┘\n\n" +
-		"  " + full + "\n\n" +
-		"  Dashboard ve yonetim API'si bu anahtari kullanir:\n" +
-		"    curl -H \"Authorization: Bearer " + full + "\" .../api/v1/clients\n\n" +
-		"  Sunucu yalnizca argon2 hash'ini sakladi. Kaybederseniz veritabanindaki\n" +
-		"  admin_token_* ayarlarini silip sunucuyu yeniden baslatin.\n\n")
-
-	log.Warn("yeni admin anahtari uretildi — cikti kaydediliyorsa anahtar loglara girmis olabilir")
+	log.Warn("yeni admin anahtari uretildi; 0600 izinli dosyaya yazildi, okuyup guvenli yere tasiyin ve dosyayi silin", "dosya", path)
 	return AdminKey{TokenID: newID, Hash: newHash}, nil
+}
+
+// writeGeneratedAdminKey, uretilen admin anahtarini 0600 izinli dosyaya yazar ve
+// yolunu doner. Yol: ZORVEN_ADMIN_KEY_FILE, yoksa calisma dizininde
+// zorven-admin-key.txt.
+func writeGeneratedAdminKey(full string) (string, error) {
+	path := strings.TrimSpace(os.Getenv("ZORVEN_ADMIN_KEY_FILE"))
+	if path == "" {
+		path = "zorven-admin-key.txt"
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return "", err
+	}
+	if _, err := f.WriteString(full + "\n"); err != nil {
+		f.Close()
+		return "", err
+	}
+	if err := f.Close(); err != nil {
+		return "", err
+	}
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	return path, nil
 }
 
 // Middleware, /api/v1/* uclarini admin anahtariyla korur.
@@ -166,6 +188,10 @@ type Middleware struct {
 	// TrustedHosts, cerezli yazma isteklerinde kabul edilen Origin host'lari
 	// (bkz. csrf.go TrustedOriginHosts). Ayni origin ve loopback her zaman gecer.
 	TrustedHosts []string
+
+	// PlatformDomain, Origin denetiminde uretim/gelistirme ayrimi icindir:
+	// uretim domaininde loopback Origin ve http Origin reddedilir (csrf.go).
+	PlatformDomain string
 }
 
 func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -224,8 +250,9 @@ func (m *Middleware) serveAuthenticated(w http.ResponseWriter, r *http.Request) 
 		}
 		if token != "" {
 			// Better Auth cerezleri "<token>.<signature>" biciminde imzalanir;
-			// veritabanindaki session.token alaninda ise nokta oncesindeki token saklanir.
-			rawToken, _, _ := strings.Cut(token, ".")
+			// veritabanindaki session.token alaninda nokta oncesindeki token saklanir.
+			// Imza BETTER_AUTH_SECRET ile dogrulanir (anahtar tanimliysa zorunlu).
+			rawToken := m.BetterAuth.CookieToken(token)
 			if sess, err := m.BetterAuth.VerifySession(r.Context(), rawToken); err == nil && sess != nil {
 				if !m.csrfCheck(w, r) {
 					return
@@ -384,7 +411,8 @@ func (m *Middleware) serveAuthenticated(w http.ResponseWriter, r *http.Request) 
 
 		// 3b. Better Auth oturum token'i kontrolu
 		if m.BetterAuth != nil && !strings.HasPrefix(trimmed, auth.PrefixAdmin) {
-			rawToken, _, _ := strings.Cut(trimmed, ".")
+			// Yalniz IMZALI deger (Better Auth bearer eklentisi); ham DB token'i degil.
+			rawToken := m.BetterAuth.BearerToken(trimmed)
 			if sess, err := m.BetterAuth.VerifySession(r.Context(), rawToken); err == nil && sess != nil {
 				activeTenant := sess.ActiveOrganizationID
 				// Platform Admin YALNIZCA platform/default kiracisinda GERCEK bir

@@ -94,3 +94,43 @@ func TestDualCertManager_GetCertificate(t *testing.T) {
 		t.Fatalf("dogrulanmis custom domain cert donmeliydi, got err=%v", err)
 	}
 }
+
+// Iki seviyeli mail autoconfig adlari wildcard'a girmez; izinliyse kendi
+// sertifikasini alir, izinsiz iki seviyeli ad ACME'ye acilmaz.
+func TestDualCertManager_ExtraACMEHosts(t *testing.T) {
+	defaultCert := dummyCert("*.rpshell.app")
+	mgr := NewDualCertManager(defaultCert, "rpshell.app", nil, &mockCertStore{hostnames: map[string]store.Hostname{}}, "", nil)
+	mgr.SetExtraACMEHosts([]string{
+		"autoconfig.mail.rpshell.app", "Autodiscover.Mail.RPShell.app.", // kucuk harf + nokta normalize
+		"autoconfig.rpshell.app", // tek seviye: wildcard zaten kapsar, listeye girmez
+		"autoconfig.baskasi.com", // platform disi: girmez
+	})
+
+	// Izinli iki seviyeli ad -> wildcard DEGIL, kendi (burada dev) sertifikasi
+	for _, h := range []string{"autoconfig.mail.rpshell.app", "autodiscover.mail.rpshell.app"} {
+		c, err := mgr.GetCertificate(&tls.ClientHelloInfo{ServerName: h})
+		if err != nil || c == nil || c == defaultCert {
+			t.Fatalf("%s kendi sertifikasini almaliydi (err=%v, wildcard=%v)", h, err, c == defaultCert)
+		}
+		leaf, _ := x509.ParseCertificate(c.Certificate[0])
+		if leaf == nil || leaf.VerifyHostname(h) != nil {
+			t.Fatalf("%s sertifikasi bu adi kapsamiyor", h)
+		}
+		if err := mgr.HostPolicy(context.Background(), h); err != nil {
+			t.Fatalf("%s HostPolicy izin vermeliydi: %v", h, err)
+		}
+	}
+
+	// Tek seviyeli autoconfig -> wildcard (degismedi)
+	if c, err := mgr.GetCertificate(&tls.ClientHelloInfo{ServerName: "autoconfig.rpshell.app"}); err != nil || c != defaultCert {
+		t.Fatalf("tek seviyeli ad wildcard almaliydi (err=%v)", err)
+	}
+
+	// Listede olmayan iki seviyeli ad ACME'ye acilmaz
+	if err := mgr.HostPolicy(context.Background(), "evil.mail.rpshell.app"); err == nil {
+		t.Fatal("izinsiz iki seviyeli ad icin HostPolicy reddetmeliydi")
+	}
+	if err := mgr.HostPolicy(context.Background(), "autoconfig.baskasi.com"); err == nil {
+		t.Fatal("platform disi ad icin HostPolicy reddetmeliydi")
+	}
+}

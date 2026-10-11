@@ -3,6 +3,9 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +22,18 @@ import (
 	"github.com/tkodcumpeg4/zorven/server/store/pgstore"
 	"github.com/tkodcumpeg4/zorven/server/tunnel"
 )
+
+// Better Auth imzali deger: "<deger>.<base64 HMAC-SHA256(secret, deger)>"
+// (server/auth.VerifySignedValue ile ayni bicim).
+const testBASecret = "test-better-auth-secret-0123456789abcdef"
+
+func signBAWith(secret, val string) string {
+	m := hmac.New(sha256.New, []byte(secret))
+	m.Write([]byte(val))
+	return val + "." + base64.StdEncoding.EncodeToString(m.Sum(nil))
+}
+
+func signBATest(val string) string { return signBAWith(testBASecret, val) }
 
 func testE2EDSNDatabase(t *testing.T) string {
 	t.Helper()
@@ -96,6 +111,7 @@ func TestBetterAuth_E2E_Flow(t *testing.T) {
 	// 2. Go Store ve Server ayarla (store yukarida, migration'lar icin acildi)
 
 	verifier := auth.NewBetterAuthVerifier(st.Pool(), 1*time.Minute)
+	verifier.SetSecret(testBASecret)
 	hub := tunnel.NewHub()
 	requests := reqlog.New(100)
 	broker := events.New()
@@ -148,7 +164,7 @@ func TestBetterAuth_E2E_Flow(t *testing.T) {
 		}
 		req.AddCookie(&http.Cookie{
 			Name:  "better-auth.session_token",
-			Value: "tok_e2e_user1",
+			Value: signBATest("tok_e2e_user1"),
 		})
 
 		resp, err := client.Do(req)
@@ -204,7 +220,7 @@ func TestBetterAuth_E2E_Flow(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewRequest: %v", err)
 		}
-		req.Header.Set("Authorization", "Bearer tok_e2e_user1")
+		req.Header.Set("Authorization", "Bearer "+signBATest("tok_e2e_user1"))
 
 		resp, err := client.Do(req)
 		if err != nil {
@@ -214,6 +230,29 @@ func TestBetterAuth_E2E_Flow(t *testing.T) {
 
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("beklenen 200 OK, alinan: %d", resp.StatusCode)
+		}
+	})
+
+	// Gerileme korumasi: ham DB oturum token'i Bearer olarak kabul EDILMEZ.
+	t.Run("Raw session token as Bearer is rejected", func(t *testing.T) {
+		for name, hv := range map[string]string{
+			"ham token":     "Bearer tok_e2e_user1",
+			"yanlis imza":   "Bearer tok_e2e_user1.AAAA",
+			"baska anahtar": "Bearer " + signBAWith("baska-anahtar-baska-anahtar-baska", "tok_e2e_user1"),
+		} {
+			req, err := http.NewRequestWithContext(ctx, "GET", ts.URL+"/api/v1/me", nil)
+			if err != nil {
+				t.Fatalf("NewRequest: %v", err)
+			}
+			req.Header.Set("Authorization", hv)
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatalf("Do: %v", err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Errorf("%s: beklenen 401, alinan: %d", name, resp.StatusCode)
+			}
 		}
 	})
 
@@ -228,7 +267,7 @@ func TestBetterAuth_E2E_Flow(t *testing.T) {
 		req.Header.Set("Origin", ts.URL)
 		req.AddCookie(&http.Cookie{
 			Name:  "better-auth.session_token",
-			Value: "tok_e2e_user1",
+			Value: signBATest("tok_e2e_user1"),
 		})
 
 		resp, err := client.Do(req)
@@ -274,7 +313,7 @@ func TestBetterAuth_E2E_Flow(t *testing.T) {
 
 		// List clients for this tenant
 		listReq, _ := http.NewRequestWithContext(ctx, "GET", ts.URL+"/api/v1/clients", nil)
-		listReq.AddCookie(&http.Cookie{Name: "better-auth.session_token", Value: "tok_e2e_user1"})
+		listReq.AddCookie(&http.Cookie{Name: "better-auth.session_token", Value: signBATest("tok_e2e_user1")})
 		listResp, err := client.Do(listReq)
 		if err != nil {
 			t.Fatalf("list Do: %v", err)
@@ -329,7 +368,7 @@ func TestBetterAuth_E2E_Flow(t *testing.T) {
 
 		// /api/v1/me ile yeni organizasyonun dogrulandigini kontrol et
 		req, _ := http.NewRequestWithContext(ctx, "GET", ts.URL+"/api/v1/me", nil)
-		req.AddCookie(&http.Cookie{Name: "better-auth.session_token", Value: "tok_e2e_user1_org_b"})
+		req.AddCookie(&http.Cookie{Name: "better-auth.session_token", Value: signBATest("tok_e2e_user1_org_b")})
 		resp, err := client.Do(req)
 		if err != nil {
 			t.Fatalf("me Do: %v", err)
@@ -358,7 +397,7 @@ func TestBetterAuth_E2E_Flow(t *testing.T) {
 
 		// Team B'de istemcileri listele -> Team A'nin istemcileri ASLA gorunmemeli (0 olmali)
 		listReq, _ := http.NewRequestWithContext(ctx, "GET", ts.URL+"/api/v1/clients", nil)
-		listReq.AddCookie(&http.Cookie{Name: "better-auth.session_token", Value: "tok_e2e_user1_org_b"})
+		listReq.AddCookie(&http.Cookie{Name: "better-auth.session_token", Value: signBATest("tok_e2e_user1_org_b")})
 		listResp, err := client.Do(listReq)
 		if err != nil {
 			t.Fatalf("list Do: %v", err)

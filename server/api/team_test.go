@@ -94,6 +94,7 @@ func TestTeam_API_Lifecycle(t *testing.T) {
 
 	// 3. Server kurulumu
 	baVerifier := auth.NewBetterAuthVerifier(pool, 5*time.Second)
+	baVerifier.SetSecret(testBASecret)
 	entService := entitlements.NewService(st)
 	srv := &Server{
 		Store:        st,
@@ -123,7 +124,7 @@ func TestTeam_API_Lifecycle(t *testing.T) {
 			_ = json.NewEncoder(&buf).Encode(body)
 		}
 		r, _ := http.NewRequest(method, ts.URL+path, &buf)
-		r.Header.Set("Authorization", "Bearer "+sessionToken)
+		r.Header.Set("Authorization", "Bearer "+signBATest(sessionToken))
 		r.Header.Set("Content-Type", "application/json")
 		return r
 	}
@@ -212,7 +213,7 @@ func TestTeam_API_Lifecycle(t *testing.T) {
 		}
 
 		r, _ := http.NewRequest("POST", ts.URL+"/api/v1/invitations/"+invitedMemberID+"/accept", nil)
-		r.Header.Set("Authorization", "Bearer "+devToken)
+		r.Header.Set("Authorization", "Bearer "+signBATest(devToken))
 		resp, err = client.Do(r)
 		if err != nil {
 			t.Fatalf("Do: %v", err)
@@ -251,7 +252,7 @@ func TestTeam_API_Lifecycle(t *testing.T) {
 				_ = json.NewEncoder(&buf).Encode(body)
 			}
 			r, _ := http.NewRequest(method, ts.URL+path, &buf)
-			r.Header.Set("Authorization", "Bearer "+devToken)
+			r.Header.Set("Authorization", "Bearer "+signBATest(devToken))
 			r.Header.Set("Content-Type", "application/json")
 			r.Header.Set("X-Tenant-ID", tenantID)
 			return r

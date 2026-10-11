@@ -54,6 +54,8 @@ services:
       - ZORVEN_DB_DSN=postgres://${POSTGRES_USER:-rpshell}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD gerekli (deploy/.env)}@postgres:5432/${POSTGRES_DB:-rpshell}?sslmode=disable
       - ZORVEN_PLATFORM_DOMAIN=${PLATFORM_DOMAIN:-localhost}
       - ZORVEN_ADMIN_KEY=${ADMIN_KEY}
+      # Better Auth cerez imzasi (web ile AYNI deger): Go imzayi dogrular, ham token Bearer reddedilir.
+      - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET}
       - ZORVEN_ACME_EMAIL=${ACME_EMAIL}
       # Better Auth (kayit/giris/e-posta dogrulama) ucları web (Nitro) servisine proxy'lenir.
       - ZORVEN_AUTH_UPSTREAM=http://web:3000

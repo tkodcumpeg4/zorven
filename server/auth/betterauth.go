@@ -2,7 +2,10 @@ package auth
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"errors"
 	"net/http"
 	"net/url"
@@ -38,6 +41,66 @@ type BetterAuthVerifier struct {
 	pool  *pgxpool.Pool
 	cache sync.Map // token (string) -> cachedSession
 	ttl   time.Duration
+	// secret, Better Auth cerez imza anahtari (BETTER_AUTH_SECRET). Bos ise
+	// imza dogrulanamaz: cerez eski davranisla (imzasiz token) kabul edilir,
+	// Bearer ile oturum token'i HIC kabul edilmez.
+	secret []byte
+}
+
+// SetSecret, Better Auth cerez imza anahtarini ayarlar (bkz. CookieToken).
+func (v *BetterAuthVerifier) SetSecret(secret string) {
+	v.secret = []byte(secret)
+}
+
+// HasSecret, imza dogrulamasinin etkin olup olmadigini soyler.
+func (v *BetterAuthVerifier) HasSecret() bool { return len(v.secret) > 0 }
+
+// VerifySignedValue, Better Auth'un imzali deger bicimini ("<deger>.<imza>",
+// imza = HMAC-SHA256(secret, deger) standart base64, cerezde URL kodlu)
+// dogrular ve imzasiz degeri doner.
+func VerifySignedValue(signed string, secret []byte) (string, bool) {
+	if v, err := url.PathUnescape(signed); err == nil {
+		signed = v
+	}
+	i := strings.LastIndexByte(signed, '.')
+	if i <= 0 || len(secret) == 0 {
+		return "", false
+	}
+	val, sig := signed[:i], signed[i+1:]
+	want, err := base64.StdEncoding.DecodeString(sig)
+	if err != nil {
+		return "", false
+	}
+	mac := hmac.New(sha256.New, secret)
+	mac.Write([]byte(val))
+	if !hmac.Equal(mac.Sum(nil), want) {
+		return "", false
+	}
+	return val, true
+}
+
+// CookieToken, Better Auth oturum cerezinin degerinden DB session.token'ini
+// cikarir. Anahtar tanimliysa imza ZORUNLU dogrulanir (gecersiz imza -> "");
+// tanimli degilse (gelistirme) imzasiz token kabul edilir.
+func (v *BetterAuthVerifier) CookieToken(value string) string {
+	if len(v.secret) == 0 {
+		if u, err := url.PathUnescape(value); err == nil {
+			value = u
+		}
+		tok, _, _ := strings.Cut(value, ".")
+		return tok
+	}
+	tok, _ := VerifySignedValue(value, v.secret)
+	return tok
+}
+
+// BearerToken, "Authorization: Bearer <imzali-oturum-degeri>" icin token'i
+// doner. HAM session.token kabul edilmez (DB'ye okuma erisimi oturum ele
+// gecirmeye donusmesin); imzali deger (Better Auth bearer eklentisi) gerekir.
+// Anahtar tanimli degilse "".
+func (v *BetterAuthVerifier) BearerToken(value string) string {
+	tok, _ := VerifySignedValue(value, v.secret)
+	return tok
 }
 
 // NewBetterAuthVerifier, yeni bir BetterAuth oturum dogrulayici olusturur.

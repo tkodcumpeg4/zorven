@@ -31,3 +31,16 @@ func TestTunnelResponseHasNoControlHeaders(t *testing.T) {
 		t.Fatal("tunel yanitinda baslik olmamali")
 	}
 }
+
+// Site ve panel yazi tiplerini kendi sunucusundan verir; Google Fonts izni geri gelmemeli.
+func TestCSPNoGoogleFonts(t *testing.T) {
+	csp := buildCSPReportOnly([]string{"https://analytics.example"})
+	for _, bad := range []string{"fonts.googleapis.com", "fonts.gstatic.com"} {
+		if strings.Contains(csp, bad) {
+			t.Fatalf("CSP %q icermemeli: %s", bad, csp)
+		}
+	}
+	if !strings.Contains(csp, "font-src 'self' data:") {
+		t.Fatalf("font-src yalniz self+data olmali: %s", csp)
+	}
+}

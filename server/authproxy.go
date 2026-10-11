@@ -1,14 +1,66 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"strings"
 
+	"github.com/tkodcumpeg4/zorven/server/api"
 	"github.com/tkodcumpeg4/zorven/server/auth"
 )
+
+// memberQuota, davet/uye ekleyen yerlesik Better Auth uclarinda Go'nun plan
+// kotasini uygulamak icin kullanilan kontrol (entitlements.EntitlementService).
+type memberQuota interface {
+	CanAddMember(ctx context.Context, tenantID string) error
+}
+
+// memberQuotaGate, native organization/invite-member istegini Better Auth'a
+// iletmeden ONCE Go tarafindaki uye kotasiyla denetler (F-22/F-45).
+type memberQuotaGate struct {
+	Quota memberQuota
+	// ActiveOrg, oturum token'inin aktif organizasyonunu doner (govdede
+	// organizationId yoksa kullanilir); bilinmiyorsa "".
+	ActiveOrg func(ctx context.Context, token string) string
+}
+
+// check, istek kota denetimine tabi degilse veya kota uygunsa true doner;
+// aksi halde Go'nun entitlement hata bicimiyle yanit yazar ve false doner.
+func (g *memberQuotaGate) check(w http.ResponseWriter, r *http.Request) bool {
+	if g == nil || g.Quota == nil || r.Method != http.MethodPost ||
+		!strings.HasSuffix(strings.TrimSuffix(r.URL.Path, "/"), "/organization/invite-member") {
+		return true
+	}
+	var buf []byte
+	if r.Body != nil {
+		buf, _ = io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		r.Body.Close()
+		r.Body = io.NopCloser(bytes.NewReader(buf))
+		r.ContentLength = int64(len(buf))
+	}
+	var body struct {
+		OrganizationID string `json:"organizationId"`
+	}
+	_ = json.Unmarshal(buf, &body)
+	org := strings.TrimSpace(body.OrganizationID)
+	if org == "" && g.ActiveOrg != nil {
+		org = g.ActiveOrg(r.Context(), auth.RequestSessionToken(r))
+	}
+	if org == "" {
+		// Kiraci belirlenemedi: Better Auth kendi yetki kontrolunu yapar.
+		return true
+	}
+	if err := g.Quota.CanAddMember(r.Context(), org); err != nil {
+		api.WriteEntitlementError(w, err)
+		return false
+	}
+	return true
+}
 
 // sessionCache, auth proxy'sinin Go oturum onbellegini temizlemek icin
 // kullandigi arayuz (*auth.BetterAuthVerifier; testte sahte).
@@ -41,7 +93,11 @@ type authCacheState struct {
 //     e-posta degisim onayi; sifre sifirlama) Go oturum onbellegi istekten ONCE
 //     ve yanit istemciye yazilmadan ONCE temizlenir (30 sn eski oturum/rol,
 //     2FA/sifre degisiminden sonra silinen oturumlarin kabulu ve yaris yok).
-func newAuthProxy(upstream *url.URL, cache sessionCache) http.Handler {
+func newAuthProxy(upstream *url.URL, cache sessionCache, gates ...*memberQuotaGate) http.Handler {
+	var gate *memberQuotaGate
+	if len(gates) > 0 {
+		gate = gates[0]
+	}
 	proxy := httputil.NewSingleHostReverseProxy(upstream)
 	origDirector := proxy.Director
 	proxy.Director = func(req *http.Request) {
@@ -50,7 +106,12 @@ func newAuthProxy(upstream *url.URL, cache sessionCache) http.Handler {
 		stripForwardHeaders(req.Header)
 	}
 	if cache == nil {
-		return proxy
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !gate.check(w, r) {
+				return
+			}
+			proxy.ServeHTTP(w, r)
+		})
 	}
 	proxy.ModifyResponse = func(resp *http.Response) error {
 		st, _ := resp.Request.Context().Value(authCacheKey{}).(*authCacheState)
@@ -66,6 +127,9 @@ func newAuthProxy(upstream *url.URL, cache sessionCache) http.Handler {
 		return nil
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !gate.check(w, r) {
+			return
+		}
 		if st := authCacheStateFor(r, cache); st != nil {
 			st.invalidate(cache)
 			r = r.WithContext(context.WithValue(r.Context(), authCacheKey{}, st))

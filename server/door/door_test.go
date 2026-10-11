@@ -461,3 +461,27 @@ func TestEnforceAllPlansAndTransientGate(t *testing.T) {
 		t.Fatal("gecici hatada kapi etkin kalmali")
 	}
 }
+
+// IPv6: ayni /64 icinde adres degisse de izin gecerli; baska /64 ve IPv4 eslesmez.
+func TestHasGrantIPv6Prefix64(t *testing.T) {
+	st := &fakeStore{grants: []store.DoorGrant{{
+		ID: "dg_v6", TunnelID: "tun", IP: "2001:db8:abcd:12::1", ExpiresAt: time.Now().Add(time.Hour),
+	}, {
+		ID: "dg_v4", TunnelID: "tun", IP: "203.0.113.7", ExpiresAt: time.Now().Add(time.Hour),
+	}}}
+	s := New(st, nil, nil)
+	for ip, want := range map[string]bool{
+		"2001:db8:abcd:12::1":                  true,  // ayni adres
+		"2001:db8:abcd:12:a1b2:c3d4:e5f6:789a": true,  // ayni /64, gizlilik adresi
+		"[2001:db8:abcd:12::99]:51000":         true,  // port + koseli parantez
+		"2001:db8:abcd:13::1":                  false, // komsu /64
+		"2001:db8:ffff:12::1":                  false, // baska ag
+		"203.0.113.7":                          true,  // IPv4 tam eslesme
+		"203.0.113.8":                          false, // IPv4 onek yok
+		"::ffff:203.0.113.7":                   true,  // IPv4-mapped -> IPv4
+	} {
+		if _, ok := s.HasGrant("tun", ip); ok != want {
+			t.Errorf("HasGrant(%s) = %v, beklenen %v", ip, ok, want)
+		}
+	}
+}

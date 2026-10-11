@@ -161,6 +161,21 @@ func NormalizeIP(raw string) string {
 	return ip.String()
 }
 
+// grantKey, izin eslestirme anahtari: IPv4 tam adres, IPv6 /64 oneki.
+// IPv6 istemciler (telefon/dizustu) gizlilik uzantilariyla ayni /64 icinde adres
+// degistirir; tam eslesme bu yuzden kapiyi acip baglanirken kopuyordu. /64 tek bir
+// abone/hat icin standart atama birimidir. Veritabaninda tam IP saklanmaya devam eder.
+func grantKey(ip string) string {
+	p := net.ParseIP(ip)
+	if p == nil {
+		return ""
+	}
+	if v4 := p.To4(); v4 != nil {
+		return v4.String()
+	}
+	return p.Mask(net.CIDRMask(64, 128)).String() + "/64"
+}
+
 // --- kapi goruntusu ----------------------------------------------------------
 
 // Refresh, kapisi etkin tunellerin goruntusunu veritabanindan yeniler. Hata olursa
@@ -346,7 +361,7 @@ func (s *Service) HasGrant(tunnelID, ip string) (time.Time, bool) {
 	if gc == nil {
 		return time.Time{}, false
 	}
-	exp, ok := gc.byIP[ip]
+	exp, ok := gc.byIP[grantKey(ip)]
 	if !ok || !exp.After(now) {
 		return time.Time{}, false
 	}
@@ -370,8 +385,9 @@ func (s *Service) loadGrants(tunnelID string, now time.Time) *grantCache {
 		if ip == "" {
 			continue
 		}
-		if cur, ok := gc.byIP[ip]; !ok || g.ExpiresAt.After(cur) {
-			gc.byIP[ip] = g.ExpiresAt
+		k := grantKey(ip)
+		if cur, ok := gc.byIP[k]; !ok || g.ExpiresAt.After(cur) {
+			gc.byIP[k] = g.ExpiresAt
 		}
 	}
 	s.mu.Lock()

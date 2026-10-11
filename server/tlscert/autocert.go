@@ -30,6 +30,37 @@ type DualCertManager struct {
 
 	mu       sync.RWMutex
 	devCerts map[string]*tls.Certificate
+
+	// extraACME, platform alani altinda olup wildcard sertifikanin KAPSAMADIGI
+	// (iki+ seviyeli) ve acikca izin verilmis hostlar; kendi Let's Encrypt
+	// sertifikalarini alirlar. Ornek: autoconfig.mail.<platform> (mail istemcisi
+	// otomatik ayari). *.<platform> yalniz tek seviyeyi kapsar.
+	extraACME map[string]bool
+}
+
+// SetExtraACMEHosts, wildcard'in kapsamadigi platform alt hostlarini ACME'ye acar.
+// Yalniz PlatformDomain altindaki ve en az iki seviyeli hostlar kabul edilir;
+// digerleri sessizce atlanir (tek seviyeliler zaten wildcard'la sunulur).
+func (m *DualCertManager) SetExtraACMEHosts(hosts []string) {
+	set := make(map[string]bool)
+	for _, h := range hosts {
+		h = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(h), "."))
+		if m.PlatformDomain == "" || !strings.HasSuffix(h, "."+m.PlatformDomain) {
+			continue
+		}
+		if strings.Contains(strings.TrimSuffix(h, "."+m.PlatformDomain), ".") {
+			set[h] = true
+		}
+	}
+	m.mu.Lock()
+	m.extraACME = set
+	m.mu.Unlock()
+}
+
+func (m *DualCertManager) isExtraACME(host string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.extraACME[host]
 }
 
 func NewDualCertManager(defaultCert *tls.Certificate, platformDomain string, controlHosts []string, st store.Store, acmeEmail string, cache autocert.Cache) *DualCertManager {
@@ -57,6 +88,9 @@ func NewDualCertManager(defaultCert *tls.Certificate, platformDomain string, con
 // sertifika talep etmesini saglar.
 func (m *DualCertManager) HostPolicy(ctx context.Context, host string) error {
 	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	if m.isExtraACME(host) {
+		return nil
+	}
 	if m.Store == nil {
 		return fmt.Errorf("store tanimli degil")
 	}
@@ -87,6 +121,15 @@ func (m *DualCertManager) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certi
 	// 1. SNI yoksa, IP ise veya kontrol hostlarindan biri ise varsayilan sertifika:
 	if sni == "" || ingress.IsIPHost(sni) || ingress.HostMatchesAny(sni, m.ControlHosts) {
 		return m.DefaultCert, nil
+	}
+
+	// 2a. Wildcard'in kapsamadigi izinli platform hostu (or. autoconfig.mail.<platform>):
+	// ACME varsa kendi sertifikasi; yoksa (gelistirme) on-the-fly self-signed.
+	if m.isExtraACME(sni) {
+		if m.AutocertManager != nil {
+			return m.AutocertManager.GetCertificate(hello)
+		}
+		return m.getOrCreateDevCert(sni)
 	}
 
 	// 2. Platform domaini veya platform alt alani ise varsayilan (wildcard) sertifika:

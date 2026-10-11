@@ -4,9 +4,10 @@ import (
 	"crypto/sha256"
 	"errors"
 	"io"
-	"strings"
 
 	"golang.org/x/crypto/hkdf"
+
+	"github.com/tkodcumpeg4/zorven/server/api"
 )
 
 // Amac etiketleri: ayni ana secret'tan her kullanim icin AYRI anahtar turetilir;
@@ -33,14 +34,7 @@ func deriveKey(master []byte, purpose string) []byte {
 
 // isProductionDomain: platform domain tanimli ve localhost/.localhost/.test degilse
 // uretim sayilir.
-func isProductionDomain(pd string) bool {
-	pd = strings.ToLower(strings.TrimSpace(pd))
-	if pd == "" || pd == "localhost" || strings.HasSuffix(pd, ".localhost") ||
-		strings.HasSuffix(pd, ".test") || pd == "127.0.0.1" || pd == "::1" {
-		return false
-	}
-	return true
-}
+func isProductionDomain(pd string) bool { return api.IsProductionDomain(pd) }
 
 // resolveVisitorSecret ziyaretci/Basic-auth anahtarlarinin ana secret'ini dogrular.
 // Uretimde secret yoksa hata doner (sessiz zayif varsayilan yok); gelistirmede

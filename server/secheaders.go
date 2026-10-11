@@ -25,15 +25,16 @@ func analyticsOrigins(hosts []string) []string {
 }
 
 // buildCSPReportOnly, Report-Only CSP degerini uretir. Harici kaynaklar:
-// Scalar (cdn.jsdelivr.net), Google Fonts, self-hosted Umami (analytics host).
+// Scalar (cdn.jsdelivr.net, surum sabit + SRI) ve self-hosted Umami (analytics host).
+// Google Fonts YOK: site ve panel yazi tiplerini kendi sunucusundan verir (2026-10-11).
 func buildCSPReportOnly(analytics []string) string {
 	script := append([]string{"'self'", "'unsafe-inline'", "https://cdn.jsdelivr.net"}, analytics...)
 	parts := []string{
 		"default-src 'self'",
 		"script-src " + strings.Join(script, " "),
-		"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net",
+		"style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
 		"img-src 'self' data: https:",
-		"font-src 'self' data: https://fonts.gstatic.com",
+		"font-src 'self' data:",
 		"connect-src 'self' wss: https:",
 		"frame-ancestors 'none'",
 		"base-uri 'self'",
