@@ -6,6 +6,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- Panel language defaults to the browser language on first visit (Turkish -> Turkish, anything else -> English); a saved choice always wins.
+- Mail client auto-setup hosts (`autoconfig.mail.<platform>`, `autodiscover.mail.<platform>`) get their own ACME certificates, since the wildcard does not cover two-level names.
+- Web door: IPv6 grants match the whole /64 prefix (privacy addresses rotate); IPv4 stays exact.
 - Remote terminal: persistent sessions (the shell lives on the client for 30 minutes after a disconnect, 256 KB replay buffer, owner-bound), tabs that survive page changes and refreshes, search, links, WebGL rendering, copy/paste, automatic reconnect, and a shell picker (client-side shell discovery; Zorven zsh/bash profile with color and UTF-8 environment).
 - Signed client updates: release manifests are verified with an embedded ed25519 public key, downgrades and same-version updates are refused; `keygen`/`sign` tools and a signing step in `scripts/build-clients.sh`.
 - MTA-STS policy served at `mta-sts.<platform>/.well-known/mta-sts.txt` (`ZORVEN_MTA_STS_MODE`, default `testing`).
@@ -35,6 +38,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Panel: a failed `nuxt generate` can no longer ship a stale build; `index.html` and `_nuxt` assets always come from the same build.
 
 ### Security
+- CSRF: stricter Origin checks in production (loopback and plain-http origins rejected on a production platform domain); loopback trusted origins only outside production in the panel auth.
+- Better Auth session cookies are signature-verified with `BETTER_AUTH_SECRET`; raw session tokens are no longer accepted as Bearer. Set the same secret for the server and the web service.
+- A generated admin key is written to a 0600 file (`ZORVEN_ADMIN_KEY_FILE`, default `zorven-admin-key.txt`) instead of stdout/logs.
+- TOTP codes cannot be replayed within their validity window; `get-session` no longer exposes the session token; `@nuxtjs/i18n` removed (vue-i18n 11 used directly), nodemailer 10.
+- Content-Security-Policy no longer allows Google Fonts; the API reference page pins Scalar to a fixed version with SRI.
 - Inspector: sensitive captured headers (Authorization, Cookie, Set-Cookie, X-Api-Key, ...) are masked for everyone except owners/admins; replay is restricted to owners/admins.
 - Remote terminal and screen tickets are single-purpose (cross use refused), WebSocket exemption is limited to the real endpoints, and tickets are issued to owners/admins only.
 - Members are read/create-only: security settings, deletions and token rotation require owner/admin; unknown roles are rejected.
