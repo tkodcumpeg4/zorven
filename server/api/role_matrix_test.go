@@ -56,6 +56,7 @@ func TestRoleMatrixPrivilegedRoutes(t *testing.T) {
 		"udp":                s.setTunnelUDP,
 		"door":               s.setTunnelDoor,
 		"door grant revoke":  s.revokeDoorGrant,
+		"revoke sessions":    s.revokeVisitorSessions,
 		"alert":              s.setTunnelAlert,
 		"capture":            s.setCaptureSettings,
 		"device config":      s.setDeviceConfig,

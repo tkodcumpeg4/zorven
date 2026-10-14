@@ -19,7 +19,7 @@
     "@xterm/xterm": "^6.0.0",
     "better-auth": "^1.7.3",
     "nodemailer": "^10.0.16",
-    "nuxt": "^4.0.0",
+    "nuxt": "^4.6.1",
     "pg": "^8.23.0",
     "qrcode": "^1.5.4",
     "vue": "^3.5.0",
@@ -27,6 +27,8 @@
     "vue-router": "^4.4.0"
   },
   "devDependencies": {
+    "@iconify-json/lucide": "^1.2.142",
+    "@iconify-json/simple-icons": "^1.2.99",
     "@nuxt/fonts": "^0.11.0",
     "@nuxt/icon": "^1.10.0",
     "@tailwindcss/vite": "^4.0.0",

@@ -29,7 +29,6 @@ import (
 
 const (
 	basicCookie = "_zvb_session"
-	basicTTL    = 12 * time.Hour
 
 	// Basarisiz deneme siniri: IP + tunel basina 10 dakikada 10.
 	basicFailBurst  = 10
@@ -54,17 +53,11 @@ type basicClaims struct {
 	Host   string `json:"h"`
 	FP     string `json:"fp"`
 	Exp    int64  `json:"exp"`
-	// IatMs, oturumun verilis zamani (unix milisaniye); web door oturum iptalinde
-	// kullanilir. Eski cerezlerde yoktur: verilis = Exp - basicTTL.
+	// IatMs, cerezin (son) imzalanma zamani (unix ms); oturum iptalinde kullanilir.
+	// Eski cerezlerde yoktur: verilis = Exp - visitorauth.DefaultSessionTTL.
 	IatMs int64 `json:"iatms,omitempty"`
-}
-
-// issuedAt, oturumun verilis zamanini doner.
-func (c basicClaims) issuedAt() time.Time {
-	if c.IatMs > 0 {
-		return time.UnixMilli(c.IatMs)
-	}
-	return time.Unix(c.Exp, 0).Add(-basicTTL)
+	// OrigMs, ilk giris zamani (unix ms); kayan yenilemede degismez (mutlak tavan).
+	OrigMs int64 `json:"orig,omitempty"`
 }
 
 // passFingerprint, saklanan parola hash'inin kisa parmak izi. Parola degisince
@@ -108,40 +101,55 @@ func (h *Handler) verifyBasic(tok string) (basicClaims, bool) {
 // basicFormEnabled, imza sirri varsa true. Yoksa eski davranis (yerel Basic penceresi).
 func (h *Handler) basicFormEnabled() bool { return len(h.BasicSecret) > 0 }
 
-func (h *Handler) basicCookieOK(r *http.Request, tun store.HostRoute, cfg basicConfig) bool {
-	_, ok := h.basicCookieIssued(r, tun, cfg)
-	return ok
+// basicCookieState, gecerli Basic oturum cerezinin degerlendirmesini doner
+// (tunel sure politikasina gore; parola parmak izi ve tunel/host baglama dahil).
+func (h *Handler) basicCookieState(r *http.Request, tun store.HostRoute, cfg basicConfig) (visitorauth.SessionState, bool) {
+	if !h.basicFormEnabled() {
+		return visitorauth.SessionState{}, false
+	}
+	c, err := r.Cookie(basicCookie)
+	if err != nil {
+		return visitorauth.SessionState{}, false
+	}
+	claims, ok := h.verifyBasic(c.Value)
+	if !ok {
+		return visitorauth.SessionState{}, false
+	}
+	if claims.Tunnel != tun.TunnelID ||
+		!strings.EqualFold(claims.Host, normalizeHost(r.Host)) ||
+		subtle.ConstantTimeCompare([]byte(claims.FP), []byte(passFingerprint(cfg))) != 1 {
+		return visitorauth.SessionState{}, false
+	}
+	return visitorauth.PolicyFromConfig(tun.AccessConfig).Evaluate(time.Now(), claims.Exp, claims.IatMs, claims.OrigMs)
 }
 
 // basicCookieIssued, gecerli Basic oturum cerezinin verilis zamanini doner.
 func (h *Handler) basicCookieIssued(r *http.Request, tun store.HostRoute, cfg basicConfig) (time.Time, bool) {
-	if !h.basicFormEnabled() {
-		return time.Time{}, false
+	st, ok := h.basicCookieState(r, tun, cfg)
+	return st.Issued, ok
+}
+
+// sessionRevoked, (tunel, kimlik) icin verilis zamani iptal edilmis mi. Iptal
+// servisi (Door) yoksa false. Kimlik "*" kaydi = tunelin tum ziyaretci oturumlari.
+func (h *Handler) sessionRevoked(tunnelID, identity string, issued time.Time) bool {
+	if h.Door == nil {
+		return false
 	}
-	c, err := r.Cookie(basicCookie)
-	if err != nil {
-		return time.Time{}, false
-	}
-	claims, ok := h.verifyBasic(c.Value)
-	if !ok || claims.Exp < time.Now().Unix() {
-		return time.Time{}, false
-	}
-	if claims.Tunnel == tun.TunnelID &&
-		strings.EqualFold(claims.Host, normalizeHost(r.Host)) &&
-		subtle.ConstantTimeCompare([]byte(claims.FP), []byte(passFingerprint(cfg))) == 1 {
-		return claims.issuedAt(), true
-	}
-	return time.Time{}, false
+	return h.Door.SessionRevoked(tunnelID, identity, issued)
 }
 
 func (h *Handler) setBasicCookie(w http.ResponseWriter, r *http.Request, tun store.HostRoute, cfg basicConfig) {
 	now := time.Now()
-	exp := now.Add(basicTTL)
+	pol := visitorauth.PolicyFromConfig(tun.AccessConfig)
+	h.writeBasicCookie(w, r, tun, cfg, now, now, now.Add(pol.TTL()))
+}
+
+func (h *Handler) writeBasicCookie(w http.ResponseWriter, r *http.Request, tun store.HostRoute, cfg basicConfig, iat, orig, exp time.Time) {
 	http.SetCookie(w, &http.Cookie{
 		Name: basicCookie,
 		Value: h.signBasic(basicClaims{
 			Tunnel: tun.TunnelID, Host: normalizeHost(r.Host),
-			FP: passFingerprint(cfg), Exp: exp.Unix(), IatMs: now.UnixMilli(),
+			FP: passFingerprint(cfg), Exp: exp.Unix(), IatMs: iat.UnixMilli(), OrigMs: orig.UnixMilli(),
 		}),
 		Path:     "/",
 		Expires:  exp,
@@ -235,7 +243,11 @@ func serveBasicLimited(w http.ResponseWriter, r *http.Request, asPage bool) {
 // enforceBasic, mode=basic denetimi. true = gec.
 func (h *Handler) enforceBasic(w http.ResponseWriter, r *http.Request, tun store.HostRoute) bool {
 	cfg := parseBasicConfig(tun.AccessConfig)
-	if h.basicCookieOK(r, tun, cfg) {
+	if st, ok := h.basicCookieState(r, tun, cfg); ok &&
+		!h.sessionRevoked(tun.TunnelID, truncateIdentity(cfg.Username), st.Issued) {
+		if rn := st.Renewal; rn != nil {
+			h.writeBasicCookie(w, r, tun, cfg, rn.Iat, rn.Orig, rn.Exp)
+		}
 		return true
 	}
 	failedHeader := false

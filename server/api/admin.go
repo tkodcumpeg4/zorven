@@ -215,7 +215,7 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				"cok fazla istek, lutfen biraz sonra tekrar deneyin")
 			return
 		}
-		if r.URL.Path == healthPath && hasCredentials(r) {
+		if (r.URL.Path == healthPath || r.URL.Path == statusPath) && hasCredentials(r) {
 			// Kimlikli saglik istegi: gecerliyse surum/istemci sayisi da doner;
 			// gecersizse sessizce kimliksiz (yalniz status) yanita dusulur.
 			if m.healthProbe(w, r) {
@@ -555,6 +555,9 @@ func isTicketWSRoute(r *http.Request) bool {
 }
 
 const healthPath = "/api/v1/health"
+
+// statusPath, durum ucu; health ile ayni desen: kimlikliyse ayrintilar doner.
+const statusPath = "/api/v1/status"
 
 // hasCredentials, istegin kimlik bilgisi tasiyip tasimadigina bakar (dogrulamaz).
 func hasCredentials(r *http.Request) bool {

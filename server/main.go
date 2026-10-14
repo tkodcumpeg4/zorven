@@ -190,6 +190,7 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 
 			requests := reqlog.New(5000)
 			captures := reqlog.NewCaptureStore(0) // FAZ 2: opt-in istek yakalama deposu
+			setupCaptures(ctx, captures, st, os.Getenv, log) // K2: kalici govde yakalama
 			broker := events.New()
 
 			// Kalici istek loglari: batch persister Postgres'e yazar. Store
@@ -318,6 +319,18 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				}()
 			}
 
+			// K3: rezerve TCP/UDP port havuzu (ZORVEN_TCP_* env).
+			portCfg, perr := loadPortPool(apiSrv.PlatformDomain)
+			if perr != nil {
+				return perr
+			}
+			apiSrv.PortPool = portCfg
+			for _, sl := range portCfg.Slots {
+				log.Info("rezerve port havuzu yuvasi", "host", sl.Host, "ip", sl.IP,
+					"port_araligi", fmt.Sprintf("%d-%d", portCfg.Min, portCfg.Max),
+					"joker_bind", sl.Wildcard, "kaydirma", sl.Offset)
+			}
+
 			tunnelHandler := &tunnel.Handler{
 				Store:          st,
 				Hub:            hub,
@@ -407,6 +420,7 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				BandwidthTracker:  bandwidthRecorder,
 				PlatformDomain:    apiSrv.PlatformDomain,
 				Captures:          captures,
+				PortHost:          portCfg.Host,
 			}
 			apiSrv.Captures = captures
 
@@ -519,9 +533,16 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 					if tn.Proto != store.ProtoTCP && tn.Proto != store.ProtoUDP {
 						continue
 					}
+					bind, lport, ok := portCfg.Listen(tn.PublicIP, tn.PublicPort)
+					if !ok {
+						log.Warn("rawproxy: tunelin IP yuvasi artik ZORVEN_TCP_BIND_IPS icinde degil, port acilmadi",
+							"tunnel", tn.ID, "public_ip", tn.PublicIP, "port", tn.PublicPort)
+						continue
+					}
 					out = append(out, rawproxy.TunnelInfo{
 						TunnelID: tn.ID, ClientID: tn.ClientID, TenantID: tn.TenantID,
 						Proto: tn.Proto, Port: tn.PublicPort,
+						BindAddr: bind, ListenPort: lport,
 						UDP: udpLimitsOf(udpCfg[tn.ID]),
 					})
 				}
@@ -682,6 +703,7 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				}
 			}
 
+			cspMode := cspModeFromEnv(os.Getenv("ZORVEN_CSP_MODE"))
 			mux := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				// Mail istemcisi otomatik yapilandirma (Thunderbird autoconfig, Outlook
 				// Autodiscover): public, IP basina hiz sinirli; yalnizca kendi hostlarinda.
@@ -703,8 +725,8 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 					w.Header().Set("X-Content-Type-Options", "nosniff")
 					w.Header().Set("X-Frame-Options", "DENY")
 					w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
-					// F-20: CSP Report-Only + Permissions-Policy (yalniz kontrol/site; tunel yanitina degil).
-					setControlSecurityHeaders(w.Header(), analyticsOrigins(analyticsHosts))
+					// F-20: CSP (ZORVEN_CSP_MODE) + Permissions-Policy (yalniz kontrol/site; tunel yanitina degil).
+					setControlSecurityHeaders(w.Header(), analyticsOrigins(analyticsHosts), r.URL.Path, cspMode)
 					// HSTS yalniz TLS'te ve yalniz kontrol hostlari icin. includeSubDomains
 					// YOK: kiraci tunel alt alanlarinin davranisini burada belirlemeyiz.
 					if r.TLS != nil && !ingress.IsIPHost(r.Host) {

@@ -2,6 +2,7 @@ package ingress
 
 import (
 	"context"
+	"github.com/tkodcumpeg4/zorven/server/visitorauth"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -122,7 +123,7 @@ func TestDoorRevokeLegacyBasicCookieWithoutIat(t *testing.T) {
 	cfg := parseBasicConfig([]byte(cfgJSON))
 	// iat'siz (eski bicim) cerez: verilis = exp - basicTTL.
 	issued := time.Now().Add(-time.Hour)
-	legacy := h.signBasic(basicClaims{Tunnel: "tun_1", Host: doorHost, FP: passFingerprint(cfg), Exp: issued.Add(basicTTL).Unix()})
+	legacy := h.signBasic(basicClaims{Tunnel: "tun_1", Host: doorHost, FP: passFingerprint(cfg), Exp: issued.Add(visitorauth.DefaultSessionTTL).Unix()})
 	c := &http.Cookie{Name: basicCookie, Value: legacy}
 	if w := doorGetWith(h, c); w.Code != http.StatusOK || activeGrants(ms) != 1 {
 		t.Fatalf("eski bicim cerez iptal yokken calismali: %d", w.Code)

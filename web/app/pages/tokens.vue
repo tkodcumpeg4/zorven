@@ -122,12 +122,10 @@ async function fetchData() {
 async function detectClientIP() {
   detectingIp.value = true
   try {
-    const res = await fetch('https://api64.ipify.org?format=json', { signal: AbortSignal.timeout(4000) })
-    if (res.ok) {
-      const data = await res.json()
-      if (data?.ip) {
-        detectedIp.value = data.ip
-      }
+    // Kendi sunucumuz: IP ucuncu tarafa gitmez (eskiden api64.ipify.org).
+    const data = await $fetch<{ ip?: string }>('/api/v1/my-ip', { credentials: 'include', timeout: 4000 })
+    if (data?.ip) {
+      detectedIp.value = data.ip
     }
   } catch {
     // Ignore fallback

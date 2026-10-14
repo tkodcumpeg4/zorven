@@ -7,16 +7,16 @@
 //
 // Mimari (tek kayıtlı redirect_uri ile cross-domain cookie-bounce):
 //
-//	1. Ziyaretçi  https://api.musteri.com/gizli  adresine gelir (mode=oauth).
-//	2. ingress oturum çerezi yoksa  /_zva/start?p=google&rd=/gizli  adresine 302 atar.
-//	3. /_zva/start (TÜNEL host'unda) imzalı state üretir ve sağlayıcıya yönlendirir;
-//	   redirect_uri SABİT kontrol host'udur (ör. https://app.zorven.app/_zva/callback).
-//	4. Sağlayıcı  app.zorven.app/_zva/callback  adresine döner. Burada code→token→email
-//	   çözülür, state'teki tünel host'unun politikası (allowed_emails) denetlenir,
-//	   imzalı bir "grant" üretilip  https://<tünel-host>/_zva/finish?g=...  adresine 302 atılır.
-//	5. /_zva/finish (TÜNEL host'unda) grant'i doğrular, HOST-KAPSAMLI oturum çerezi
-//	   (_zva_session) yazar ve rd'ye döner.
-//	6. Sonraki isteklerde ingress çerezi doğrular ve allowed_emails'e göre geçirir.
+//  1. Ziyaretçi  https://api.musteri.com/gizli  adresine gelir (mode=oauth).
+//  2. ingress oturum çerezi yoksa  /_zva/start?p=google&rd=/gizli  adresine 302 atar.
+//  3. /_zva/start (TÜNEL host'unda) imzalı state üretir ve sağlayıcıya yönlendirir;
+//     redirect_uri SABİT kontrol host'udur (ör. https://app.zorven.app/_zva/callback).
+//  4. Sağlayıcı  app.zorven.app/_zva/callback  adresine döner. Burada code→token→email
+//     çözülür, state'teki tünel host'unun politikası (allowed_emails) denetlenir,
+//     imzalı bir "grant" üretilip  https://<tünel-host>/_zva/finish?g=...  adresine 302 atılır.
+//  5. /_zva/finish (TÜNEL host'unda) grant'i doğrular, HOST-KAPSAMLI oturum çerezi
+//     (_zva_session) yazar ve rd'ye döner.
+//  6. Sonraki isteklerde ingress çerezi doğrular ve allowed_emails'e göre geçirir.
 //
 // İmza: HMAC-SHA256, base64url(payload) + "." + base64url(mac). Sunucu tarafı
 // durum tutulmaz; state ve grant kendi kendini doğrular (kısa TTL + nonce).
@@ -41,7 +41,6 @@ import (
 
 const (
 	sessionCookie = "_zva_session"
-	sessionTTL    = 12 * time.Hour
 	stateTTL      = 10 * time.Minute
 	grantTTL      = 2 * time.Minute
 )
@@ -69,6 +68,7 @@ type Manager struct {
 	lookup      PolicyLookup
 	client      *http.Client
 	log         *slog.Logger
+	now         func() time.Time // testler icin; nil = time.Now
 
 	// OnEvent, giris sonucu olaylarini (basari / izinsiz e-posta) bildirir.
 	// nil olabilir. Istek yolunu bloklamamalidir.
@@ -179,22 +179,24 @@ type sessionClaims struct {
 	Email string `json:"email"`
 	Host  string `json:"host"`
 	Exp   int64  `json:"exp"`
-	// IatMs, oturumun verilis zamani (unix milisaniye). Kapi (web door) oturum
-	// iptalinde kullanilir. Eski cerezlerde yoktur: verilis = Exp - sessionTTL.
+	// IatMs, bu cerezin (son) imzalanma zamani (unix ms). Kapi / oturum iptali bunu
+	// kullanir. Eski cerezlerde yoktur: verilis = Exp - DefaultSessionTTL.
 	IatMs int64 `json:"iatms,omitempty"`
+	// OrigMs, ilk giris zamani (unix ms); kayan yenilemede degismez, mutlak tavan
+	// buna gore uygulanir.
+	OrigMs int64 `json:"orig,omitempty"`
 }
 
-// issuedAt, oturumun verilis zamanini doner (IatMs yoksa Exp - TTL).
-func (c sessionClaims) issuedAt() time.Time {
-	if c.IatMs > 0 {
-		return time.UnixMilli(c.IatMs)
+func newSessionClaims(email, host string, now time.Time, pol SessionPolicy) sessionClaims {
+	return sessionClaims{Email: email, Host: host, Exp: now.Add(pol.TTL()).Unix(),
+		IatMs: now.UnixMilli(), OrigMs: now.UnixMilli()}
+}
+
+func (m *Manager) clock() time.Time {
+	if m != nil && m.now != nil {
+		return m.now()
 	}
-	return time.Unix(c.Exp, 0).Add(-sessionTTL)
-}
-
-func newSessionClaims(email, host string) sessionClaims {
-	now := time.Now()
-	return sessionClaims{Email: email, Host: host, Exp: now.Add(sessionTTL).Unix(), IatMs: now.UnixMilli()}
+	return time.Now()
 }
 
 type stateClaims struct {
@@ -226,36 +228,108 @@ func (m *Manager) SessionEmail(r *http.Request) (string, bool) {
 	return email, ok
 }
 
-// SessionInfo, SessionEmail gibi gecerli oturumun e-postasini ve VERILIS zamanini
-// doner. Web door, grant iptalinden once verilmis oturumlari gecersiz saymak icin
-// kullanir.
+// SessionInfo, varsayilan politikayla SessionInfoWith.
 func (m *Manager) SessionInfo(r *http.Request) (email string, issued time.Time, ok bool) {
+	return m.SessionInfoWith(r, SessionPolicy{})
+}
+
+// SessionInfoWith, SessionEmail gibi gecerli oturumun e-postasini ve VERILIS zamanini
+// doner (tunelin sure politikasina gore). Web door ve iptal denetimi kullanir.
+func (m *Manager) SessionInfoWith(r *http.Request, pol SessionPolicy) (email string, issued time.Time, ok bool) {
+	claims, st, ok := m.readSession(r, pol)
+	if !ok {
+		return "", time.Time{}, false
+	}
+	return claims.Email, st.Issued, true
+}
+
+// Session, gecerli bir ziyaretci oturumunun ayrintisi.
+type Session struct {
+	Email  string
+	Issued time.Time
+	// Renew, kayan yenileme gerekiyorsa yeni cerez degeri + bitisi; yoksa nil.
+	Renew *SessionRenewal
+}
+
+// SessionRenewal, yeniden imzalanmis cerez.
+type SessionRenewal struct {
+	Value   string
+	Expires time.Time
+}
+
+// Validate, oturumu tunel politikasiyla dogrular; kayan yenileme gerekiyorsa
+// yeni cerezi uretir (cagiran SetSessionCookie ile yazar).
+func (m *Manager) Validate(r *http.Request, pol SessionPolicy) (Session, bool) {
+	claims, st, ok := m.readSession(r, pol)
+	if !ok {
+		return Session{}, false
+	}
+	out := Session{Email: claims.Email, Issued: st.Issued}
+	if rn := st.Renewal; rn != nil {
+		out.Renew = &SessionRenewal{
+			Value: m.signToken(purposeSession, sessionClaims{
+				Email: claims.Email, Host: claims.Host, Exp: rn.Exp.Unix(),
+				IatMs: rn.Iat.UnixMilli(), OrigMs: rn.Orig.UnixMilli(),
+			}),
+			Expires: rn.Exp,
+		}
+	}
+	return out, true
+}
+
+// SetSessionCookie, _zva_session cerezini (host-kapsamli: Domain YOK) yazar.
+func SetSessionCookie(w http.ResponseWriter, value string, expires time.Time) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookie,
+		Value:    value,
+		Path:     "/",
+		Expires:  expires,
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+func (m *Manager) readSession(r *http.Request, pol SessionPolicy) (sessionClaims, SessionState, bool) {
 	c, err := r.Cookie(sessionCookie)
 	if err != nil {
-		return "", time.Time{}, false
+		return sessionClaims{}, SessionState{}, false
 	}
 	var claims sessionClaims
 	if !m.verifyToken(purposeSession, c.Value, &claims) {
-		return "", time.Time{}, false
-	}
-	if claims.Exp < time.Now().Unix() {
-		return "", time.Time{}, false
+		return sessionClaims{}, SessionState{}, false
 	}
 	if !strings.EqualFold(claims.Host, hostOnly(r.Host)) {
-		return "", time.Time{}, false
+		return sessionClaims{}, SessionState{}, false
 	}
-	return claims.Email, claims.issuedAt(), true
+	st, ok := pol.Evaluate(m.clock(), claims.Exp, claims.IatMs, claims.OrigMs)
+	if !ok {
+		return sessionClaims{}, SessionState{}, false
+	}
+	return claims, st, true
 }
 
 // IssueSessionValueAt, IssueSessionValue gibi ama verilis zamani verilir (testler).
 func (m *Manager) IssueSessionValueAt(host, email string, at time.Time) string {
-	return m.signToken(purposeSession, sessionClaims{Email: email, Host: strings.ToLower(host), Exp: at.Add(sessionTTL).Unix(), IatMs: at.UnixMilli()})
+	return m.signToken(purposeSession, newSessionClaims(email, strings.ToLower(host), at, SessionPolicy{}))
+}
+
+// IssueSessionValueWith, politika + verilis/ilk giris zamanlariyla cerez degeri uretir (testler).
+func (m *Manager) IssueSessionValueWith(host, email string, iat, orig time.Time, pol SessionPolicy) string {
+	c := newSessionClaims(email, strings.ToLower(host), iat, pol)
+	c.OrigMs = orig.UnixMilli()
+	return m.signToken(purposeSession, c)
+}
+
+// IssueSessionValueLegacy, IatMs/Orig'siz eski bicim cerez uretir (geriye uyum testleri).
+func (m *Manager) IssueSessionValueLegacy(host, email string, exp time.Time) string {
+	return m.signToken(purposeSession, sessionClaims{Email: email, Host: strings.ToLower(host), Exp: exp.Unix()})
 }
 
 // IssueSessionValue, host için imzalı bir _zva_session çerez DEĞERİ üretir
 // (testler ve araçlar için; normal akış /_zva/finish üzerinden ilerler).
 func (m *Manager) IssueSessionValue(host, email string) string {
-	return m.signToken(purposeSession, newSessionClaims(email, strings.ToLower(host)))
+	return m.signToken(purposeSession, newSessionClaims(email, strings.ToLower(host), m.clock(), SessionPolicy{}))
 }
 
 // EmailAllowed, e-postanın izin listesine göre geçip geçmediğini döner. Liste
@@ -368,21 +442,20 @@ func (m *Manager) handleFinish(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Oturum jetonu bu host için geçerli değil.", http.StatusBadRequest)
 		return
 	}
-	sess := m.signToken(purposeSession, newSessionClaims(g.Email, g.Host))
+	var pol SessionPolicy
+	if m.lookup != nil {
+		if _, cfg, _, found := m.lookup(g.Host); found {
+			pol = PolicyFromConfig(cfg)
+		}
+	}
+	now := m.clock()
+	sess := m.signToken(purposeSession, newSessionClaims(g.Email, g.Host, now, pol))
 	// Yalnızca izinli e-postalar "ok" sayılır; izinsiz olan callback'te zaten
 	// email_not_allowed olarak kaydedildi (bkz. HandleCallback).
 	if g.Allowed {
 		m.emit(r, g.Host, g.Provider, g.Email, true, "ok")
 	}
-	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookie,
-		Value:    sess,
-		Path:     "/",
-		Expires:  time.Now().Add(sessionTTL),
-		HttpOnly: true,
-		Secure:   true,
-		SameSite: http.SameSiteLaxMode,
-	})
+	SetSessionCookie(w, sess, now.Add(pol.TTL()))
 	http.Redirect(w, r, safeRD(g.RD), http.StatusFound)
 }
 

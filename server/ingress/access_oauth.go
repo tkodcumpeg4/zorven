@@ -33,9 +33,15 @@ func (h *Handler) enforceOAuth(w http.ResponseWriter, r *http.Request, tun store
 	var hasSession bool
 	var buttons []providerButton
 	if enabled {
-		email, hasSession = h.Visitor.SessionEmail(r)
-		if hasSession && visitorauth.EmailAllowed(email, cfg.AllowedEmails) {
-			return true
+		if sess, ok := h.Visitor.Validate(r, visitorauth.PolicyFromConfig(tun.AccessConfig)); ok &&
+			!h.sessionRevoked(tun.TunnelID, sess.Email, sess.Issued) {
+			email, hasSession = sess.Email, true
+			if visitorauth.EmailAllowed(email, cfg.AllowedEmails) {
+				if sess.Renew != nil {
+					visitorauth.SetSessionCookie(w, sess.Renew.Value, sess.Renew.Expires)
+				}
+				return true
+			}
 		}
 		buttons = buildProviderButtons(lang, h.Visitor.ProviderNames(), cfg.Providers, rd)
 	}

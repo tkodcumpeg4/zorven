@@ -18,6 +18,21 @@ import (
 func (s *Server) audit(_ *http.Request, _, _, _ string)       {}
 func (s *Server) auditFor(_ *http.Request, _, _, _, _ string) {}
 
+// auditActor, istegi yapan kimligin insan-okur etiketi (ziyaretci oturumu
+// olaylarinda kullanilir; denetim kaydindan bagimsizdir).
+func auditActor(r *http.Request) string {
+	if u, ok := userFromContext(r.Context()); ok && u != nil {
+		if u.Email != "" {
+			return u.Email
+		}
+		return u.ID
+	}
+	if isPlatformAdmin(r.Context()) {
+		return "platform-admin"
+	}
+	return "api-token"
+}
+
 // isPrivilegedRole, owner/admin rolu mu.
 func isPrivilegedRole(role string) bool {
 	return role == store.RoleOwner || role == "admin"

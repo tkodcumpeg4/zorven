@@ -24,18 +24,46 @@ func analyticsOrigins(hosts []string) []string {
 	return out
 }
 
-// buildCSPReportOnly, Report-Only CSP degerini uretir. Harici kaynaklar:
-// Scalar (cdn.jsdelivr.net, surum sabit + SRI) ve self-hosted Umami (analytics host).
-// Google Fonts YOK: site ve panel yazi tiplerini kendi sunucusundan verir (2026-10-11).
-func buildCSPReportOnly(analytics []string) string {
-	script := append([]string{"'self'", "'unsafe-inline'", "https://cdn.jsdelivr.net"}, analytics...)
+// CSP modu: ZORVEN_CSP_MODE=enforce (varsayilan) | report (acil geri donus).
+const (
+	cspEnforce = "enforce"
+	cspReport  = "report"
+)
+
+// cspModeFromEnv, ortam degiskeninden modu okur; bilinmeyen deger enforce'a duser.
+func cspModeFromEnv(v string) string {
+	if strings.EqualFold(strings.TrimSpace(v), cspReport) {
+		return cspReport
+	}
+	return cspEnforce
+}
+
+// isAPIDocsPath: Scalar API dokumani sayfalari (TR/EN, .html'li ve sonda / ile).
+func isAPIDocsPath(p string) bool {
+	p = strings.TrimSuffix(strings.TrimSuffix(p, "/"), ".html")
+	return p == "/docs/api" || p == "/en/docs/api"
+}
+
+// buildCSP, yola gore CSP degerini uretir. Harici kaynaklar: Scalar
+// (cdn.jsdelivr.net, surum sabit + SRI) ve self-hosted Umami (analytics host).
+// 'unsafe-eval' YALNIZ API dokumani sayfalarinda (Scalar tam spec islerken ister).
+// Google Fonts YOK; panel ikonlari derlemede paketli (api.iconify.design YOK),
+// bu yuzden connect-src yalniz self + wss + analytics.
+func buildCSP(analytics []string, apiDocs bool) string {
+	script := []string{"'self'", "'unsafe-inline'", "https://cdn.jsdelivr.net"}
+	if apiDocs {
+		script = append(script, "'unsafe-eval'")
+	}
+	script = append(script, analytics...)
+	// "IP'mi algila" (tokens.vue) artik kendi ucumuzu kullanir (/api/v1/my-ip); ucuncu taraf yok.
+	connect := append([]string{"'self'", "wss:"}, analytics...)
 	parts := []string{
 		"default-src 'self'",
 		"script-src " + strings.Join(script, " "),
 		"style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
 		"img-src 'self' data: https:",
 		"font-src 'self' data:",
-		"connect-src 'self' wss: https:",
+		"connect-src " + strings.Join(connect, " "),
 		"frame-ancestors 'none'",
 		"base-uri 'self'",
 		"form-action 'self'",
@@ -43,8 +71,13 @@ func buildCSPReportOnly(analytics []string) string {
 	return strings.Join(parts, "; ")
 }
 
-// setControlSecurityHeaders, CSP Report-Only + Permissions-Policy ekler.
-func setControlSecurityHeaders(h http.Header, analytics []string) {
+// setControlSecurityHeaders, CSP + Permissions-Policy ekler. mode report ise
+// Report-Only basligi, aksi halde zorunlu Content-Security-Policy.
+func setControlSecurityHeaders(h http.Header, analytics []string, path, mode string) {
 	h.Set("Permissions-Policy", permissionsPolicy)
-	h.Set("Content-Security-Policy-Report-Only", buildCSPReportOnly(analytics))
+	name := "Content-Security-Policy"
+	if mode == cspReport {
+		name += "-Report-Only"
+	}
+	h.Set(name, buildCSP(analytics, isAPIDocsPath(path)))
 }

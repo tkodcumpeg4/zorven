@@ -148,9 +148,9 @@ func TestAdmitPPS(t *testing.T) {
 }
 
 func TestCollectUDPMinutesDeltas(t *testing.T) {
-	m := &Manager{udpLn: map[int]*udpListener{}}
+	m := &Manager{udpLn: map[listenKey]*udpListener{}}
 	ul := newTestListener()
-	m.udpLn[5000] = ul
+	m.udpLn[listenKey{port: 5000}] = ul
 	minute := time.Unix(60, 0).UTC()
 
 	if rows := m.collectUDPMinutes(minute); len(rows) != 0 {

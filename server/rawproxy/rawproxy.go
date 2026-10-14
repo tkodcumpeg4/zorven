@@ -25,9 +25,29 @@ type TunnelInfo struct {
 	TunnelID string
 	ClientID string
 	TenantID string
-	Proto    string // tcp | udp
-	Port     int
+	Proto    string    // tcp | udp
+	Port     int       // genel (tunel adresinde gorunen) port
 	UDP      UDPLimits // yalnizca udp (FAZ 4 / F24)
+
+	// K3: cok IP'li havuz. BindAddr bos ise tum arayuzler; ListenPort 0 ise Port.
+	// (docker bridge'de ikinci IP'nin portu kaydirilir: ListenPort = Port+offset.)
+	BindAddr   string
+	ListenPort int
+}
+
+// listenKey, dinleyicinin kimligi: ayni port numarasi farkli IP'lerde ayri
+// dinleyicidir.
+type listenKey struct {
+	addr string
+	port int
+}
+
+func (ti TunnelInfo) key() listenKey {
+	p := ti.ListenPort
+	if p == 0 {
+		p = ti.Port
+	}
+	return listenKey{addr: ti.BindAddr, port: p}
 }
 
 // Lister, aktif (enabled) rezerve-port tunelleri doner. main.go store'a baglar.
@@ -43,9 +63,9 @@ type Manager struct {
 	Door DoorGate
 
 	mu      sync.Mutex
-	tcpLn   map[int]net.Listener
-	udpLn   map[int]*udpListener
-	byPort  map[int]TunnelInfo
+	tcpLn   map[listenKey]net.Listener
+	udpLn   map[listenKey]*udpListener
+	byPort  map[listenKey]TunnelInfo
 	baseCtx context.Context
 
 	// doorConns, grant ile kabul edilen acik baglantilar (grant iptalinde kesilir).
@@ -63,9 +83,9 @@ func (m *Manager) ctx() context.Context {
 func New(hub *tunnel.Hub, ipf *ipfilter.Engine, log *slog.Logger, list Lister) *Manager {
 	return &Manager{
 		Hub: hub, IPFilter: ipf, Log: log, List: list,
-		tcpLn:  map[int]net.Listener{},
-		udpLn:  map[int]*udpListener{},
-		byPort: map[int]TunnelInfo{},
+		tcpLn:  map[listenKey]net.Listener{},
+		udpLn:  map[listenKey]*udpListener{},
+		byPort: map[listenKey]TunnelInfo{},
 	}
 }
 
@@ -90,10 +110,10 @@ func (m *Manager) Reload() {
 		m.Log.Warn("rawproxy: tunel listesi alinamadi", "hata", err)
 		return
 	}
-	want := map[int]TunnelInfo{}
+	want := map[listenKey]TunnelInfo{}
 	for _, ti := range desired {
 		if ti.Port > 0 && (ti.Proto == "tcp" || ti.Proto == "udp") {
-			want[ti.Port] = ti
+			want[ti.key()] = ti
 		}
 	}
 
@@ -123,14 +143,14 @@ func (m *Manager) Reload() {
 				m.byPort[port] = ti
 				continue
 			}
-			ln, err := net.Listen("tcp", net.JoinHostPort("", strconv.Itoa(port)))
+			ln, err := net.Listen("tcp", net.JoinHostPort(port.addr, strconv.Itoa(port.port)))
 			if err != nil {
-				m.Log.Warn("rawproxy: TCP port dinlenemedi", "port", port, "hata", err)
+				m.Log.Warn("rawproxy: TCP port dinlenemedi", "bind", port.addr, "port", port.port, "hata", err)
 				continue
 			}
 			m.tcpLn[port] = ln
 			m.byPort[port] = ti
-			m.Log.Info("rawproxy: TCP dinleyici acildi", "port", port, "tunnel", ti.TunnelID)
+			m.Log.Info("rawproxy: TCP dinleyici acildi", "bind", port.addr, "port", port.port, "tunnel", ti.TunnelID)
 			go m.acceptLoop(ln, port)
 		} else { // udp
 			if ul, ok := m.udpLn[port]; ok {
@@ -138,19 +158,19 @@ func (m *Manager) Reload() {
 				m.byPort[port] = ti
 				continue
 			}
-			ul, err := m.newUDPListener(port, ti)
+			ul, err := m.newUDPListener(port.addr, port.port, ti)
 			if err != nil {
-				m.Log.Warn("rawproxy: UDP port dinlenemedi", "port", port, "hata", err)
+				m.Log.Warn("rawproxy: UDP port dinlenemedi", "bind", port.addr, "port", port.port, "hata", err)
 				continue
 			}
 			m.udpLn[port] = ul
 			m.byPort[port] = ti
-			m.Log.Info("rawproxy: UDP dinleyici acildi", "port", port, "tunnel", ti.TunnelID)
+			m.Log.Info("rawproxy: UDP dinleyici acildi", "bind", port.addr, "port", port.port, "tunnel", ti.TunnelID)
 		}
 	}
 }
 
-func (m *Manager) acceptLoop(ln net.Listener, port int) {
+func (m *Manager) acceptLoop(ln net.Listener, port listenKey) {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -160,7 +180,7 @@ func (m *Manager) acceptLoop(ln net.Listener, port int) {
 	}
 }
 
-func (m *Manager) handleTCP(conn net.Conn, port int) {
+func (m *Manager) handleTCP(conn net.Conn, port listenKey) {
 	defer conn.Close()
 
 	m.mu.Lock()
@@ -275,7 +295,7 @@ func (m *Manager) closeAll() {
 		ul.close()
 		delete(m.udpLn, port)
 	}
-	m.byPort = map[int]TunnelInfo{}
+	m.byPort = map[listenKey]TunnelInfo{}
 }
 
 // --- yardimcilar ---

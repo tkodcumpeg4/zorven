@@ -13,6 +13,7 @@ package api
 
 import (
 	"errors"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -86,7 +87,7 @@ func (s *Server) tunnelConnectAddress(tun store.Tunnel, hostnames []store.Hostna
 		return ""
 	}
 	if tun.PublicPort > 0 && s.PlatformDomain != "" {
-		return s.PlatformDomain + ":" + strconv.Itoa(tun.PublicPort)
+		return net.JoinHostPort(s.pool().Host(tun.PublicIP), strconv.Itoa(tun.PublicPort))
 	}
 	return ""
 }

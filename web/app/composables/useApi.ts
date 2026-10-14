@@ -258,6 +258,12 @@ export function useApi() {
     return req<TunnelAccess>(`/tunnels/${id}/access`, { method: 'PUT', body: payload })
   }
 
+  // identity boşsa tünelin TÜM ziyaretçi oturumları sonlandırılır.
+  async function revokeVisitorSessions(id: string, identity = ''): Promise<{ revoked: boolean, scope: string }> {
+    if (USE_MOCK) { await delay(); return { revoked: true, scope: identity ? 'identity' : 'all' } }
+    return req<{ revoked: boolean, scope: string }>(`/tunnels/${id}/access/revoke-sessions`, { method: 'POST', body: { identity } })
+  }
+
   // --- Web ile kapı açma (ham TCP/UDP) ---
 
   async function getTunnelDoor(id: string): Promise<TunnelDoor> {
@@ -1136,7 +1142,7 @@ export function useApi() {
     terminalWSURL,
     listProjects, createProject, deleteProject, renameProject, deleteOrganization,
     listClients, createClient, deleteClient,
-    listTunnels, createTunnel, updateTunnel, deleteTunnel, getTunnelAccess, setTunnelAccess,
+    listTunnels, createTunnel, updateTunnel, deleteTunnel, getTunnelAccess, setTunnelAccess, revokeVisitorSessions,
     getTunnelDoor, setTunnelDoor, listDoorGrants, revokeDoorGrant,
     getTunnelReplicas, addTunnelReplica, removeTunnelReplica, getTunnelLB, setTunnelLB,
     getTunnelUDP, setTunnelUDP, getGameStatus,

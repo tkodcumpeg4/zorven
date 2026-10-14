@@ -102,7 +102,7 @@ func (s *Store) ListEnabledDoors(ctx context.Context) ([]store.TunnelDoor, error
 func (s *Store) ListDoorRoutes(ctx context.Context) ([]store.HostRoute, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT d.host, d.tenant_id, t.id, t.client_id, t.enabled, t.frozen, t.proto, t.exposure,
-		        COALESCE(t.public_port,0), d.duration_sec,
+		        COALESCE(t.public_port,0), t.public_ip, d.duration_sec,
 		        COALESCE((SELECT h.fqdn FROM hostnames h WHERE h.tunnel_id = t.id
 		                   ORDER BY h.created_at LIMIT 1), ''),
 		        COALESCE(ap.mode,'none'), COALESCE(ap.config,'{}'::jsonb), COALESCE(ap.enabled,false),
@@ -121,7 +121,7 @@ func (s *Store) ListDoorRoutes(ctx context.Context) ([]store.HostRoute, error) {
 		var r store.HostRoute
 		var dr store.DoorRoute
 		if err := rows.Scan(&r.FQDN, &r.TenantID, &r.TunnelID, &r.ClientID, &r.Enabled, &r.Frozen,
-			&dr.Proto, &dr.Exposure, &dr.PublicPort, &dr.DurationSec, &dr.TunnelHost,
+			&dr.Proto, &dr.Exposure, &dr.PublicPort, &dr.PublicIP, &dr.DurationSec, &dr.TunnelHost,
 			&r.AccessMode, &r.AccessConfig, &r.AccessEnabled, &r.Plan, &dr.Disabled); err != nil {
 			return nil, err
 		}

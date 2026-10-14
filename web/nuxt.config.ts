@@ -15,6 +15,15 @@ export default defineNuxtConfig({
     presets: [{ from: 'vue-i18n', imports: ['useI18n'] }],
   },
 
+  // Ikonlar derlemede paketlenir (CSP connect-src: api.iconify.design'e calisma
+  // aninda istek YOK). Kaynakta gecen lucide:/simple-icons: adlari taranir.
+  icon: {
+    provider: 'none',
+    fallbackToApi: false,
+    clientBundle: { scan: true, sizeLimitKb: 256 },
+    serverBundle: false,
+  },
+
   css: ['~/assets/css/main.css', '@xterm/xterm/css/xterm.css'],
 
   vite: {

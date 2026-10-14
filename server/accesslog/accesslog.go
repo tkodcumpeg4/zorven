@@ -24,6 +24,11 @@ const (
 	ReasonRateLimited           = "rate_limited"
 	ReasonProviderNotConfigured = "provider_not_configured"
 
+	// Ziyaretci oturumu yonetimi (denetim izi; Identity = islemi yapan / hedef kimlik).
+	ReasonSessionTTLChanged     = "session_ttl_changed"  // oturum suresi / kayan yenileme ayari degisti
+	ReasonSessionsRevokedAll    = "sessions_revoked_all" // tunelin tum ziyaretci oturumlari sonlandirildi
+	ReasonSessionRevokedForUser = "session_revoked_user" // tek kimligin oturumlari sonlandirildi
+
 	// Web ile kapi acma (ham TCP/UDP tunelleri).
 	ReasonDoorOpened     = "door_opened"      // giris basarili, IP icin grant olustu
 	ReasonDoorClosed     = "door_closed"      // ziyaretci kapiyi kapatti / sahip grant'i iptal etti

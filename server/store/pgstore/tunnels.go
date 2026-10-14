@@ -14,7 +14,7 @@ import (
 // NULL olabilir; COALESCE ile 0'a duser). tunnelInsertCols INSERT icindir.
 //
 // hostname YOK: adlar hostnames tablosunda tutulur (bkz. hostnames.go).
-const tunnelSelectCols = `id, tenant_id, client_id, target, enabled, created_at, proto, exposure, COALESCE(public_port, 0), frozen, COALESCE(project_id, ''), ephemeral, expires_at, COALESCE(private_name, '')`
+const tunnelSelectCols = `id, tenant_id, client_id, target, enabled, created_at, proto, exposure, COALESCE(public_port, 0), frozen, COALESCE(project_id, ''), ephemeral, expires_at, COALESCE(private_name, ''), public_ip`
 const tunnelInsertCols = `id, tenant_id, client_id, target, enabled, created_at, proto, exposure, project_id`
 
 // scanTunnel, tunnelSelectCols sirasiyla bir satiri okur.
@@ -22,7 +22,7 @@ func scanTunnel(row pgx.Row, tn *store.Tunnel) error {
 	var expires *time.Time
 	if err := row.Scan(&tn.ID, &tn.TenantID, &tn.ClientID, &tn.Target, &tn.Enabled,
 		&tn.CreatedAt, &tn.Proto, &tn.Exposure, &tn.PublicPort, &tn.Frozen, &tn.ProjectID,
-		&tn.Ephemeral, &expires, &tn.PrivateName); err != nil {
+		&tn.Ephemeral, &expires, &tn.PrivateName, &tn.PublicIP); err != nil {
 		return err
 	}
 	if expires != nil {
@@ -38,7 +38,7 @@ func scanTunnel(row pgx.Row, tn *store.Tunnel) error {
 // private, public port YOK. Ad kiraci icinde tekildir (kismi benzersiz indeks).
 func (s *Store) MakeTunnelPrivate(ctx context.Context, tenantID, id, name string) error {
 	tag, err := s.pool.Exec(ctx,
-		`UPDATE tunnels SET proto = $3, exposure = $4, private_name = $5, public_port = NULL
+		`UPDATE tunnels SET proto = $3, exposure = $4, private_name = $5, public_port = NULL, public_ip = ''
 		 WHERE id = $1 AND tenant_id = $2`,
 		id, tenantID, store.ProtoTCP, store.ExposurePrivate, name)
 	if err != nil {
@@ -250,7 +250,7 @@ func (s *Store) UpdateTunnel(ctx context.Context, tenantID, id string, patch sto
 // ListReservedPortTunnels, public_port atanmis tum tunelleri doner (kiracidan bagimsiz).
 func (s *Store) ListReservedPortTunnels(ctx context.Context) ([]store.Tunnel, error) {
 	return s.queryTunnels(ctx,
-		`SELECT `+tunnelSelectCols+` FROM tunnels WHERE public_port IS NOT NULL AND exposure != 'private' ORDER BY public_port`)
+		`SELECT `+tunnelSelectCols+` FROM tunnels WHERE public_port IS NOT NULL AND exposure != 'private' ORDER BY public_ip, public_port`)
 }
 
 // SetTunnelPort, rezerve portu ayarlar (port>0) veya birakir (port=0 -> NULL).
@@ -262,7 +262,7 @@ func (s *Store) SetTunnelPort(ctx context.Context, tenantID, id string, port int
 		val = nil
 	}
 	tag, err := s.pool.Exec(ctx,
-		`UPDATE tunnels SET public_port = $3 WHERE id = $1 AND tenant_id = $2`,
+		`UPDATE tunnels SET public_port = $3, public_ip = '' WHERE id = $1 AND tenant_id = $2`,
 		id, tenantID, val)
 	if err != nil {
 		return fmt.Errorf("rezerve port ayarlanamadi: %w", err)
@@ -311,4 +311,51 @@ func (s *Store) DeleteTunnel(ctx context.Context, tenantID, id string) error {
 		return store.ErrNotFound
 	}
 	return nil
+}
+
+// SetTunnelAddr, rezerve (IP, port) ciftini yazar. port=0 -> birakir.
+func (s *Store) SetTunnelAddr(ctx context.Context, tenantID, id, ip string, port int) error {
+	if port <= 0 {
+		return s.SetTunnelPort(ctx, tenantID, id, 0)
+	}
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE tunnels SET public_port = $3, public_ip = $4 WHERE id = $1 AND tenant_id = $2`,
+		id, tenantID, port, ip)
+	if err != nil {
+		return fmt.Errorf("rezerve adres ayarlanamadi: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+// ListReleasedPorts, since'den sonra serbest birakilan portlari (karantina)
+// doner; bir gunden eski satirlari siler.
+func (s *Store) ListReleasedPorts(ctx context.Context, since time.Time) ([]store.PortAddr, error) {
+	_, _ = s.pool.Exec(ctx, `DELETE FROM tcp_port_releases WHERE released_at < now() - interval '1 day'`)
+	rows, err := s.pool.Query(ctx,
+		`SELECT public_ip, public_port FROM tcp_port_releases WHERE released_at > $1`, since)
+	if err != nil {
+		return nil, fmt.Errorf("karantina listelenemedi: %w", err)
+	}
+	defer rows.Close()
+	var out []store.PortAddr
+	for rows.Next() {
+		var a store.PortAddr
+		if err := rows.Scan(&a.IP, &a.Port); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// CountReservedPorts, kiracinin rezerve port tutan tunel sayisini doner.
+func (s *Store) CountReservedPorts(ctx context.Context, tenantID string) (int, error) {
+	var n int
+	err := s.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM tunnels WHERE tenant_id = $1 AND public_port IS NOT NULL AND exposure != 'private'`,
+		tenantID).Scan(&n)
+	return n, err
 }

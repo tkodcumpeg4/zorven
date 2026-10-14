@@ -3,6 +3,7 @@ package ingress
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -164,7 +165,7 @@ func (h *Handler) doorIdentity(r *http.Request, tun store.HostRoute) (identity, 
 	switch tun.AccessMode {
 	case "oauth":
 		if h.Visitor != nil {
-			if email, ok := h.Visitor.SessionEmail(r); ok {
+			if email, _, ok := h.Visitor.SessionInfoWith(r, visitorauth.PolicyFromConfig(tun.AccessConfig)); ok {
 				return truncateIdentity(email), accesslog.MethodOAuth
 			}
 		}
@@ -185,18 +186,18 @@ func (h *Handler) doorSessionRevoked(r *http.Request, tun store.HostRoute) bool 
 		if h.Visitor == nil {
 			return false
 		}
-		email, issued, ok := h.Visitor.SessionInfo(r)
+		email, issued, ok := h.Visitor.SessionInfoWith(r, visitorauth.PolicyFromConfig(tun.AccessConfig))
 		if !ok {
 			return false
 		}
-		return h.Door.SessionRevoked(tun.TunnelID, email, issued)
+		return h.sessionRevoked(tun.TunnelID, email, issued)
 	case "basic":
 		cfg := parseBasicConfig(tun.AccessConfig)
 		issued, ok := h.basicCookieIssued(r, tun, cfg)
 		if !ok {
 			return false
 		}
-		return h.Door.SessionRevoked(tun.TunnelID, truncateIdentity(cfg.Username), issued)
+		return h.sessionRevoked(tun.TunnelID, truncateIdentity(cfg.Username), issued)
 	}
 	return false
 }
@@ -235,13 +236,18 @@ func (h *Handler) doorConnectAddr(tun store.HostRoute) string {
 		return d.TunnelHost + ":443"
 	}
 	host := h.PlatformDomain
+	if h.PortHost != nil {
+		if ph := h.PortHost(d.PublicIP); ph != "" {
+			host = ph
+		}
+	}
 	if host == "" {
 		host = d.TunnelHost
 	}
 	if host == "" || d.PublicPort == 0 {
 		return ""
 	}
-	return host + ":" + strconv.Itoa(d.PublicPort)
+	return net.JoinHostPort(host, strconv.Itoa(d.PublicPort))
 }
 
 func (h *Handler) doorRows(tun store.HostRoute, g store.DoorGrant, t pageText, now time.Time) []doorRow {

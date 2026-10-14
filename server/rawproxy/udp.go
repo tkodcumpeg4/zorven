@@ -2,6 +2,7 @@ package rawproxy
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"net"
 	"sync"
@@ -131,8 +132,16 @@ type udpListener struct {
 	closeOnce sync.Once
 }
 
-func (m *Manager) newUDPListener(port int, ti TunnelInfo) (*udpListener, error) {
-	pc, err := net.ListenUDP("udp", &net.UDPAddr{Port: port})
+func (m *Manager) newUDPListener(bind string, port int, ti TunnelInfo) (*udpListener, error) {
+	ua := &net.UDPAddr{Port: port}
+	if bind != "" {
+		ip := net.ParseIP(bind)
+		if ip == nil {
+			return nil, fmt.Errorf("gecersiz bind adresi %q", bind)
+		}
+		ua.IP = ip
+	}
+	pc, err := net.ListenUDP("udp", ua)
 	if err != nil {
 		return nil, err
 	}
@@ -446,8 +455,12 @@ func (ul *udpListener) live(port int) UDPLiveStats {
 func (m *Manager) UDPStats(tunnelID string) (UDPLiveStats, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for port, ul := range m.udpLn {
-		if ul.info().TunnelID == tunnelID {
+	for k, ul := range m.udpLn {
+		if ti := ul.info(); ti.TunnelID == tunnelID {
+			port := ti.Port
+			if port == 0 {
+				port = k.port
+			}
 			return ul.live(port), true
 		}
 	}

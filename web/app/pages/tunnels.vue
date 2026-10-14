@@ -88,7 +88,39 @@ const accessForm = reactive({
   hasPassword: false,
   providers: [] as string[],
   allowedEmails: '', // satır/virgülle ayrılmış e-posta listesi
+  sessionTtl: 0, // dakika; 0 = varsayılan (12 saat)
+  sessionSliding: false,
 })
+const SESSION_TTL_PRESETS = [0, 15, 60, 240, 720, 1440, 10080, 43200]
+const sessionTtlOptions = computed(() => {
+  const list = [...SESSION_TTL_PRESETS]
+  if (!list.includes(accessForm.sessionTtl)) list.push(accessForm.sessionTtl)
+  return list.sort((a, b) => a - b)
+})
+function sessionTtlLabel(m: number): string {
+  if (m === 0) return t('tunnels.sessionTtlDefault')
+  if (m % 1440 === 0) return t('tunnels.sessionTtlDays', { n: m / 1440 })
+  if (m % 60 === 0) return t('tunnels.sessionTtlHours', { n: m / 60 })
+  return t('tunnels.sessionTtlMinutes', { n: m })
+}
+const sessionRevoking = ref(false)
+const revokeIdentity = ref('')
+async function revokeSessions(identity = '') {
+  const tn = accessTunnel.value
+  if (!tn) return
+  const msg = identity ? t('tunnels.sessionRevokeIdentityConfirm', { id: identity }) : t('tunnels.sessionRevokeAllConfirm')
+  if (!confirm(msg)) return
+  sessionRevoking.value = true
+  try {
+    await api.revokeVisitorSessions(tn.id, identity)
+    toast.success(t('tunnels.sessionRevoked'))
+    revokeIdentity.value = ''
+  } catch (err: any) {
+    toast.error(err?.data?.error?.message || err?.message || t('tunnels.sessionRevokeFailed'))
+  } finally {
+    sessionRevoking.value = false
+  }
+}
 // Web ile kapı açma (ham TCP/UDP) — Erişim sekmesinde
 const isRawTunnel = computed(() => accessTunnel.value?.proto === 'tcp' || accessTunnel.value?.proto === 'udp')
 const doorInfo = ref<TunnelDoor | null>(null)
@@ -267,6 +299,9 @@ async function openSettings(tn: Tunnel, tab: SettingsTab = 'general') {
   accessForm.hasPassword = false
   accessForm.providers = []
   accessForm.allowedEmails = ''
+  accessForm.sessionTtl = 0
+  accessForm.sessionSliding = false
+  revokeIdentity.value = ''
   generalForm.target = tn.target
   generalForm.enabled = tn.enabled
   generalForm.client_id = tn.client_id
@@ -303,6 +338,8 @@ async function openSettings(tn: Tunnel, tab: SettingsTab = 'general') {
     accessForm.hasPassword = !!a.config.has_password
     accessForm.providers = a.config.providers || []
     accessForm.allowedEmails = (a.config.allowed_emails || []).join('\n')
+    accessForm.sessionTtl = a.config.session_ttl_minutes || 0
+    accessForm.sessionSliding = !!a.config.session_sliding
   } catch (err: any) {
     toast.error(err?.data?.error?.message || err?.message || t('tunnels.accessLoadFailed'))
     accessTunnel.value = null
@@ -732,6 +769,9 @@ async function saveProtocol() {
   try {
     const updated = await api.updateTunnel(tn.id, { proto: protoForm.proto, exposure: protoForm.exposure })
     Object.assign(tn, updated)
+    // omitempty alanlar: mod degisince eski adres kalmasin
+    tn.public_port = updated.public_port
+    tn.public_host = updated.public_host
     protoForm.proto = updated.proto || 'http'
     protoForm.exposure = (updated.exposure && updated.exposure !== 'auto') ? updated.exposure : 'port'
     toast.success(t('tunnels.settingsSaved'))
@@ -848,9 +888,9 @@ async function saveAccess() {
   try {
     let config: TunnelAccessInput['config'] = {}
     if (accessForm.mode === 'basic') {
-      config = { username: accessForm.username.trim(), password: accessForm.password || undefined }
+      config = { username: accessForm.username.trim(), password: accessForm.password || undefined, session_ttl_minutes: accessForm.sessionTtl, session_sliding: accessForm.sessionSliding }
     } else if (accessForm.mode === 'oauth') {
-      config = { providers: accessForm.providers, allowed_emails: emails }
+      config = { providers: accessForm.providers, allowed_emails: emails, session_ttl_minutes: accessForm.sessionTtl, session_sliding: accessForm.sessionSliding }
     }
     const payload: TunnelAccessInput = {
       mode: accessForm.mode,
@@ -1219,13 +1259,21 @@ async function remove(tn: Tunnel) {
               </span>
               <span class="help-tip" tabindex="0" :data-tip="t('tunnels.exposureSniHint')">?</span>
             </label>
+            <div class="rounded border border-line bg-bg p-2.5 text-xs text-fg-muted">
+              <p class="mb-1 font-medium text-fg">{{ t('tunnels.exposureGuideTitle') }}</p>
+              <ul class="list-disc space-y-1 pl-4">
+                <li>{{ t('tunnels.exposureGuidePort') }}</li>
+                <li>{{ t('tunnels.exposureGuideSni') }}</li>
+                <li>{{ t('tunnels.exposureGuideUdp') }}</li>
+              </ul>
+            </div>
           </div>
 
           <!-- Bağlantı bilgisi (kayıtlı proto tcp/udp ise) -->
           <div v-if="accessTunnel.proto && accessTunnel.proto !== 'http'" class="rounded border border-dashed border-line p-3 text-xs">
             <span class="mb-1 block font-medium text-fg">{{ t('tunnels.connectInfo') }}</span>
             <template v-if="accessTunnel.exposure === 'port'">
-              <p v-if="accessTunnel.public_port" class="font-mono text-fg">{{ platformHost }}:{{ accessTunnel.public_port }}</p>
+              <p v-if="accessTunnel.public_port" class="font-mono text-fg">{{ accessTunnel.public_host || platformHost }}:{{ accessTunnel.public_port }}</p>
               <p v-else class="text-fg-muted">{{ t('tunnels.connectPortPending') }}</p>
             </template>
             <template v-else>
@@ -1707,7 +1755,7 @@ async function remove(tn: Tunnel) {
                             <span class="size-1.5 rounded-full" :class="ev.success ? 'bg-emerald-500' : 'bg-danger'" />
                             {{ ev.success ? t('tunnels.statsOk') : t('tunnels.statsFail') }}
                           </span>
-                          <div v-if="!ev.success" class="mt-0.5 text-[10px] text-fg-muted">{{ statsReason(ev.reason) }}</div>
+                          <div v-if="!ev.success || (ev.reason || '').startsWith('session_')" class="mt-0.5 text-[10px] text-fg-muted">{{ statsReason(ev.reason) }}</div>
                         </td>
                         <td class="whitespace-nowrap px-2 py-1.5 font-mono text-fg-muted">{{ ev.client_ip || '-' }}</td>
                         <td class="whitespace-nowrap px-3 py-1.5 text-fg-muted" :title="ev.user_agent">{{ shortUA(ev.user_agent) }}</td>
@@ -1797,6 +1845,36 @@ async function remove(tn: Tunnel) {
                      :placeholder="accessForm.hasPassword ? t('tunnels.accessPassKeep') : ''"
                      class="w-full rounded border border-line bg-bg px-2.5 py-1.5 font-mono text-sm placeholder:text-fg-subtle focus:border-accent">
               <p v-if="accessForm.hasPassword" class="mt-1 text-[11px] text-fg-subtle">{{ t('tunnels.accessPassKeepHint') }}</p>
+            </div>
+          </div>
+
+          <!-- Ziyaretçi oturumu: süre, kayan yenileme, sonlandırma -->
+          <div v-if="accessForm.mode !== 'none'" class="space-y-3 rounded border border-line bg-surface-1 p-3">
+            <span class="label-sys">{{ t('tunnels.sessionTitle') }}</span>
+            <div>
+              <label for="sessionTtl" class="mb-1 block text-xs font-medium text-fg-muted">{{ t('tunnels.sessionTtl') }}</label>
+              <select id="sessionTtl" v-model.number="accessForm.sessionTtl" class="w-full rounded border border-line bg-bg px-2.5 py-1.5 text-sm focus:border-accent">
+                <option v-for="m in sessionTtlOptions" :key="m" :value="m">{{ sessionTtlLabel(m) }}</option>
+              </select>
+              <p class="mt-1 text-[11px] text-fg-subtle">{{ t('tunnels.sessionTtlHint') }}</p>
+            </div>
+            <label class="flex cursor-pointer items-center justify-between rounded border border-line px-3 py-2">
+              <span class="text-sm text-fg">{{ t('tunnels.sessionSliding') }}</span>
+              <input v-model="accessForm.sessionSliding" type="checkbox" class="accent-[var(--color-accent)]">
+            </label>
+            <p class="text-[11px] text-fg-subtle">{{ t('tunnels.sessionSlidingHint') }}</p>
+            <div class="space-y-2 border-t border-line pt-3">
+              <button :disabled="sessionRevoking" class="rounded border border-danger/50 px-3 py-1.5 text-xs font-medium text-danger transition-colors hover:bg-danger/10 disabled:opacity-50" @click="revokeSessions()">
+                {{ t('tunnels.sessionRevokeAll') }}
+              </button>
+              <div class="flex gap-2">
+                <input v-model="revokeIdentity" :placeholder="t('tunnels.sessionRevokeIdentityPh')" autocomplete="off"
+                       class="min-w-0 flex-1 rounded border border-line bg-bg px-2.5 py-1.5 font-mono text-xs placeholder:text-fg-subtle focus:border-accent">
+                <button :disabled="sessionRevoking || !revokeIdentity.trim()" class="rounded border border-line px-3 py-1.5 text-xs font-medium text-fg transition-colors hover:border-accent hover:text-accent disabled:opacity-50" @click="revokeSessions(revokeIdentity.trim())">
+                  {{ t('tunnels.sessionRevokeIdentity') }}
+                </button>
+              </div>
+              <p class="text-[11px] text-fg-subtle">{{ t('tunnels.sessionRevokeHint') }}</p>
             </div>
           </div>
 

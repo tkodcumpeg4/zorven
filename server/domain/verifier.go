@@ -7,6 +7,8 @@ import (
 	"net"
 	"net/netip"
 	"strings"
+
+	"golang.org/x/net/publicsuffix"
 )
 
 var (
@@ -44,6 +46,66 @@ type VerificationInstructions struct {
 	CNAMETarget string `json:"cname_target"` // or. "cname.rpshell.app"
 	TXTRecord   string `json:"txt_record"`   // or. "_rpsh-challenge.api.musteri.com"
 	TXTValue    string `json:"txt_value"`    // or. "rpsh-verify-123456"
+	// Apex, ad kayit edilebilir alan adinin kendisi mi (or. example.org). DNS
+	// standardi kok adda CNAME'e izin vermez; bu durumda A kaydi kullanilmali.
+	Apex bool `json:"apex"`
+	// ARecords, A kaydina yazilacak platform IPv4 adresleri (cname.<platform>'un
+	// cozdugu adresler). Kok adda zorunlu yol, alt alanda CNAME'e alternatif.
+	ARecords []string `json:"a_records,omitempty"`
+	// RecordName, DNS panelinin "ad" alanina yazilacak etiket (kayit edilebilir
+	// alana gore): example.org -> "@", app.example.org -> "app". Cogu panel tam adi
+	// degil yalniz etiketi ister; tam ad yazilirsa app.example.org.example.org olur.
+	RecordName string `json:"record_name,omitempty"`
+}
+
+// Zone, fqdn'in kayit edilebilir alani (app.example.org -> example.org); hata olursa fqdn.
+func Zone(fqdn string) string {
+	fqdn = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(fqdn), "."))
+	if z, err := publicsuffix.EffectiveTLDPlusOne(fqdn); err == nil {
+		return z
+	}
+	return fqdn
+}
+
+// RecordLabel, fqdn'in kayit edilebilir alana gore etiketini doner ("@" kok icin).
+func RecordLabel(fqdn string) string {
+	fqdn = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(fqdn), "."))
+	etld1, err := publicsuffix.EffectiveTLDPlusOne(fqdn)
+	if err != nil || etld1 == fqdn {
+		return "@"
+	}
+	return strings.TrimSuffix(fqdn, "."+etld1)
+}
+
+// IsApex, fqdn'in kayit edilebilir alan adinin kendisi olup olmadigini soyler
+// (Public Suffix List: example.org, ornek.com.tr -> true; app.example.org -> false).
+func IsApex(fqdn string) bool {
+	fqdn = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(fqdn), "."))
+	etld1, err := publicsuffix.EffectiveTLDPlusOne(fqdn)
+	return err == nil && etld1 == fqdn
+}
+
+// PlatformIPv4s, kok adlar icin A kaydi hedefi olacak platform IPv4 adreslerini
+// (cname.<platform> cozumlemesi) doner. Hata/bos durumda nil.
+func PlatformIPv4s(ctx context.Context, r IPResolver, platformDomain string) []string {
+	if r == nil {
+		r = net.DefaultResolver
+	}
+	target := "cname.zorven.app"
+	if platformDomain != "" {
+		target = "cname." + platformDomain
+	}
+	addrs, err := r.LookupIPAddr(ctx, target)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, a := range addrs {
+		if v4 := a.IP.To4(); v4 != nil {
+			out = append(out, v4.String())
+		}
+	}
+	return out
 }
 
 // GetInstructions, verilen fqdn ve verifyToken icin DNS ayar talimatlarini uretir.
@@ -57,6 +119,8 @@ func GetInstructions(fqdn, verifyToken, platformDomain string) VerificationInstr
 		CNAMETarget: cnameTarget,
 		TXTRecord:   "_zorven-challenge." + fqdn,
 		TXTValue:    verifyToken,
+		Apex:        IsApex(fqdn),
+		RecordName:  RecordLabel(fqdn),
 	}
 }
 

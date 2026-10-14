@@ -6,6 +6,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- Request body capture (opt-in): stored in Postgres (`request_captures`), gzip + AES-GCM with `ZORVEN_SECRET_KEY`, body cap and cache size via env, optional tablespace (`ZORVEN_CAPTURE_TABLESPACE`), pruned by retention (`ZORVEN_CAPTURE_RETENTION_DAYS` upper bound).
+- Reserved TCP/UDP port pool (`ZORVEN_TCP_PORT_MIN/MAX`, `ZORVEN_TCP_BIND_IPS`): allocations are (IP, port) pairs, one pool per IP, quarantine before a freed port is reused; port mode and SNI mode both remain.
+- Visitor sessions for protected tunnels: per-tunnel TTL (15 min - 30 days), optional sliding renewal with a 7-day absolute cap, "end all sessions" / per-identity revocation, events in `tunnel_access_events`.
+- Custom domains: apex domains get A-record instructions (CNAME is not allowed at the apex), subdomains get CNAME or A as alternatives, wildcard hint when a root domain is added; DNS check asks the authoritative name servers first (no stale resolver cache) and reports pointed / apex / wildcard.
+- `GET /api/v1/my-ip` returns the caller's public IP.
+- Second, offline recovery key for signed client updates, with a key loss / leak runbook.
+
+### Changed
+- Content-Security-Policy is enforced by default (`ZORVEN_CSP_MODE=report` to roll back); `unsafe-eval` only on the API reference page.
+- Unauthenticated `/api/v1/status` no longer reveals the server version or the connected client count.
+
+### Fixed
+- TCP tunnels: the client registers a stream before acknowledging it, so the first data packet of a new connection is no longer dropped under concurrency.
+- `scripts/build-clients.sh` no longer deletes `dist/desktop.json` before signing it.
+
+### Added (earlier)
 - Panel language defaults to the browser language on first visit (Turkish -> Turkish, anything else -> English); a saved choice always wins.
 - Mail client auto-setup hosts (`autoconfig.mail.<platform>`, `autodiscover.mail.<platform>`) get their own ACME certificates, since the wildcard does not cover two-level names.
 - Web door: IPv6 grants match the whole /64 prefix (privacy addresses rotate); IPv4 stays exact.

@@ -37,8 +37,18 @@ TARGETS=(
   "linux/arm//Linux ARMv7 (Raspberry Pi 32-bit)"
 )
 
+# dist/desktop.json (masaustu yayini, once uretilir) temizlikte kaybolmasin; asagida imzalanir.
+DESKTOP_JSON=""
+if [ -f "$OUT/desktop.json" ]; then
+  DESKTOP_JSON="$(mktemp)"
+  cp "$OUT/desktop.json" "$DESKTOP_JSON"
+fi
 rm -rf "$OUT"
 mkdir -p "$OUT"
+if [ -n "$DESKTOP_JSON" ]; then
+  mv "$DESKTOP_JSON" "$OUT/desktop.json"
+  chmod 644 "$OUT/desktop.json"
+fi
 
 echo "rpshell-client derleniyor (surum: $VERSION)"
 echo

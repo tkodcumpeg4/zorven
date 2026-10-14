@@ -3,6 +3,7 @@ package domain
 import (
 	"context"
 	"errors"
+	"net"
 	"strings"
 	"testing"
 )
@@ -168,6 +169,51 @@ func TestVerifyCustomDomain_CNAMEExactOnly(t *testing.T) {
 	for _, h := range []string{"other.example.com", "apex.example.com", "deep.example.com"} {
 		if err := VerifyCustomDomain(ctx, h, "tok", platform, mock); !errors.Is(err, ErrVerificationFailed) {
 			t.Errorf("%s reddedilmeli, got %v", h, err)
+		}
+	}
+}
+
+func TestIsApex(t *testing.T) {
+	for fqdn, want := range map[string]bool{
+		"example.org":       true,
+		"EXAMPLE.org.":      true,
+		"app.example.org":   false,
+		"ornek.com.tr":      true, // com.tr kamu soneki
+		"api.ornek.com.tr":  false,
+		"example.net":       true,
+		"a.b.example.co.uk": false,
+		"example.co.uk":     true,
+	} {
+		if got := IsApex(fqdn); got != want {
+			t.Errorf("IsApex(%q) = %v, beklenen %v", fqdn, got, want)
+		}
+	}
+	if !GetInstructions("example.org", "tok", "zorven.app").Apex || GetInstructions("app.example.org", "tok", "zorven.app").Apex {
+		t.Fatal("GetInstructions Apex alanini dogru doldurmali")
+	}
+}
+
+type fakeIPResolver map[string][]net.IPAddr
+
+func (f fakeIPResolver) LookupIPAddr(_ context.Context, h string) ([]net.IPAddr, error) {
+	return f[h], nil
+}
+
+func TestPlatformIPv4s(t *testing.T) {
+	r := fakeIPResolver{"cname.zorven.app": {{IP: net.ParseIP("203.0.113.7")}, {IP: net.ParseIP("2001:db8::1")}}}
+	got := PlatformIPv4s(context.Background(), r, "zorven.app")
+	if len(got) != 1 || got[0] != "203.0.113.7" {
+		t.Fatalf("yalniz IPv4 donmeli: %v", got)
+	}
+}
+
+func TestRecordLabel(t *testing.T) {
+	for fqdn, want := range map[string]string{
+		"example.org": "@", "app.example.org": "app", "a.b.example.org": "a.b",
+		"api.ornek.com.tr": "api", "ornek.com.tr": "@",
+	} {
+		if got := RecordLabel(fqdn); got != want {
+			t.Errorf("RecordLabel(%q) = %q, beklenen %q", fqdn, got, want)
 		}
 	}
 }

@@ -26,16 +26,58 @@ const form = reactive({
 
 // Doğrulama ve talimat modalı durumu
 const verifyingId = ref<string | null>(null)
+// Kontrol/doğrulama sonucu kartı: her tıklamada animasyon yeniden oynasın diye sayaç.
+const checkResult = ref<{ id: string, ok: boolean, kind: 'dns' | 'verify' } | null>(null)
+const checkFlash = ref(0)
+function showResult(id: string, ok: boolean, kind: 'dns' | 'verify') {
+  checkResult.value = { id, ok, kind }
+  checkFlash.value++
+  // Kart pencerenin altında kalabilir; görünür alana kaydır.
+  nextTick(() => document.getElementById('zv-check-result')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }))
+}
 const actionMessage = ref<{ text: string; isError: boolean } | null>(null)
 const selectedInstructionsDomain = ref<Hostname | null>(null)
 // Doğrulanmış (sahipliği kanıtlanmış) ama DNS'i henüz platforma yönlenmemiş ad için canlı kontrol.
 const dnsChecking = ref(false)
 const dnsResult = ref<{ id: string, pointed: boolean } | null>(null)
-async function checkDNS(h: Hostname) {
+// Doğrulanmış özel adların DNS durumu (liste rozeti + kök ad için A kaydı bilgisi).
+// "Doğrulandı" yalnız sahiplik demek; trafik için ad platforma yönlenmeli.
+const dnsInfo = ref<Record<string, { pointed: boolean, apex: boolean, a_records: string[], record_name: string, wildcard: boolean, zone: string }>>({})
+function rememberDNS(id: string, r: { pointed: boolean, apex?: boolean, a_records?: string[] | null, record_name?: string, wildcard?: boolean, zone?: string }) {
+  dnsInfo.value = { ...dnsInfo.value, [id]: { pointed: r.pointed, apex: !!r.apex, a_records: r.a_records || [], record_name: r.record_name || '', wildcard: !!r.wildcard, zone: r.zone || '' } }
+}
+async function loadDNSStatus() {
+  const list = hostnames.value.filter(h => h.type === 'custom' && h.verified)
+  await Promise.all(list.map(async (h) => {
+    try { rememberDNS(h.id, await api.dnsCheckHostname(h.id)) } catch { /* sessiz: rozet gösterilmez */ }
+  }))
+}
+function isApex(h: Hostname) {
+  return !!(h.instructions?.apex || dnsInfo.value[h.id]?.apex)
+}
+function apexIPs(h: Hostname) {
+  return (h.instructions?.a_records?.length ? h.instructions.a_records : dnsInfo.value[h.id]?.a_records) || []
+}
+// DNS panelinin "ad" alanı: çoğu sağlayıcı tam adı değil yalnız etiketi ister.
+function recordName(h: Hostname) {
+  return h.instructions?.record_name || dnsInfo.value[h.id]?.record_name || h.fqdn
+}
+function openInstructions(h: Hostname) {
+  selectedInstructionsDomain.value = h
+  checkResult.value = null
+  if (h.verified) void checkDNS(h, true)
+}
+async function checkDNS(h: Hostname, quiet = false) {
   dnsChecking.value = true
   try {
     const r = await api.dnsCheckHostname(h.id)
     dnsResult.value = { id: h.id, pointed: r.pointed }
+    rememberDNS(h.id, r)
+    if (!quiet) {
+      showResult(h.id, r.pointed, 'dns')
+      if (r.pointed) toast.success(t('domains.dnsOkToast', { fqdn: h.fqdn }))
+      else toast.warn(t('domains.dnsNotOkToast', { fqdn: h.fqdn }))
+    }
   } catch (e: any) {
     toast.error(e?.data?.error?.message || t('domains.addFailed'))
   } finally {
@@ -100,6 +142,7 @@ onMounted(async () => {
   } finally {
     pending.value = false
   }
+  void loadDNSStatus()
 })
 
 const tunnelLabel = (id?: string | null) => {
@@ -209,10 +252,12 @@ async function verify(h: Hostname) {
     const res = await api.verifyHostname(h.id)
     if (res.verified) {
       h.verified = true
+      showResult(h.id, true, 'verify')
       actionMessage.value = { text: t('domains.verifiedMsg', { fqdn: h.fqdn }), isError: false }
       toast.success(t('domains.verifiedToast', { fqdn: h.fqdn }))
     } else {
       actionMessage.value = { text: t('domains.verifyPending', { fqdn: h.fqdn }), isError: true }
+      showResult(h.id, false, 'verify')
       toast.warn(t('domains.verifyPendingToast'))
     }
   } catch (e) {
@@ -373,7 +418,7 @@ async function remove(h: Hostname) {
               {{ t('domains.dnsInstructions') }} <span class="font-mono text-accent">{{ selectedInstructionsDomain.fqdn }}</span>
             </h2>
           </div>
-          <p class="mt-1 text-xs text-fg-muted">{{ selectedInstructionsDomain.verified ? t('domains.dnsOnlyIntro') : t('domains.dnsIntro') }}</p>
+          <p class="mt-1 text-xs text-fg-muted">{{ selectedInstructionsDomain.verified ? (isApex(selectedInstructionsDomain) ? t('domains.dnsOnlyIntroApex') : t('domains.dnsOnlyIntro')) : t('domains.dnsIntro') }}</p>
         </div>
         <button
           class="rounded p-1 text-fg-muted hover:bg-surface-2 hover:text-fg"
@@ -383,9 +428,80 @@ async function remove(h: Hostname) {
         </button>
       </div>
 
-      <div class="mt-4 grid gap-4" :class="selectedInstructionsDomain.verified ? '' : 'md:grid-cols-2'">
+      <!-- Joker kayıt: kökte bir kez * → IP; sonraki tüm alt alan adları ayrı DNS kaydı olmadan çalışır -->
+      <div v-if="selectedInstructionsDomain.verified && apexIPs(selectedInstructionsDomain).length" class="mt-4 rounded border p-3" :class="isApex(selectedInstructionsDomain) ? 'border-line bg-surface-1' : 'border-accent/40 bg-accent/5'">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <span class="text-xs font-semibold text-accent">{{ isApex(selectedInstructionsDomain) ? t('domains.wildTitleApex') : t('domains.wildTitleSub') }}</span>
+          <span
+            v-if="dnsInfo[selectedInstructionsDomain.id]"
+            class="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 font-mono text-[10px] font-semibold"
+            :class="dnsInfo[selectedInstructionsDomain.id].wildcard ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400' : 'border-line bg-bg text-fg-subtle'"
+          >
+            <Icon :name="dnsInfo[selectedInstructionsDomain.id].wildcard ? 'lucide:check-circle' : 'lucide:circle-dashed'" class="size-3" />
+            {{ dnsInfo[selectedInstructionsDomain.id].wildcard ? t('domains.wildPresent') : t('domains.wildAbsent') }}
+          </span>
+        </div>
+        <p class="mt-1.5 text-[11px] text-fg-muted">{{ t('domains.wildDesc', { zone: dnsInfo[selectedInstructionsDomain.id]?.zone || selectedInstructionsDomain.fqdn }) }}</p>
+        <div class="mt-2 grid grid-cols-3 gap-2 text-xs">
+          <div>
+            <span class="text-fg-subtle block">{{ t('domains.recordType') }}</span>
+            <code class="font-mono font-bold text-fg">A</code>
+          </div>
+          <div>
+            <span class="text-fg-subtle block">{{ t('domains.hostName') }}</span>
+            <div class="flex items-center justify-between rounded bg-bg px-2 py-1 font-mono text-[11px]">
+              <span>*</span>
+              <button class="text-fg-muted hover:text-fg" @click="copyText('*', 'w-host')">
+                <Icon :name="copiedKey === 'w-host' ? 'lucide:check' : 'lucide:copy'" class="size-3.5" />
+              </button>
+            </div>
+          </div>
+          <div>
+            <span class="text-fg-subtle block">{{ t('domains.targetValue') }}</span>
+            <div class="flex items-center justify-between rounded bg-bg px-2 py-1 font-mono text-[11px]">
+              <span>{{ apexIPs(selectedInstructionsDomain)[0] }}</span>
+              <button class="text-fg-muted hover:text-fg" @click="copyText(apexIPs(selectedInstructionsDomain)[0], 'w-ip')">
+                <Icon :name="copiedKey === 'w-ip' ? 'lucide:check' : 'lucide:copy'" class="size-3.5" />
+              </button>
+            </div>
+          </div>
+        </div>
+        <p v-if="!isApex(selectedInstructionsDomain)" class="mt-2 text-[11px] text-fg-subtle">{{ t('domains.wildOrSingle') }}</p>
+      </div>
+
+      <div class="mt-4 grid gap-4" :class="(!selectedInstructionsDomain.verified || !isApex(selectedInstructionsDomain)) ? 'md:grid-cols-2' : ''">
+        <!-- Yöntem 1 (kök alan adı): A kaydı — DNS standardı kökte CNAME'e izin vermez -->
+        <div v-if="isApex(selectedInstructionsDomain)" class="rounded border border-line bg-surface-1 p-3">
+          <div class="flex items-center justify-between">
+            <span class="text-xs font-semibold text-accent">{{ t('domains.method1Apex') }}</span>
+            <span class="text-[10px] text-fg-subtle">{{ t('domains.method1ApexSub') }}</span>
+          </div>
+          <p class="mt-2 text-[11px] text-fg-muted">{{ t('domains.apexNote') }}</p>
+          <div class="mt-2.5 space-y-2 text-xs">
+            <div>
+              <span class="text-fg-subtle block">{{ t('domains.recordType') }}</span>
+              <code class="font-mono font-bold text-fg">A</code>
+            </div>
+            <div>
+              <span class="text-fg-subtle block">{{ t('domains.hostName') }}</span>
+              <div class="flex items-center justify-between rounded bg-bg px-2 py-1 font-mono text-[11px]">
+                <span>@ <span class="text-fg-subtle">({{ selectedInstructionsDomain.fqdn }})</span></span>
+              </div>
+            </div>
+            <div v-for="ip in (apexIPs(selectedInstructionsDomain).length ? apexIPs(selectedInstructionsDomain) : [''])" :key="ip || 'yok'">
+              <span class="text-fg-subtle block">{{ t('domains.targetValue') }}</span>
+              <div class="flex items-center justify-between rounded bg-bg px-2 py-1 font-mono text-[11px]">
+                <span>{{ ip || t('domains.checking') }}</span>
+                <button v-if="ip" class="text-fg-muted hover:text-fg" @click="copyText(ip, 'a-' + ip)">
+                  <Icon :name="copiedKey === 'a-' + ip ? 'lucide:check' : 'lucide:copy'" class="size-3.5" />
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <!-- Yöntem 1: CNAME -->
-        <div class="rounded border border-line bg-surface-1 p-3">
+        <div v-else class="rounded border border-line bg-surface-1 p-3">
           <div class="flex items-center justify-between">
             <span class="text-xs font-semibold text-accent">{{ t('domains.method1') }}</span>
             <span class="text-[10px] text-fg-subtle">{{ t('domains.method1Sub') }}</span>
@@ -398,10 +514,10 @@ async function remove(h: Hostname) {
             <div>
               <span class="text-fg-subtle block">{{ t('domains.hostName') }}</span>
               <div class="flex items-center justify-between rounded bg-bg px-2 py-1 font-mono text-[11px]">
-                <span>{{ selectedInstructionsDomain.instructions?.cname_record || selectedInstructionsDomain.fqdn }}</span>
+                <span>{{ recordName(selectedInstructionsDomain) }} <span v-if="recordName(selectedInstructionsDomain) !== selectedInstructionsDomain.fqdn" class="text-fg-subtle">({{ selectedInstructionsDomain.fqdn }})</span></span>
                 <button
                   class="text-fg-muted hover:text-fg"
-                  @click="copyText(selectedInstructionsDomain.instructions?.cname_record || selectedInstructionsDomain.fqdn, 'cname-host')"
+                  @click="copyText(recordName(selectedInstructionsDomain), 'cname-host')"
                 >
                   <Icon :name="copiedKey === 'cname-host' ? 'lucide:check' : 'lucide:copy'" class="size-3.5" />
                 </button>
@@ -416,6 +532,38 @@ async function remove(h: Hostname) {
                   @click="copyText(selectedInstructionsDomain.instructions?.cname_target || 'cname.zorven.app', 'cname-target')"
                 >
                   <Icon :name="copiedKey === 'cname-target' ? 'lucide:check' : 'lucide:copy'" class="size-3.5" />
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Yöntem 2 (alt alan, sahiplik doğrulanmış): A kaydı — CNAME istemeyenler için -->
+        <div v-if="selectedInstructionsDomain.verified && !isApex(selectedInstructionsDomain)" class="rounded border border-line bg-surface-1 p-3">
+          <div class="flex items-center justify-between">
+            <span class="text-xs font-semibold text-accent">{{ t('domains.method2A') }}</span>
+            <span class="text-[10px] text-fg-subtle">{{ t('domains.method2ASub') }}</span>
+          </div>
+          <div class="mt-2.5 space-y-2 text-xs">
+            <div>
+              <span class="text-fg-subtle block">{{ t('domains.recordType') }}</span>
+              <code class="font-mono font-bold text-fg">A</code>
+            </div>
+            <div>
+              <span class="text-fg-subtle block">{{ t('domains.hostName') }}</span>
+              <div class="flex items-center justify-between rounded bg-bg px-2 py-1 font-mono text-[11px]">
+                <span>{{ recordName(selectedInstructionsDomain) }}</span>
+                <button class="text-fg-muted hover:text-fg" @click="copyText(recordName(selectedInstructionsDomain), 'a-host')">
+                  <Icon :name="copiedKey === 'a-host' ? 'lucide:check' : 'lucide:copy'" class="size-3.5" />
+                </button>
+              </div>
+            </div>
+            <div v-for="ip in (apexIPs(selectedInstructionsDomain).length ? apexIPs(selectedInstructionsDomain) : [''])" :key="'sub-' + (ip || 'yok')">
+              <span class="text-fg-subtle block">{{ t('domains.targetValue') }}</span>
+              <div class="flex items-center justify-between rounded bg-bg px-2 py-1 font-mono text-[11px]">
+                <span>{{ ip || t('domains.checking') }}</span>
+                <button v-if="ip" class="text-fg-muted hover:text-fg" @click="copyText(ip, 'sa-' + ip)">
+                  <Icon :name="copiedKey === 'sa-' + ip ? 'lucide:check' : 'lucide:copy'" class="size-3.5" />
                 </button>
               </div>
             </div>
@@ -458,6 +606,39 @@ async function remove(h: Hostname) {
                 </button>
               </div>
             </div>
+          </div>
+        </div>
+      </div>
+
+
+      <!-- Kontrol sonucu: animasyonlu, net "Tamam" / "Henüz değil" kartı -->
+      <div v-if="dnsChecking || verifyingId === selectedInstructionsDomain.id" class="mt-4 flex items-center gap-3 rounded-lg border border-line bg-surface-1 px-4 py-3" role="status" aria-live="polite">
+        <span class="zv-spin size-8 shrink-0 rounded-full border-2 border-accent/25 border-t-accent" aria-hidden="true" />
+        <span class="text-sm text-fg-muted">{{ t('domains.checkingLong') }}</span>
+      </div>
+      <div
+        v-else-if="checkResult && checkResult.id === selectedInstructionsDomain.id"
+        id="zv-check-result"
+        :key="checkFlash"
+        class="zv-pop mt-4 flex items-start gap-3 rounded-lg border px-4 py-3"
+        :class="checkResult.ok ? 'border-emerald-500/40 bg-emerald-500/10' : 'border-amber-500/40 bg-amber-500/10'"
+        role="status"
+        aria-live="polite"
+      >
+        <span
+          class="zv-badge flex size-9 shrink-0 items-center justify-center rounded-full"
+          :class="checkResult.ok ? 'bg-emerald-500 text-white' : 'bg-amber-500 text-white'"
+          aria-hidden="true"
+        >
+          <Icon :name="checkResult.ok ? 'lucide:check' : 'lucide:triangle-alert'" class="size-5" />
+        </span>
+        <div class="min-w-0">
+          <div class="text-sm font-semibold" :class="checkResult.ok ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-700 dark:text-amber-400'">
+            {{ checkResult.ok ? t('domains.resultOkTitle') : t('domains.resultWaitTitle') }}
+          </div>
+          <div class="mt-0.5 text-xs text-fg-muted">
+            <template v-if="checkResult.kind === 'dns'">{{ checkResult.ok ? t('domains.resultDnsOk', { fqdn: selectedInstructionsDomain.fqdn }) : t('domains.resultDnsWait') }}</template>
+            <template v-else>{{ checkResult.ok ? t('domains.resultVerifyOk', { fqdn: selectedInstructionsDomain.fqdn }) : t('domains.resultVerifyWait') }}</template>
           </div>
         </div>
       </div>
@@ -558,6 +739,18 @@ async function remove(h: Hostname) {
                     <Icon name="lucide:clock" class="size-3 text-amber-600 dark:text-amber-400" />
                     {{ t('domains.pendingVerify') }}
                   </span>
+                  <button
+                    v-if="h.verified && dnsInfo[h.id] && !dnsInfo[h.id].pointed"
+                    type="button"
+                    class="ml-1 inline-flex cursor-pointer items-center gap-1 rounded border px-1.5 py-0.5 font-mono text-[10px] font-semibold
+                           border-amber-300 bg-amber-50 text-amber-800
+                           dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-400"
+                    :title="t('domains.dnsNotPointedHint')"
+                    @click="openInstructions(h)"
+                  >
+                    <Icon name="lucide:triangle-alert" class="size-3" />
+                    {{ t('domains.dnsNotPointedBadge') }}
+                  </button>
                 </template>
                 <template v-else>
                   <span class="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-700 dark:text-emerald-400">
@@ -583,7 +776,7 @@ async function remove(h: Hostname) {
                     <button
                       class="cursor-pointer rounded p-1.5 text-fg-muted transition-colors hover:bg-surface-2 hover:text-accent"
                       :title="t('domains.viewDns')"
-                      @click="selectedInstructionsDomain = h"
+                      @click="openInstructions(h)"
                     >
                       <Icon name="lucide:file-text" class="size-4" />
                     </button>
@@ -672,3 +865,16 @@ async function remove(h: Hostname) {
     </PanelFrame>
   </div>
 </template>
+
+<style scoped>
+@keyframes zv-pop-in { 0% { opacity: 0; transform: translateY(6px) scale(.97) } 100% { opacity: 1; transform: none } }
+@keyframes zv-badge-in { 0% { transform: scale(.3) } 60% { transform: scale(1.15) } 100% { transform: scale(1) } }
+@keyframes zv-spin-k { to { transform: rotate(360deg) } }
+.zv-pop { animation: zv-pop-in .35s cubic-bezier(.2,.7,.1,1) both }
+.zv-pop .zv-badge { animation: zv-badge-in .5s cubic-bezier(.34,1.56,.64,1) .08s both }
+.zv-spin { animation: zv-spin-k .8s linear infinite }
+@media (prefers-reduced-motion: reduce) {
+  .zv-pop, .zv-pop .zv-badge { animation: none }
+  .zv-spin { animation-duration: 2s }
+}
+</style>

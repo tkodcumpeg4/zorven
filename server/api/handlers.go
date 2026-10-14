@@ -10,9 +10,11 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/tkodcumpeg4/zorven/server/accesslog"
 	"github.com/tkodcumpeg4/zorven/server/auth"
 	"github.com/tkodcumpeg4/zorven/server/domain"
 	"github.com/tkodcumpeg4/zorven/server/door"
@@ -21,12 +23,14 @@ import (
 	"github.com/tkodcumpeg4/zorven/server/ingress"
 	"github.com/tkodcumpeg4/zorven/server/ipfilter"
 	"github.com/tkodcumpeg4/zorven/server/mail"
+	"github.com/tkodcumpeg4/zorven/server/portpool"
 	"github.com/tkodcumpeg4/zorven/server/rawproxy"
 	"github.com/tkodcumpeg4/zorven/server/reqlog"
 	"github.com/tkodcumpeg4/zorven/server/session"
 	"github.com/tkodcumpeg4/zorven/server/store"
 	"github.com/tkodcumpeg4/zorven/server/store/pgstore"
 	"github.com/tkodcumpeg4/zorven/server/tunnel"
+	"github.com/tkodcumpeg4/zorven/server/visitorauth"
 	"github.com/tkodcumpeg4/zorven/shared/protocol"
 )
 
@@ -49,6 +53,11 @@ type Server struct {
 	// (or. "rpshell.app"). BOS ise subdomain tahsisi KAPALIDIR: tek etiket
 	// kendi basina bir adres degildir, uydurmaktansa acikca reddediyoruz.
 	PlatformDomain string
+
+	// PortPool (K3), rezerve TCP/UDP port havuzu (IP yuvalari + aralik +
+	// karantina). nil ise eski davranis: tek yuva, 10000-10099, host=PlatformDomain.
+	PortPool *portpool.Config
+	portMu   sync.Mutex // port tahsisini serilestirir
 
 	// PanelHosts, panelin/kontrol duzleminin sunuldugu hostlar (--control-host).
 	// WebSocket Origin kontrolu yalnizca bunlara izin verir; kiraci tunel alt
@@ -165,6 +174,7 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("GET /api/v1/health", s.health)
 	mux.HandleFunc("GET /api/v1/status", s.statusPublic)
 	mux.HandleFunc("GET /api/v1/me", s.me)
+	mux.HandleFunc("GET /api/v1/my-ip", s.myIP)
 	mux.HandleFunc("GET /api/v1/openapi.yaml", s.openapiSpec)
 	mux.HandleFunc("GET /api/v1/openapi.en.yaml", s.openapiSpecEN)
 
@@ -226,6 +236,7 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("GET /api/v1/tunnels/{id}/access", s.getTunnelAccess)
 	mux.HandleFunc("PUT /api/v1/tunnels/{id}/access", s.setTunnelAccess)
 	mux.HandleFunc("GET /api/v1/tunnels/{id}/access-events", s.listAccessEvents)
+	mux.HandleFunc("POST /api/v1/tunnels/{id}/access/revoke-sessions", s.revokeVisitorSessions)
 	mux.HandleFunc("GET /api/v1/tunnels/{id}/access-events/summary", s.accessEventsSummary)
 	// FAZ 5 / HA — tünel replikaları (çoklu agent yük dengeleme).
 	mux.HandleFunc("GET /api/v1/tunnels/{id}/replicas", s.getTunnelReplicas)
@@ -258,6 +269,7 @@ func (s *Server) Routes() *http.ServeMux {
 	// Platform yonetimi: YALNIZCA admin anahtariyla (kiraci oturumu yetmez).
 	mux.HandleFunc("POST /api/v1/admin/clients/notify-update", s.adminNotifyUpdate)
 	mux.HandleFunc("GET /api/v1/admin/stats", s.adminGetStats)
+	mux.HandleFunc("GET /api/v1/admin/tcp-pool", s.adminTCPPool)
 	mux.HandleFunc("GET /api/v1/admin/tenants", s.adminListTenants)
 	mux.HandleFunc("GET /api/v1/admin/clients", s.adminListClients)
 	mux.HandleFunc("GET /api/v1/admin/hostnames", s.adminListHostnames)
@@ -423,14 +435,18 @@ func (s *Server) statusPublic(w http.ResponseWriter, r *http.Request) {
 	}
 	components = append(components, map[string]any{"name": "database", "status": dbStatus})
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"status":            overall,
-		"version":           s.Version,
-		"uptime_seconds":    int(time.Since(serverStartedAt).Seconds()),
-		"connected_clients": s.Hub.Count(),
-		"components":        components,
-		"checked_at":        time.Now().UTC().Format(time.RFC3339),
-	})
+	out := map[string]any{
+		"status":         overall,
+		"uptime_seconds": int(time.Since(serverStartedAt).Seconds()),
+		"components":     components,
+		"checked_at":     time.Now().UTC().Format(time.RFC3339),
+	}
+	// Surum ve istemci sayisi yalniz kimlikli isteklere (health ile ayni desen, F-41).
+	if _, ok := tenantFromContext(r.Context()); ok {
+		out["version"] = s.Version
+		out["connected_clients"] = s.Hub.Count()
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) me(w http.ResponseWriter, r *http.Request) {
@@ -880,6 +896,7 @@ func (s *Server) listTunnels(w http.ResponseWriter, r *http.Request) {
 	if list == nil {
 		list = []store.Tunnel{}
 	}
+	s.fillPublicHosts(list)
 	if limit, cursor, ok := parsePage(r); ok {
 		page, next, more := paginate(list, func(t store.Tunnel) string { return t.ID }, limit, cursor)
 		setPageHeaders(w, r, next, more)
@@ -1034,6 +1051,7 @@ func (s *Server) getTunnel(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	s.fillPublicHost(&t)
 	writeJSON(w, http.StatusOK, t)
 }
 
@@ -1115,6 +1133,18 @@ func (s *Server) updateTunnel(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// K3: port moduna (yeni port gerektirecek sekilde) geciliyorsa kiraci port
+	// kotasi UpdateTunnel'dan ONCE denetlenir; platform yoneticisi muaf.
+	if body.Exposure != nil && *body.Exposure == store.ExposurePort && body.Proto != nil &&
+		(*body.Proto == store.ProtoTCP || *body.Proto == store.ProtoUDP) && !isPlatformAdmin(r.Context()) {
+		if cur, gerr := s.Store.GetTunnel(r.Context(), tenantID, r.PathValue("id")); gerr == nil && cur.PublicPort == 0 {
+			if qerr := s.checkPortQuota(r.Context(), tenantID); qerr != nil {
+				writeEntitlementError(w, qerr)
+				return
+			}
+		}
+	}
+
 	t, err := s.Store.UpdateTunnel(r.Context(), tenantID, r.PathValue("id"),
 		store.TunnelPatch{Target: body.Target, Enabled: body.Enabled, ClientID: body.ClientID, Proto: body.Proto, Exposure: body.Exposure})
 	if err != nil {
@@ -1126,17 +1156,18 @@ func (s *Server) updateTunnel(w http.ResponseWriter, r *http.Request) {
 	// port modundan çıktıysa portu serbest bırak.
 	if t.Exposure == store.ExposurePort && (t.Proto == store.ProtoTCP || t.Proto == store.ProtoUDP) {
 		if t.PublicPort == 0 {
-			if p, aerr := s.allocateTunnelPort(r.Context(), tenantID, t.ID); aerr == nil {
-				t.PublicPort = p
+			if a, aerr := s.allocateTunnelPort(r.Context(), tenantID, t.ID); aerr == nil {
+				t.PublicPort, t.PublicIP = a.Port, a.Key
 			} else {
 				s.Logger.Warn("rezerve port tahsis edilemedi", "tunnel", t.ID, "hata", aerr)
 			}
 		}
 	} else if t.PublicPort != 0 {
 		if err := s.Store.SetTunnelPort(r.Context(), tenantID, t.ID, 0); err == nil {
-			t.PublicPort = 0
+			t.PublicPort, t.PublicIP = 0, ""
 		}
 	}
+	s.fillPublicHost(&t)
 
 	s.tunnelsChanged()
 	s.pushClientConfig(t.ClientID)
@@ -1145,36 +1176,6 @@ func (s *Server) updateTunnel(w http.ResponseWriter, r *http.Request) {
 	}
 	s.Events.PublishTenant(tenantID, events.TypeTunnelUpdated, t)
 	writeJSON(w, http.StatusOK, t)
-}
-
-// Rezerve port aralığı (Mod A). VDS'te docker-compose + firewall bu aralığı açar.
-// Docker port-başına-proxy açtığından aralık makul tutulur (100 port).
-const (
-	reservedPortMin = 10000
-	reservedPortMax = 10099
-)
-
-// allocateTunnelPort, aralikta bos bir portu tunele atar ve doner.
-func (s *Server) allocateTunnelPort(ctx context.Context, tenantID, id string) (int, error) {
-	used := map[int]bool{}
-	if list, err := s.Store.ListReservedPortTunnels(ctx); err == nil {
-		for _, tn := range list {
-			if tn.PublicPort > 0 {
-				used[tn.PublicPort] = true
-			}
-		}
-	}
-	for p := reservedPortMin; p <= reservedPortMax; p++ {
-		if used[p] {
-			continue
-		}
-		if err := s.Store.SetTunnelPort(ctx, tenantID, id, p); err != nil {
-			// Yarış (unique ihlali) olabilir; sonraki portu dene.
-			continue
-		}
-		return p, nil
-	}
-	return 0, fmt.Errorf("bos rezerve port kalmadi (%d-%d)", reservedPortMin, reservedPortMax)
 }
 
 func (s *Server) deleteTunnel(w http.ResponseWriter, r *http.Request) {
@@ -1231,6 +1232,9 @@ func accessConfigOut(p store.TunnelAccessPolicy) map[string]any {
 	if v, ok := raw["allowed_emails"]; ok {
 		safe["allowed_emails"] = v
 	}
+	pol := visitorauth.PolicyFromConfig(p.Config)
+	safe["session_ttl_minutes"] = pol.TTLMinutes // 0 = varsayilan (12 saat)
+	safe["session_sliding"] = pol.Sliding
 	return map[string]any{
 		"tunnel_id": p.TunnelID, "mode": p.Mode, "enabled": p.Enabled, "config": safe,
 	}
@@ -1274,10 +1278,29 @@ func (s *Server) setTunnelAccess(w http.ResponseWriter, r *http.Request) {
 			Password      string   `json:"password"` // düz metin — burada hash'lenir
 			Providers     []string `json:"providers"`
 			AllowedEmails []string `json:"allowed_emails"`
+			// Ziyaretci oturumu: nil = mevcut deger korunur; 0 = varsayilan (12 saat).
+			SessionTTLMinutes *int  `json:"session_ttl_minutes"`
+			SessionSliding    *bool `json:"session_sliding"`
 		} `json:"config"`
 	}
 	if !decode(w, r, &body) {
 		return
+	}
+	var prevPol visitorauth.SessionPolicy
+	if cur, err := s.Store.GetTunnelAccessPolicy(r.Context(), tenantID, id); err == nil {
+		prevPol = visitorauth.PolicyFromConfig(cur.Config)
+	}
+	pol := prevPol
+	if v := body.Config.SessionTTLMinutes; v != nil {
+		if !visitorauth.ValidSessionMinutes(*v) {
+			writeJSONError(w, http.StatusUnprocessableEntity, "invalid_session_ttl",
+				"session_ttl_minutes 0 (varsayilan) veya 15 ile 43200 (30 gun) arasinda olmalidir")
+			return
+		}
+		pol.TTLMinutes = *v
+	}
+	if v := body.Config.SessionSliding; v != nil {
+		pol.Sliding = *v
 	}
 	mode := strings.TrimSpace(body.Mode)
 	if mode == "" {
@@ -1317,13 +1340,16 @@ func (s *Server) setTunnelAccess(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		cfg, _ = json.Marshal(map[string]string{"username": strings.TrimSpace(body.Config.Username), "password_hash": hash})
+		cfg, _ = json.Marshal(map[string]any{"username": strings.TrimSpace(body.Config.Username), "password_hash": hash,
+			"session_ttl_minutes": pol.TTLMinutes, "session_sliding": pol.Sliding})
 	case "oauth":
 		cfg, _ = json.Marshal(map[string]any{
 			"providers": body.Config.Providers, "allowed_emails": body.Config.AllowedEmails,
+			"session_ttl_minutes": pol.TTLMinutes, "session_sliding": pol.Sliding,
 		})
 	default:
 		cfg = []byte("{}")
+		pol = visitorauth.SessionPolicy{}
 	}
 
 	if err := s.Store.SetTunnelAccessPolicy(r.Context(), tenantID, store.TunnelAccessPolicy{
@@ -1335,6 +1361,11 @@ func (s *Server) setTunnelAccess(w http.ResponseWriter, r *http.Request) {
 	// Router snapshot'ını hemen tazele ki politika beklemeden etkin olsun.
 	s.tunnelsChanged()
 	s.audit(r, "tunnel.access", id, "mode="+mode)
+	if pol != prevPol {
+		s.audit(r, "tunnel.access.session", id, fmt.Sprintf("ttl_min=%d sliding=%t (onceki ttl_min=%d sliding=%t)",
+			pol.TTLMinutes, pol.Sliding, prevPol.TTLMinutes, prevPol.Sliding))
+		s.recordSessionAccessEvent(r, tenantID, id, mode, accesslog.ReasonSessionTTLChanged, "")
+	}
 
 	p, err := s.Store.GetTunnelAccessPolicy(r.Context(), tenantID, id)
 	if err != nil {

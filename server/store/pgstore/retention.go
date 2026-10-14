@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -23,6 +24,8 @@ const (
 type RetentionResult struct {
 	RequestLogs int64
 	UDPStats    int64
+	// Captures, request_captures (istek govdesi yakalama) silme sayisi.
+	Captures int64
 	// AccessEvents, tunnel_access_events (ziyaretci giris olaylari) silme sayisi.
 	AccessEvents int64
 	// DoorGrants, suresi dolmus/iptal edilmis web-door izinlerinin silme sayisi.
@@ -41,6 +44,15 @@ func RetentionDays() int {
 	}
 	return n
 }
+
+var captureRetentionMax atomic.Int64
+
+// SetCaptureRetentionMaxDays, yakalama saklamasina ust sinir koyar (gun; 0 = yok).
+// ZORVEN_CAPTURE_RETENTION_DAYS ile verilir (bkz. captureinit.go).
+func SetCaptureRetentionMaxDays(d int) { captureRetentionMax.Store(int64(d)) }
+
+// CaptureRetentionMaxDays, SetCaptureRetentionMaxDays degerini doner.
+func CaptureRetentionMaxDays() int { return int(captureRetentionMax.Load()) }
 
 // PruneRetention, RetentionDays()'ten eski request_logs, tunnel_access_events ve
 // udp_stats_minute satirlarini (tum kiracilar) ve bitisinden 24 saat sonra
@@ -76,6 +88,19 @@ func (s *Store) pruneRetentionAt(ctx context.Context, now time.Time, days int) (
 	res.AccessEvents = n
 	if err != nil {
 		return res, fmt.Errorf("retention: tunnel_access_events: %w", err)
+	}
+	// Istek govdesi yakalamalari: log suresi, varsa ZORVEN_CAPTURE_RETENTION_DAYS
+	// ust siniriyla kisaltilir.
+	capCutoff := cutoff
+	if m := CaptureRetentionMaxDays(); m > 0 && m < days {
+		capCutoff = now.Add(-time.Duration(m) * 24 * time.Hour)
+	}
+	n, err = s.batchDelete(ctx,
+		`DELETE FROM request_captures WHERE id IN (
+		   SELECT id FROM request_captures WHERE ts < $1 LIMIT $2)`, capCutoff)
+	res.Captures = n
+	if err != nil {
+		return res, fmt.Errorf("retention: request_captures: %w", err)
 	}
 	// Web-door izinleri: bitisinden 24 saat sonra silinir (denetim izi
 	// tunnel_access_events'te).

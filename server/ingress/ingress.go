@@ -101,6 +101,10 @@ type Handler struct {
 	// katmanda uyari ara-sayfasi (interstitial) gosterilir. Bos ise kapali.
 	PlatformDomain string
 
+	// PortHost (K3), rezerve port tunelinin genel host adini havuz yuvasi
+	// anahtarindan (store.DoorRoute.PublicIP) cozer. nil/bos donus = PlatformDomain.
+	PortHost func(publicIP string) string
+
 	// rr (FAZ 5 / HA): hostname basina round-robin sayaci. Cok-replikalı
 	// tunellerde istekleri cevrimici agent'lar arasinda dagitir. Zero-value hazir.
 	rr roundRobin
@@ -384,7 +388,7 @@ func (h *Handler) proxy(w http.ResponseWriter, r *http.Request, sess *tunnel.Ses
 			ReqHeaders: r.Header.Clone(),
 		}
 		if hasBody {
-			r.Body = captureReadCloser(r.Body, &capt.ReqBody, &capt.ReqBodyTruncated, reqlog.CaptureMaxBody)
+			r.Body = captureReadCloser(r.Body, &capt.ReqBody, &capt.ReqBodyTruncated, h.Captures.MaxBody())
 		}
 	}
 
@@ -507,7 +511,7 @@ func (h *Handler) writeResponse(w http.ResponseWriter, head tunnel.ResponseHead,
 	// aciksa akan govde tavana kadar bir tampona da tee edilir.
 	var out io.Writer = newFlushWriter(w)
 	if capt != nil {
-		out = io.MultiWriter(out, &captureWriter{w: io.Discard, dst: &capt.RespBody, truncated: &capt.RespBodyTruncated, max: reqlog.CaptureMaxBody})
+		out = io.MultiWriter(out, &captureWriter{w: io.Discard, dst: &capt.RespBody, truncated: &capt.RespBodyTruncated, max: h.Captures.MaxBody()})
 	}
 	if _, err := io.Copy(out, ex.Body()); err != nil {
 		h.Log.Debug("yanit govdesi yazilirken kesildi", "hata", err)

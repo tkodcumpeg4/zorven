@@ -103,14 +103,14 @@ type Service struct {
 	GrantTTL time.Duration
 	Now      func() time.Time
 
-	mu       sync.Mutex
-	doors    map[string]doorInfo
-	doorsAt  time.Time
-	doorsOK  bool
-	grants   map[string]*grantCache
-	blocked  map[blockKey]*blockedAgg
-	revs     map[string]*revCache // tunel -> oturum iptalleri
-	plans    map[string]planEntry // kiraci -> plan kapisi sonucu
+	mu      sync.Mutex
+	doors   map[string]doorInfo
+	doorsAt time.Time
+	doorsOK bool
+	grants  map[string]*grantCache
+	blocked map[blockKey]*blockedAgg
+	revs    map[string]*revCache // tunel -> oturum iptalleri
+	plans   map[string]planEntry // kiraci -> plan kapisi sonucu
 }
 
 // New, Service uretir. Run ayrica baslatilmalidir.
@@ -290,6 +290,9 @@ func (s *Service) Changed(tunnelID string) {
 
 // --- oturum iptali -----------------------------------------------------------
 
+// AllIdentities, iptal kaydinda "tunelin tum ziyaretci oturumlari" anlamina gelen ozel kimlik.
+const AllIdentities = "*"
+
 // NormIdentity, iptal kaydi icin kimligi tek bicime getirir (kucuk harf, kirpilmis).
 func NormIdentity(id string) string { return strings.ToLower(strings.TrimSpace(id)) }
 
@@ -314,9 +317,6 @@ func (s *Service) RecordRevocation(ctx context.Context, tunnelID, identity strin
 // edilmis mi (issued <= son iptal). Okunamazsa fail-closed (true): giris sayfasi gosterilir.
 func (s *Service) SessionRevoked(tunnelID, identity string, issued time.Time) bool {
 	id := NormIdentity(identity)
-	if id == "" {
-		return false
-	}
 	now := s.now()
 	s.mu.Lock()
 	rc := s.revs[tunnelID]
@@ -333,6 +333,13 @@ func (s *Service) SessionRevoked(tunnelID, identity string, issued time.Time) bo
 		s.mu.Lock()
 		s.revs[tunnelID] = rc
 		s.mu.Unlock()
+	}
+	// "*" kaydi: tunelin tum oturumlari (kimlikten bagimsiz).
+	if at, ok := rc.m[AllIdentities]; ok && !issued.After(at) {
+		return true
+	}
+	if id == "" {
+		return false
 	}
 	at, ok := rc.m[id]
 	return ok && !issued.After(at)

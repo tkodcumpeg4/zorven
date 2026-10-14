@@ -258,12 +258,27 @@ func (s *Server) dnsCheckHostname(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	inst := domain.GetInstructions(h.FQDN, h.VerifyToken, s.PlatformDomain)
+	inst := s.instructionsFor(ctx, h)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"fqdn":         h.FQDN,
 		"pointed":      domain.PointsToPlatform(ctx, nil, h.FQDN, s.PlatformDomain),
 		"cname_target": inst.CNAMETarget,
+		"apex":         inst.Apex,
+		"a_records":    inst.ARecords,
+		"record_name":  inst.RecordName,
+		// wildcard: kayit edilebilir alanda platforma isaret eden *.alan kaydi var mi.
+		"wildcard": domain.HasWildcard(ctx, nil, h.FQDN, s.PlatformDomain),
+		"zone":     domain.Zone(h.FQDN),
 	})
+}
+
+// instructionsFor, DNS talimatlarini uretir. A kaydi icin platform IPv4
+// adresleri HER ZAMAN eklenir: kok adda zorunlu (CNAME kullanilamaz), alt
+// alanda CNAME'e alternatif (ve kokte joker * kaydi icin).
+func (s *Server) instructionsFor(ctx context.Context, h store.Hostname) domain.VerificationInstructions {
+	inst := domain.GetInstructions(h.FQDN, h.VerifyToken, s.PlatformDomain)
+	inst.ARecords = domain.PlatformIPv4s(ctx, nil, s.PlatformDomain)
+	return inst
 }
 
 // verifiedParentZone, fqdn'in ust zone'u (or. api.example.net icin example.net) kiracida
@@ -361,7 +376,7 @@ func (s *Server) createCustomHostname(w http.ResponseWriter, r *http.Request) {
 			cancel()
 			resp := customHostnameResponse{
 				Hostname:     h,
-				Instructions: domain.GetInstructions(h.FQDN, h.VerifyToken, s.PlatformDomain),
+				Instructions: s.instructionsFor(r.Context(), h),
 				AutoVerified: true,
 				ParentZone:   parentZone,
 				DNSPointed:   &pointed,
@@ -374,7 +389,7 @@ func (s *Server) createCustomHostname(w http.ResponseWriter, r *http.Request) {
 
 	resp := customHostnameResponse{
 		Hostname:     h,
-		Instructions: domain.GetInstructions(h.FQDN, h.VerifyToken, s.PlatformDomain),
+		Instructions: s.instructionsFor(r.Context(), h),
 	}
 	writeJSON(w, http.StatusCreated, resp)
 }

@@ -65,6 +65,7 @@ func (s *Store) DeleteOrganization(ctx context.Context, tenantID string) ([]stri
 
 	steps := []struct{ what, sql string }{
 		{"istek loglari", `DELETE FROM request_logs WHERE tenant_id = $1`},
+		{"istek govdesi yakalamalari", `DELETE FROM request_captures WHERE tenant_id = $1`},
 		// Bu organizasyonu aktif secmis oturumlar gecersiz kiraciya bakmasin.
 		{"oturumlar", `UPDATE "session" SET "activeOrganizationId" = NULL WHERE "activeOrganizationId" = $1`},
 		{"kiraci", `DELETE FROM tenants WHERE id = $1`},

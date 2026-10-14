@@ -150,6 +150,8 @@ export interface Tunnel {
   exposure?: TunnelExposure
   /** Mod A (rezerve-port) atanan TCP/UDP portu; 0/undefined ise atanmamış. */
   public_port?: number
+  /** Rezerve portun genel host adı (çok IP'li havuzda her IP'nin kendi adı; K3). */
+  public_host?: string
   /** Tünelin yayınlandığı adlar. Bir tünelin BİRDEN ÇOK adı olabilir. */
   hostnames?: Hostname[]
   /** Özel kaynağın adı (F17), ör. "db.internal". Yalnızca exposure === 'private'. */
@@ -169,6 +171,12 @@ export interface VerificationInstructions {
   cname_target: string
   txt_record: string
   txt_value: string
+  /** Kök alan adı (ör. example.org): CNAME kullanılamaz, A kaydı gerekir. */
+  apex?: boolean
+  /** A kaydına yazılacak platform IPv4 adresleri (kökte zorunlu, alt alanda CNAME'e alternatif). */
+  a_records?: string[]
+  /** DNS panelinin "ad" alanına yazılacak etiket: kök için "@", app.ornek.com için "app". */
+  record_name?: string
 }
 
 export interface Hostname {
@@ -306,6 +314,13 @@ export interface DNSCheckResult {
   fqdn: string
   pointed: boolean
   cname_target: string
+  apex?: boolean
+  a_records?: string[] | null
+  record_name?: string
+  /** Kayıt edilebilir alanda platforma işaret eden joker (*.alan) kaydı var mı. */
+  wildcard?: boolean
+  /** Kayıt edilebilir alan (app.example.org -> example.org). */
+  zone?: string
 }
 
 export type VerifyHostnameResponse = Hostname
@@ -383,6 +398,8 @@ export interface TunnelAccess {
     has_password?: boolean
     providers?: string[]
     allowed_emails?: string[]
+    session_ttl_minutes?: number // 0 = varsayılan (12 saat)
+    session_sliding?: boolean
   }
 }
 
@@ -422,6 +439,9 @@ export interface TunnelAccessInput {
     // oauth
     providers?: string[]
     allowed_emails?: string[]
+    // ortak (basic + oauth): ziyaretçi oturumu
+    session_ttl_minutes?: number // 0 = varsayılan; 15..43200
+    session_sliding?: boolean
   }
 }
 

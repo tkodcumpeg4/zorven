@@ -157,6 +157,20 @@ type Plan struct {
 	HasIPAllowlist         bool   `json:"has_ip_allowlist"`
 	ExtraDevicePrice       int    `json:"extra_device_price"`
 	ExtraGBPrice           int    `json:"extra_gb_price"`
+	// FAZ 3.5: nil = sinirsiz.
+	MaxProjects  *int `json:"max_projects"`   // organizasyon basina
+	MaxOwnedOrgs *int `json:"max_owned_orgs"` // kullanici basina (sahip olunan)
+	// MaxShortNames: kiraci basina kisa (global) ad <ad>.<platform> sayisi.
+	// nil = sinirsiz; 0 = hic (Free/Hobby). Pro 1, Team 3, Enterprise 10.
+	MaxShortNames *int `json:"max_short_names"`
+	// MaxReservedPorts: kiraci basina rezerve TCP/UDP port sayisi (K3). nil = sinirsiz.
+	MaxReservedPorts *int `json:"max_reserved_ports"`
+}
+
+// PortAddr, havuzdaki (IP yuva anahtari, port) cifti.
+type PortAddr struct {
+	IP   string
+	Port int
 }
 
 // Subscription, bir kiracinin abonelik ve kaynak limiti detaylari.
@@ -483,6 +497,10 @@ type Tunnel struct {
 	Proto      string `json:"proto"`
 	Exposure   string `json:"exposure"`
 	PublicPort int    `json:"public_port,omitempty"`
+	// PublicIP: tahsisin havuz yuvasi anahtari ("" = birincil IP). PublicHost,
+	// API'nin doldurdugu genel host adi (tunel adresi = PublicHost:PublicPort).
+	PublicIP   string `json:"-"`
+	PublicHost string `json:"public_host,omitempty"`
 
 	// Frozen (FAZ 4): platform admin tarafindan askiya alindiysa true. Dondurulmus
 	// tunel ingress'te "askiya alindi" sayfasi doner.
@@ -643,6 +661,7 @@ type TunnelDoor struct {
 type DoorRoute struct {
 	DurationSec int
 	PublicPort  int    // port-modu icin rezerve port; SNI'de 0
+	PublicIP    string // havuz yuvasi anahtari ("" = birincil IP)
 	TunnelHost  string // tunelin kendi (SNI) hostname'i; bos olabilir
 	Proto       string // tcp | udp
 	Exposure    string // port | sni
@@ -893,6 +912,14 @@ type Store interface {
 	ListReservedPortTunnels(ctx context.Context) ([]Tunnel, error)
 	// SetTunnelPort, tunelin rezerve portunu ayarlar (port>0) veya birakir (port=0 -> NULL).
 	SetTunnelPort(ctx context.Context, tenantID, id string, port int) error
+	// SetTunnelAddr, rezerve (IP, port) ciftini yazar (K3). Cift baska tunelde
+	// kullaniliyorsa hata doner (unique ihlali).
+	SetTunnelAddr(ctx context.Context, tenantID, id, ip string, port int) error
+	// ListReleasedPorts, since'den sonra serbest birakilan (karantinadaki) portlari
+	// doner; eski satirlari da temizler.
+	ListReleasedPorts(ctx context.Context, since time.Time) ([]PortAddr, error)
+	// CountReservedPorts, kiracinin rezerve port tutan tunel sayisi.
+	CountReservedPorts(ctx context.Context, tenantID string) (int, error)
 
 	// --- Kötüye kullanım (FAZ 4, PLATFORM ADMIN) ---
 	//

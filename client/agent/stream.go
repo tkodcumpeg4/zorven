@@ -100,8 +100,11 @@ func (cs *clientSession) handleStreamOpen(m protocol.StreamOpen) {
 		return
 	}
 
-	cs.sendStreamAck(m.ReqID, "", "")
+	// ONCE kaydet, SONRA ack gonder: sunucu ack'i alir almaz ziyaretci verisini
+	// yollar; akis kayitli degilse routeStreamData o baytlari sessizce dusurur
+	// (eszamanli baglantilarda aralikli 19/20 hatasinin kok nedeni).
 	cs.registerStream(m.ReqID, conn)
+	cs.sendStreamAck(m.ReqID, "", "")
 
 	frameType := protocol.FrameStreamData
 	if m.Proto == protocol.ProtoUDP {
