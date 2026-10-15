@@ -6,6 +6,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- Remote screen "screen2" mode: binary tile protocol (only changed 64x64 tiles, JPEG/PNG/solid per region, adaptive quality/fps), canvas compositing in the panel; legacy MJPEG/H.264 kept for old clients.
+- Per-viewer screen settings: shared capture with a server-side tile store; each viewer gets its own fps and one of two quality layers without affecting others.
+- Multi-viewer screen sessions, server-enforced view-only, remote cursor overlay, text clipboard sync (Windows), Ctrl+Alt+Del and shortcut menu, input status badge (applied / blocked by an elevated window / unsupported).
+- File transfer inside a screen session (drag and drop upload, download from an allowed folder; size limits, safe names, no overwrite, sha256 check).
+- Remote input on Linux (X11 XTEST) and macOS capture/input without cgo (purego; macOS 15+ capture needs ScreenCaptureKit, not included yet).
+- Updates / changelog pages with RSS, admin editor, JSON import/export, and opt-in announcement emails (consent at signup, one-time banner, safe unsubscribe page, RFC 8058 one-click, resumable sending).
+- MTA-STS mode and max_age configurable via env; the policy id is logged at startup.
+- Reserved port pool across several public IPs (TCP_BIND_IP1/2, ZORVEN_TCP_BIND_IPS, ZORVEN_TCP_HOSTS in the compose file).
+- Panel language selector is a dropdown.
+
+### Changed
+- Remote screen control (input, clipboard, files, shortcuts) is limited to tenant owners and admins; members can only watch. The decision is made when the screen ticket is issued.
+
+### Fixed
+- CSP blocked blob: images and media, which left MJPEG/H.264 screen sharing black.
+- Markdown links with nested parentheses; a rejected link no longer leaks characters into the output.
+
+### Added
 - Request body capture (opt-in): stored in Postgres (`request_captures`), gzip + AES-GCM with `ZORVEN_SECRET_KEY`, body cap and cache size via env, optional tablespace (`ZORVEN_CAPTURE_TABLESPACE`), pruned by retention (`ZORVEN_CAPTURE_RETENTION_DAYS` upper bound).
 - Reserved TCP/UDP port pool (`ZORVEN_TCP_PORT_MIN/MAX`, `ZORVEN_TCP_BIND_IPS`): allocations are (IP, port) pairs, one pool per IP, quarantine before a freed port is reused; port mode and SNI mode both remain.
 - Visitor sessions for protected tunnels: per-tunnel TTL (15 min - 30 days), optional sliding renewal with a 7-day absolute cap, "end all sessions" / per-identity revocation, events in `tunnel_access_events`.

@@ -37,6 +37,16 @@ type Agent struct {
 	Log        *slog.Logger
 	NoTerminal bool // true ise uzak kabuk (PTY) erisimi tamamen reddedilir
 	NoScreen   bool // true ise uzak ekran paylasimi tamamen reddedilir
+	// NoClipboard true ise ekran paylasiminda pano esitleme ilan edilmez ve
+	// gelen pano mesajlari yok sayilir (--no-clipboard).
+	NoClipboard bool
+	// NoFileTransfer true ise ekran oturumunda dosya aktarimi ilan edilmez ve
+	// gelen dosya mesajlari reddedilir (--no-file-transfer).
+	NoFileTransfer bool
+	// FileDir, dosya aktariminin tek izinli klasoru (bos: <Indirilenler>/Zorven).
+	FileDir string
+	// FileMaxSize, tek dosya boyut tavani, bayt (<=0: 2 GiB).
+	FileMaxSize int64
 	// TerminalPlainZsh / TerminalPlainBash true ise uzak terminalde Zorven
 	// zsh / bash profili (ZDOTDIR / --rcfile) kullanilmaz; kabuk duz baslar.
 	TerminalPlainZsh  bool
@@ -86,6 +96,18 @@ type Agent struct {
 	// flowControl, sunucunun hello_ack'te akis kontrolunu etkinlestirip
 	// etkinlestirmedigi. readLoop bunu clientSession'a aktarir.
 	flowControl bool
+
+	// screenInputStatus, sunucu hello_ack ile screen_input_status'u etkinlestirdiyse true.
+	screenInputStatus bool
+	// screen2, sunucu hello_ack ile screen2'yi etkinlestirdiyse true.
+	screen2 bool
+	// screen2Layers, sunucu hello_ack ile katmanli screen2yi etkinlestirdiyse true.
+	screen2Layers bool
+	// screenCursor / screenClipboard: sunucu hello_ack ile etkinlestirdiyse true.
+	screenCursor    bool
+	screenClipboard bool
+	// screenFiles: sunucu hello_ack ile dosya aktarimini etkinlestirdiyse true.
+	screenFiles bool
 
 	// heartbeatS, sunucunun hello_ack'te bildirdigi ping araligi (sn). Sessiz
 	// (yari olu) baglantiyi tespit eden bosta zaman asimi buradan turetilir.
@@ -323,7 +345,7 @@ func (a *Agent) handshake(ctx context.Context, conn *websocket.Conn) error {
 		Platform:        runtime.GOOS + "/" + runtime.GOARCH,
 		// Akis kontrolunu destekledigimizi bildir. Sunucu desteklemiyorsa
 		// hello_ack'te geri onaylamaz ve eski davranis surer.
-		Features:        []string{protocol.FeatureFlowControl},
+		Features:        a.helloFeatures(),
 		RequestedTarget: a.RequestedTarget,
 		RequestedTTLSec: a.RequestedTTLSec,
 		IsService:       a.IsService,
@@ -361,9 +383,33 @@ func (a *Agent) handshake(ctx context.Context, conn *websocket.Conn) error {
 	// Sunucunun ETKINLESTIRDIGI yetenekler. Eski sunucular Features gondermez
 	// -> flowControl false kalir ve govde kredisiz gonderilir (eski davranis).
 	a.flowControl = false
+	a.screenInputStatus = false
+	a.screen2 = false
+	a.screen2Layers = false
+	a.screenCursor = false
+	a.screenClipboard = false
+	a.screenFiles = false
 	for _, f := range ack.Features {
 		if f == protocol.FeatureFlowControl {
 			a.flowControl = true
+		}
+		if f == protocol.FeatureScreenInputStatus {
+			a.screenInputStatus = true
+		}
+		if f == protocol.FeatureScreen2 {
+			a.screen2 = true
+		}
+		if f == protocol.FeatureScreen2Layers {
+			a.screen2Layers = true
+		}
+		if f == protocol.FeatureScreenCursor {
+			a.screenCursor = true
+		}
+		if f == protocol.FeatureScreenClipboard {
+			a.screenClipboard = true
+		}
+		if f == protocol.FeatureScreenFiles {
+			a.screenFiles = true
 		}
 	}
 
@@ -400,6 +446,12 @@ func (a *Agent) handshake(ctx context.Context, conn *websocket.Conn) error {
 func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) error {
 	cs := newClientSession(conn, a.LocalURL, a.Log)
 	cs.flowControl = a.flowControl // el sikismada pazarlandi
+	cs.screenInputStatus = a.screenInputStatus
+	cs.screen2 = a.screen2
+	cs.screen2Layers = a.screen2 && a.screen2Layers
+	cs.screenCursor = a.screenCursor
+	cs.screenClipboard = a.screenClipboard && !a.NoClipboard
+	cs.screenFiles = a.screenFiles && !a.NoFileTransfer
 	cs.onRequest = a.OnRequest
 	cs.SetTargets(a.tunnels)
 	a.mu.Lock()
@@ -407,6 +459,7 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) error {
 	a.mu.Unlock()
 	tm := newTerminalManager(cs, shells, a.TerminalPlainZsh, a.TerminalPlainBash)
 	sm := newScreenManager(cs)
+	fm := newFileManager(cs, a.Log, a.FileDir, a.FileMaxSize)
 
 	a.mu.Lock()
 	a.terminal = tm
@@ -433,6 +486,7 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) error {
 		a.mu.Unlock()
 		tm.closeAll()
 		sm.closeAll()
+		fm.closeAll()
 		cs.closeAll()
 		refreshSessions()
 	}()
@@ -474,6 +528,15 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) error {
 			frame, derr := protocol.DecodeBodyFrame(data)
 			if derr != nil {
 				a.Log.Warn("bozuk govde cercevesi", "hata", derr)
+				continue
+			}
+			if frame.FrameType == protocol.FrameScreen {
+				continue // sunucu screen2 karesi gondermez; yok say
+			}
+			if frame.FrameType == protocol.FrameFile {
+				if cs.screenFiles && a.settings.screenAllowed() {
+					fm.data(ctx, frame.ReqID, frame.Payload)
+				}
 				continue
 			}
 			if frame.FrameType == protocol.FrameWSData {
@@ -621,6 +684,88 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) error {
 				continue
 			}
 			sm.input(m)
+
+		case protocol.TypeScreen2Keyframe:
+			var m protocol.Screen2Keyframe
+			if err := json.Unmarshal(data, &m); err != nil {
+				continue
+			}
+			sm.screen2Keyframe(m.SessionID)
+
+		case protocol.TypeScreen2Layers:
+			var m protocol.Screen2Layers
+			if err := json.Unmarshal(data, &m); err != nil {
+				continue
+			}
+			sm.screen2Layers(m)
+
+		case protocol.TypeScreen2Settings:
+			var m protocol.Screen2Settings
+			if err := json.Unmarshal(data, &m); err != nil {
+				continue
+			}
+			sm.screen2Settings(m)
+
+		case protocol.TypeScreenClipboard:
+			var m protocol.ScreenClipboard
+			if err := json.Unmarshal(data, &m); err != nil {
+				continue
+			}
+			if !a.settings.screenAllowed() || a.NoClipboard {
+				continue
+			}
+			sm.clipboardSet(m)
+
+		case protocol.TypeScreenClipboardWatch:
+			var m protocol.ScreenClipboardWatch
+			if err := json.Unmarshal(data, &m); err != nil {
+				continue
+			}
+			if !a.settings.screenAllowed() || a.NoClipboard {
+				continue
+			}
+			sm.clipboardWatch(m)
+
+		case protocol.TypeFileOpen:
+			var m protocol.FileOpen
+			if err := json.Unmarshal(data, &m); err != nil {
+				continue
+			}
+			if !cs.screenFiles || !a.settings.screenAllowed() {
+				fm.nack(ctx, m.XferID, protocol.FileErrDisabled, "dosya aktarimi bu istemcide kapatilmistir")
+				continue
+			}
+			fm.open(ctx, m)
+
+		case protocol.TypeFileAck:
+			var m protocol.FileAck
+			if json.Unmarshal(data, &m) == nil && cs.screenFiles {
+				fm.ack(m)
+			}
+
+		case protocol.TypeFileEnd:
+			var m protocol.FileEnd
+			if json.Unmarshal(data, &m) == nil && cs.screenFiles {
+				fm.end(ctx, m)
+			}
+
+		case protocol.TypeFileAbort:
+			var m protocol.FileAbort
+			if json.Unmarshal(data, &m) == nil && cs.screenFiles {
+				fm.abortFromPeer(m.XferID)
+			}
+
+		case protocol.TypeFileList:
+			var m protocol.FileList
+			if err := json.Unmarshal(data, &m); err != nil {
+				continue
+			}
+			if !cs.screenFiles || !a.settings.screenAllowed() {
+				_ = cs.sendControl(ctx, protocol.FileListResult{Type: protocol.TypeFileListResult, ReqID: m.ReqID,
+					Code: protocol.FileErrDisabled}, protocol.TypeFileListResult)
+				continue
+			}
+			go fm.list(ctx, m)
 
 		case protocol.TypeScreenClose:
 			var m protocol.ScreenClose

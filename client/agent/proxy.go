@@ -46,6 +46,18 @@ type clientSession struct {
 	// flowControl, sunucu hello_ack'te akis kontrolunu ETKINLESTIRDIYSE true.
 	// Eski sunucularda false kalir ve govde eskisi gibi kredisiz gonderilir.
 	flowControl bool
+
+	// screenInputStatus, girdi durumu bildirimi pazarlandiysa true (conn.go).
+	screenInputStatus bool
+	// screen2, screen2 modu pazarlandiysa true (conn.go).
+	screen2 bool
+	// screen2Layers, katmanli screen2 pazarlandiysa true (conn.go).
+	screen2Layers bool
+	// screenCursor / screenClipboard, imlec katmani / pano pazarlandiysa true (conn.go).
+	screenCursor    bool
+	screenClipboard bool
+	// screenFiles, dosya aktarimi pazarlandiysa ve yerelde kapatilmadiysa true (conn.go).
+	screenFiles bool
 	// windows, istek basina gonderim kredisi (bkz. flowcontrol.go).
 	windows *windowTable
 
@@ -143,6 +155,16 @@ func (cs *clientSession) sendControl(ctx context.Context, v any, t protocol.Mess
 	wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	return cs.conn.Write(wctx, websocket.MessageText, data)
+}
+
+// sendBinary, hazir kodlanmis ikili mesaji (screen2 kareleri) gonderir.
+func (cs *clientSession) sendBinary(ctx context.Context, b []byte) error {
+	cs.writeMu.Lock()
+	defer cs.writeMu.Unlock()
+
+	wctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	return cs.conn.Write(wctx, websocket.MessageBinary, b)
 }
 
 func (cs *clientSession) sendFrame(ctx context.Context, f protocol.BodyFrame) error {

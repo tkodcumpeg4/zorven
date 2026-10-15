@@ -731,6 +731,53 @@ export function useApi() {
     await req(`/admin/abuse/freeze`, { method: 'POST', body: opts })
   }
 
+  // --- Guncellemeler (platform admin) + duyuru tercihi ---
+
+  async function adminListUpdates(): Promise<{ updates: any[], total: number }> {
+    return req<{ updates: any[], total: number }>(`/admin/updates?limit=200`)
+  }
+  async function adminSaveUpdate(id: string | null, body: Record<string, any>): Promise<any> {
+    return id
+      ? req(`/admin/updates/${encodeURIComponent(id)}`, { method: 'PUT', body })
+      : req(`/admin/updates`, { method: 'POST', body })
+  }
+  async function adminDeleteUpdate(id: string): Promise<void> {
+    await req(`/admin/updates/${encodeURIComponent(id)}`, { method: 'DELETE' })
+  }
+  async function adminPublishUpdate(id: string, publish: boolean): Promise<any> {
+    return req(`/admin/updates/${encodeURIComponent(id)}/${publish ? 'publish' : 'unpublish'}`, { method: 'POST' })
+  }
+  async function adminPreviewUpdate(markdown: string): Promise<string> {
+    const r = await req<{ html: string }>(`/admin/updates/preview`, { method: 'POST', body: { markdown } })
+    return r?.html ?? ''
+  }
+  async function adminImportUpdates(raw: string, o: { mode: string, dryRun: boolean, publish: boolean }): Promise<any> {
+    const qs = `mode=${encodeURIComponent(o.mode)}&dry_run=${o.dryRun}&publish=${o.publish}`
+    return req(`/admin/updates/import?${qs}`, { method: 'POST', body: raw, headers: { 'Content-Type': 'application/json' } })
+  }
+  async function adminExportUpdates(): Promise<any> {
+    return req(`/admin/updates/export`)
+  }
+  async function adminUpdateSubscribers(): Promise<number> {
+    const r = await req<{ count: number }>(`/admin/updates/subscribers`)
+    return r?.count ?? 0
+  }
+  async function adminTestUpdateEmail(id: string, lang: string): Promise<{ sent_to: string }> {
+    return req(`/admin/updates/${encodeURIComponent(id)}/test-email`, { method: 'POST', body: { lang } })
+  }
+  // action: send (varsayilan) | resume (yalniz gonderilmemisler) | retry_failed (yalniz basarisizlar).
+  // force + confirm='RESEND': herkese yeniden gonderir.
+  async function adminSendUpdate(id: string, opts: { action?: 'send' | 'resume' | 'retry_failed', force?: boolean, confirm?: string } = {}): Promise<{ queued: number }> {
+    return req(`/admin/updates/${encodeURIComponent(id)}/send`, { method: 'POST', body: { action: opts.action ?? 'send', force: !!opts.force, confirm: opts.confirm ?? '' } })
+  }
+  // Opt-in: satir yoksa subscribed=false, asked=false (henuz sorulmadi).
+  async function getAnnouncementPref(): Promise<{ subscribed: boolean, asked: boolean, lang: string, source: string }> {
+    return req(`/announcements/preference`)
+  }
+  async function setAnnouncementPref(subscribed: boolean, lang: string, source: 'signup' | 'profile' | 'banner' = 'profile'): Promise<{ subscribed: boolean, asked: boolean, lang: string, source: string }> {
+    return req(`/announcements/preference`, { method: 'PUT', body: { subscribed, lang, source } })
+  }
+
   async function adminSwitchTenant(tenantId: string): Promise<{ success: boolean, tenant: { id: string, slug: string } }> {
     if (USE_MOCK) {
       await delay()
@@ -1157,6 +1204,8 @@ export function useApi() {
     listDevices, getDevice, listNetworkResources, createNetworkResource,
     adminGetStats, adminListTenants, adminListClients, adminListHostnames, adminSwitchTenant,
     adminListAbuseReports, adminFreeze,
+    adminListUpdates, adminSaveUpdate, adminDeleteUpdate, adminPublishUpdate, adminPreviewUpdate, adminImportUpdates, adminExportUpdates,
+    adminUpdateSubscribers, adminTestUpdateEmail, adminSendUpdate, getAnnouncementPref, setAnnouncementPref,
     getSubscription, listPlans,
     listTeamMembers, inviteTeamMember, updateMemberRole, removeTeamMember,
     listMemberTokens, createMemberToken, revokeMemberToken,

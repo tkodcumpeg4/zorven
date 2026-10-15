@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { dateLocale } from '~/plugins/i18n'
 import type { Tunnel, Client, Hostname, TunnelAccessMode, TunnelAccessInput, IPAllowlistRule, TunnelProto, TunnelExposure, TunnelReplica, TunnelMetricsResp, TunnelLBConfig, LBBackendStatus, LBStrategy, TunnelUDPConfig, UDPLiveStats, UDPStatMinute, GameStatus, TunnelDoor, DoorGrant, AccessEvent, AccessEventSummary } from '~/types/api'
 // TrafficPolicy/TrafficConfig useApi üzerinden kullanılıyor; burada form state yerel tiptir.
 
@@ -1625,7 +1626,7 @@ async function remove(tn: Tunnel) {
                   class="flex-1 rounded-t"
                   :class="b.error_count > 0 ? 'bg-danger/70' : 'bg-accent/60'"
                   :style="{ height: Math.max(2, Math.round(b.count / metricsMaxCount * 100)) + '%' }"
-                  :title="`${new Date(b.bucket).toLocaleString('tr-TR')} · ${b.count} istek · ${b.error_count} hata · ~${Math.round(b.avg_ms)}ms`"
+                  :title="`${new Date(b.bucket).toLocaleString(dateLocale())} · ${b.count} · ${b.error_count} 5xx · ~${Math.round(b.avg_ms)}ms`"
                 />
               </div>
               <div class="mt-2 flex items-center gap-3 text-[10px] text-fg-subtle">

@@ -303,7 +303,7 @@ const currentCmd = computed(() => {
                   <div>
                     <div class="flex justify-between text-[11px] text-fg-muted mb-0.5">
                       <span>CPU</span>
-                      <span class="font-mono font-medium" :class="c.metrics.cpu_percent > 85 ? 'text-danger' : 'text-fg'">%{{ c.metrics.cpu_percent.toFixed(0) }}</span>
+                      <span class="font-mono font-medium" :class="c.metrics.cpu_percent > 85 ? 'text-danger' : 'text-fg'">{{ pct(c.metrics.cpu_percent) }}</span>
                     </div>
                     <div class="h-1.5 w-full rounded-full bg-surface-2 overflow-hidden">
                       <div
@@ -319,7 +319,7 @@ const currentCmd = computed(() => {
                     <div class="flex justify-between text-[11px] text-fg-muted mb-0.5">
                       <span>RAM</span>
                       <span class="font-mono font-medium" :class="c.metrics.memory_percent > 85 ? 'text-danger' : 'text-fg'">
-                        %{{ c.metrics.memory_percent.toFixed(0) }}
+                        {{ pct(c.metrics.memory_percent) }}
                         <span v-if="c.metrics.memory_used_mb" class="text-[10px] text-fg-subtle font-normal">({{ (c.metrics.memory_used_mb / 1024).toFixed(1) }} GB)</span>
                       </span>
                     </div>
@@ -340,8 +340,8 @@ const currentCmd = computed(() => {
                 <div v-else-if="c.last_metrics" class="text-[10px] leading-relaxed text-fg-subtle">
                   <div>{{ t('clients.lastKnownMetrics') }}</div>
                   <div class="font-mono">
-                    CPU %{{ c.last_metrics.cpu_percent.toFixed(0) }} ·
-                    RAM %{{ c.last_metrics.memory_percent.toFixed(0) }}
+                    CPU {{ pct(c.last_metrics.cpu_percent) }} ·
+                    RAM {{ pct(c.last_metrics.memory_percent) }}
                   </div>
                 </div>
                 <span v-else class="text-xs text-fg-muted">—</span>

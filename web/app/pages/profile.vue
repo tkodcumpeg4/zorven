@@ -3,7 +3,8 @@ import { authClient } from '~/lib/auth-client'
 
 const { method, user, updateName, changeEmail, changePassword } = useAuth()
 const toast = useToast()
-const { t } = useI18n()
+const { t, locale } = useI18n()
+const api = useApi()
 
 const loading = ref(true)
 const currentName = ref('')
@@ -51,7 +52,28 @@ async function loadSession() {
   }
 }
 
-onMounted(loadSession)
+
+// Urun duyurusu e-postasi tercihi (opt-in: satir yoksa kapali)
+const announce = ref(false)
+const announceBusy = ref(false)
+async function loadAnnounce() {
+  try { announce.value = (await api.getAnnouncementPref()).subscribed } catch { /* tercih okunamazsa varsayilan */ }
+}
+async function toggleAnnounce() {
+  announceBusy.value = true
+  const next = !announce.value
+  try {
+    // Panel dili e-postanin dilini belirler.
+    announce.value = (await api.setAnnouncementPref(next, String(locale.value), 'profile')).subscribed
+    toast.success(t('profile.announceSaved'))
+  } catch {
+    toast.error(t('profile.announceFailed'))
+  } finally {
+    announceBusy.value = false
+  }
+}
+
+onMounted(() => { loadSession(); loadAnnounce() })
 
 async function saveName() {
   const n = nameInput.value.trim()
@@ -163,6 +185,16 @@ async function savePassword() {
             {{ emailBusy ? '...' : t('profile.changeBtn') }}
           </button>
         </div>
+      </section>
+
+      <!-- Urun duyurulari -->
+      <section class="rounded-xl border border-line bg-surface/60 p-5">
+        <h3 class="text-sm font-semibold text-fg">{{ t('profile.announceTitle') }}</h3>
+        <p class="mt-0.5 text-xs text-fg-muted">{{ t('profile.announceHint') }}</p>
+        <label class="mt-3 flex items-center gap-2 text-sm text-fg">
+          <input type="checkbox" :checked="announce" :disabled="announceBusy" class="size-4 accent-[var(--color-accent,#3ddc84)]" @change="toggleAnnounce">
+          {{ t('profile.announceLabel') }}
+        </label>
       </section>
 
       <!-- Şifre -->

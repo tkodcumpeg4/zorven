@@ -20,12 +20,20 @@ const api = useApi()
 const { adminTenant } = useAdminTenant()
 const toast = useToast()
 const { isLight, toggleTheme, initTheme } = useTheme()
-const { t, locale } = useI18n()
+const { t } = useI18n()
 
-function switchLang() {
-  const next = locale.value === 'tr' ? 'en' : 'tr'
-  locale.value = next as any
-  try { localStorage.setItem('zorven_lang', next) } catch { /* erişim yok */ }
+// Urun duyurusu e-postasi (opt-in): bekleyen kayit secimini uygula; hic sorulmamissa bir kez bant goster.
+const { showBanner: announceBanner, busy: announceBusy, init: initAnnounce, answer: answerAnnounce } = useAnnouncementConsent()
+let announceChecked = false
+watch(() => [authed.value, method.value, user.value?.email], () => {
+  if (announceChecked || !authed.value || method.value !== 'better-auth' || !user.value?.email) return
+  announceChecked = true
+  initAnnounce(user.value.email)
+}, { immediate: true })
+async function onAnnounceAnswer(yes: boolean) {
+  const ok = await answerAnnounce(yes)
+  if (!ok) toast.error(t('profile.announceFailed'))
+  else if (yes) toast.success(t('profile.announceSaved'))
 }
 
 onMounted(() => {
@@ -58,6 +66,7 @@ const nav = computed(() => {
   }
   if (platformAdmin.value) {
     items.push({ to: '/platform', label: t('nav.platform'), icon: 'lucide:server' })
+    items.push({ to: '/platform-updates', label: t('nav.updates'), icon: 'lucide:megaphone' })
   }
   return items
 })
@@ -422,17 +431,8 @@ watch(authed, (isAuth) => {
             <span class="hidden sm:inline">{{ t('header.logout') }}</span>
           </button>
 
-          <!-- Dil Değiştirici (TR / EN) -->
-          <button
-            type="button"
-            class="grid h-8 min-w-8 cursor-pointer place-items-center rounded-lg border border-line px-2
-                   font-mono text-[11px] font-semibold text-fg-muted transition-all duration-200 hover:bg-surface hover:text-fg hover:border-accent/40 active:scale-95"
-            :title="locale === 'tr' ? 'English' : 'Türkçe'"
-            :aria-label="locale === 'tr' ? 'English' : 'Türkçe'"
-            @click="switchLang"
-          >
-            {{ locale === 'tr' ? 'EN' : 'TR' }}
-          </button>
+          <!-- Dil Secici (acilir menu) -->
+          <LangSelect />
 
           <!-- Tema Degistirici (Aydinlik / Koyu) -->
           <button
@@ -593,6 +593,24 @@ watch(authed, (isAuth) => {
 
 
     <div class="lg:pl-64">
+      <!-- Urun duyurusu e-postasi izni (yalniz hic sorulmamis kullanicilara, bir kez) -->
+      <div v-if="announceBanner" class="relative z-10 mx-auto mt-4 max-w-6xl px-4 sm:px-5">
+        <div class="flex flex-col gap-3 rounded-xl border border-accent/40 bg-surface/80 p-4 sm:flex-row sm:items-center">
+          <Icon name="lucide:megaphone" class="size-5 shrink-0 text-accent" />
+          <div class="min-w-0 flex-1">
+            <div class="text-sm font-medium text-fg">{{ t('profile.announceBannerTitle') }}</div>
+            <div class="text-xs text-fg-muted">{{ t('profile.announceBannerBody') }}</div>
+          </div>
+          <div class="flex shrink-0 items-center gap-2">
+            <button :disabled="announceBusy" class="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-on-accent hover:opacity-90 disabled:opacity-50" @click="onAnnounceAnswer(true)">{{ t('profile.announceYes') }}</button>
+            <button :disabled="announceBusy" class="rounded-md border border-line px-3 py-1.5 text-xs text-fg hover:bg-surface disabled:opacity-50" @click="onAnnounceAnswer(false)">{{ t('profile.announceNo') }}</button>
+            <button :disabled="announceBusy" :aria-label="t('profile.announceNo')" class="grid size-7 place-items-center rounded-md text-fg-muted hover:bg-surface hover:text-fg" @click="onAnnounceAnswer(false)">
+              <Icon name="lucide:x" class="size-4" />
+            </button>
+          </div>
+        </div>
+      </div>
+
       <main class="relative z-10 mx-auto max-w-6xl px-4 py-6 sm:px-5 sm:py-8">
         <AdminKeyGate>
           <slot />

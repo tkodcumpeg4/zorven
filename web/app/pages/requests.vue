@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { dateLocale } from '~/plugins/i18n'
 import type { RequestLog, Tunnel, LogFilter, RequestDetail, ReplayResult, ReplayOverrides } from '~/types/api'
 
 const api = useApi()
@@ -356,7 +357,7 @@ function exportData(fmt: 'csv' | 'json') {
       <PanelFrame :label="t('requests.detail')">
         <div v-if="!selected" class="px-4 py-10 text-center text-sm text-fg-muted">{{ t('requests.selectRequest') }}</div>
         <dl v-else class="space-y-3 p-4 text-sm">
-          <div><dt class="label-sys mb-1">{{ t('requests.time') }}</dt><dd class="font-mono text-xs">{{ new Date(selected.ts).toLocaleString('tr-TR') }}</dd></div>
+          <div><dt class="label-sys mb-1">{{ t('requests.time') }}</dt><dd class="font-mono text-xs">{{ new Date(selected.ts).toLocaleString(dateLocale()) }}</dd></div>
           <div><dt class="label-sys mb-1">{{ t('requests.methodStatus') }}</dt><dd class="flex items-center gap-2"><MethodBadge :method="selected.method" /><StatusCode :code="selected.status" /></dd></div>
           <div><dt class="label-sys mb-1">{{ t('requests.hostname') }}</dt><dd class="break-all font-mono text-xs text-fg-muted">{{ selected.hostname || hostOf(selected.tunnel_id) }}</dd></div>
           <div v-if="selected.reject_reason"><dt class="label-sys mb-1">{{ t('requests.rejectReason') }}</dt><dd class="flex items-center gap-2 text-xs"><RejectBadge :reason="selected.reject_reason" /><span class="text-fg-muted">{{ t(`requests.reject.${selected.reject_reason}`) }}</span></dd></div>

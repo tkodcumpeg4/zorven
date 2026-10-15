@@ -435,10 +435,10 @@ async function remove(h: Hostname) {
           <span
             v-if="dnsInfo[selectedInstructionsDomain.id]"
             class="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 font-mono text-[10px] font-semibold"
-            :class="dnsInfo[selectedInstructionsDomain.id].wildcard ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400' : 'border-line bg-bg text-fg-subtle'"
+            :class="dnsInfo[selectedInstructionsDomain.id]?.wildcard ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400' : 'border-line bg-bg text-fg-subtle'"
           >
-            <Icon :name="dnsInfo[selectedInstructionsDomain.id].wildcard ? 'lucide:check-circle' : 'lucide:circle-dashed'" class="size-3" />
-            {{ dnsInfo[selectedInstructionsDomain.id].wildcard ? t('domains.wildPresent') : t('domains.wildAbsent') }}
+            <Icon :name="dnsInfo[selectedInstructionsDomain.id]?.wildcard ? 'lucide:check-circle' : 'lucide:circle-dashed'" class="size-3" />
+            {{ dnsInfo[selectedInstructionsDomain.id]?.wildcard ? t('domains.wildPresent') : t('domains.wildAbsent') }}
           </span>
         </div>
         <p class="mt-1.5 text-[11px] text-fg-muted">{{ t('domains.wildDesc', { zone: dnsInfo[selectedInstructionsDomain.id]?.zone || selectedInstructionsDomain.fqdn }) }}</p>
@@ -460,7 +460,7 @@ async function remove(h: Hostname) {
             <span class="text-fg-subtle block">{{ t('domains.targetValue') }}</span>
             <div class="flex items-center justify-between rounded bg-bg px-2 py-1 font-mono text-[11px]">
               <span>{{ apexIPs(selectedInstructionsDomain)[0] }}</span>
-              <button class="text-fg-muted hover:text-fg" @click="copyText(apexIPs(selectedInstructionsDomain)[0], 'w-ip')">
+              <button class="text-fg-muted hover:text-fg" @click="copyText(apexIPs(selectedInstructionsDomain)[0] ?? '', 'w-ip')">
                 <Icon :name="copiedKey === 'w-ip' ? 'lucide:check' : 'lucide:copy'" class="size-3.5" />
               </button>
             </div>
@@ -740,7 +740,7 @@ async function remove(h: Hostname) {
                     {{ t('domains.pendingVerify') }}
                   </span>
                   <button
-                    v-if="h.verified && dnsInfo[h.id] && !dnsInfo[h.id].pointed"
+                    v-if="h.verified && dnsInfo[h.id] && !dnsInfo[h.id]?.pointed"
                     type="button"
                     class="ml-1 inline-flex cursor-pointer items-center gap-1 rounded border px-1.5 py-0.5 font-mono text-[10px] font-semibold
                            border-amber-300 bg-amber-50 text-amber-800

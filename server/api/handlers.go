@@ -43,6 +43,9 @@ type Server struct {
 	Logger  *slog.Logger
 	Version string
 
+	// screen2Hubs, paylasimli screen2 yayinlari (istemci basina tek yakalama).
+	screen2Hubs screen2Registry
+
 	// Captures, FAZ 2 istek inspector deposu (opt-in tam yakalama). nil olabilir.
 	Captures *reqlog.CaptureStore
 
@@ -117,6 +120,9 @@ type Server struct {
 	MailDomain string
 	// MailSender, giden e-postalari relay'e teslim eder (nil ise gonderim kapali).
 	MailSender *mail.Sender
+
+	// AnnounceKey, duyuru e-postasi abonelikten cikma jetonlarinin HMAC anahtari.
+	AnnounceKey []byte
 	// SystemMailboxes, platform (site) sistem adresleridir (info@zorven.app,
 	// sales@zorven.app ...). YALNIZCA platform admin (owner) bu adreslerden
 	// gonderebilir ve bunlara gelenler ten_default'a dusup owner panelinde gorunur.
@@ -174,6 +180,7 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("GET /api/v1/health", s.health)
 	mux.HandleFunc("GET /api/v1/status", s.statusPublic)
 	mux.HandleFunc("GET /api/v1/me", s.me)
+	s.registerUpdates(mux)
 	mux.HandleFunc("GET /api/v1/my-ip", s.myIP)
 	mux.HandleFunc("GET /api/v1/openapi.yaml", s.openapiSpec)
 	mux.HandleFunc("GET /api/v1/openapi.en.yaml", s.openapiSpecEN)
@@ -215,6 +222,9 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("GET /api/v1/clients/{id}/terminal", s.terminalHandler)
 	mux.HandleFunc("POST /api/v1/screen-ticket", s.issueScreenTicket)
 	mux.HandleFunc("GET /api/v1/clients/{id}/screen", s.screenHandler)
+	mux.HandleFunc("POST /api/v1/clients/{id}/screen-files", s.screenFilePut)
+	mux.HandleFunc("GET /api/v1/clients/{id}/screen-files", s.screenFileList)
+	mux.HandleFunc("GET /api/v1/clients/{id}/screen-files/download", s.screenFileDownload)
 
 	mux.HandleFunc("GET /api/v1/tunnels", s.listTunnels)
 	mux.HandleFunc("POST /api/v1/tunnels", s.createTunnel)

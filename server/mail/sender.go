@@ -48,6 +48,13 @@ func NewSender(relayAddr, domain string) *Sender {
 // htmlBody bos gecilebilir; doluysa e-posta multipart/alternative (text + html)
 // olarak gonderilir (istemciler HTML'i gosterir, metin fallback kalir).
 func (s *Sender) Send(from, to, subject, body, htmlBody, inReplyTo string, attachments []Attachment) (string, error) {
+	return s.SendWithHeaders(from, to, subject, body, htmlBody, inReplyTo, nil, attachments)
+}
+
+// SendWithHeaders, Send ile aynidir; ek olarak extraHeaders ("Ad: deger" satirlari,
+// or. List-Unsubscribe) mesaj basligina eklenir. Satirlar CR/LF icermemeli ve
+// bicimi "Ad: deger" olmali; aksi halde hata doner (baslik enjeksiyonu yok).
+func (s *Sender) SendWithHeaders(from, to, subject, body, htmlBody, inReplyTo string, extraHeaders []string, attachments []Attachment) (string, error) {
 	// Gonderen ve alici TEK ayristiricidan (ParseAddress) gecer; basliga ve
 	// SMTP zarfina ayni yalin adres yazilir (kisit/zarf ayrismasi olmasin).
 	var err error
@@ -64,6 +71,18 @@ func (s *Sender) Send(from, to, subject, body, htmlBody, inReplyTo string, attac
 
 	messageID := fmt.Sprintf("<%s@%s>", randHex(16), s.domain)
 	msg := s.buildMessage(from, to, subject, body, htmlBody, inReplyTo, messageID, attachments)
+	if len(extraHeaders) > 0 {
+		var hb strings.Builder
+		for _, h := range extraHeaders {
+			name, val, ok := strings.Cut(h, ":")
+			if !ok || strings.TrimSpace(name) == "" || strings.ContainsAny(name, " \t") || !ValidHeaderValue(h) {
+				return "", fmt.Errorf("ek baslik gecersiz: %q", name)
+			}
+			hb.WriteString(strings.TrimSpace(name) + ": " + strings.TrimSpace(val) + "\r\n")
+		}
+		// Ek basliklar MIME-Version'dan once (ust baslik bolumune) eklenir.
+		msg = strings.Replace(msg, "MIME-Version: 1.0\r\n", hb.String()+"MIME-Version: 1.0\r\n", 1)
+	}
 
 	if s.Local != nil && s.Local.IsLocalDomain(to) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

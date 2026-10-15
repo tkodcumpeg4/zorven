@@ -246,6 +246,30 @@ func (h *Handler) handshake(ctx context.Context, s *Session) error {
 			s.flowControl = true
 			enabled = append(enabled, protocol.FeatureFlowControl)
 		}
+		if f == protocol.FeatureScreenInputStatus {
+			s.screenInputStatus = true
+			enabled = append(enabled, protocol.FeatureScreenInputStatus)
+		}
+		if f == protocol.FeatureScreen2 {
+			s.screen2 = true
+			enabled = append(enabled, protocol.FeatureScreen2)
+		}
+		if f == protocol.FeatureScreen2Layers {
+			s.screen2Layers = true
+			enabled = append(enabled, protocol.FeatureScreen2Layers)
+		}
+		if f == protocol.FeatureScreenCursor {
+			s.screenCursor = true
+			enabled = append(enabled, protocol.FeatureScreenCursor)
+		}
+		if f == protocol.FeatureScreenFiles {
+			s.screenFiles = true
+			enabled = append(enabled, protocol.FeatureScreenFiles)
+		}
+		if f == protocol.FeatureScreenClipboard {
+			s.screenClipboard = true
+			enabled = append(enabled, protocol.FeatureScreenClipboard)
+		}
 	}
 
 	tunnels, err := h.Store.ListTunnelsByClient(ctx, s.ClientID)

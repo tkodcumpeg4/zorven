@@ -76,6 +76,29 @@ type Session struct {
 	// window_update GONDERILMEZ; eski istemciler kirilmaz.
 	flowControl bool
 
+	// screenInputStatus, istemci screen_input_status gonderebiliyorsa true
+	// (el sikismada yazilir, sonra yalniz okunur).
+	screenInputStatus bool
+
+	// screen2, istemci screen2 (ikili karo) modunu destekliyorsa true
+	// (el sikismada yazilir, sonra yalniz okunur).
+	screen2 bool
+	// screen2Layers, istemci katmanli screen2'yi (karo hizali, izleyici basina
+	// ayar) pazarladiysa true.
+	screen2Layers bool
+
+	// screenCursor / screenClipboard, istemci imlec katmani / pano yetenegini
+	// pazarladiysa true (el sikismada yazilir, sonra yalniz okunur).
+	screenCursor    bool
+	screenClipboard bool
+	// screenFiles, istemci ekran oturumu dosya aktarimini pazarladiysa true.
+	screenFiles bool
+	// Dosya aktarimlari (files.go); fileMu altinda, tembel olusturulur.
+	fileMu   sync.Mutex
+	files    map[uint64]*srvXfer
+	fileList map[uint64]chan protocol.FileListResult
+	fileSeq  atomic.Uint64
+
 	// creditMu, istek basina biriken kredi iadesini korur.
 	creditMu sync.Mutex
 	credit   map[uint64]int
@@ -90,6 +113,12 @@ type Session struct {
 	scrMu   sync.Mutex
 	scrSubs map[string]chan<- protocol.ScreenFrame
 	scrErr  map[string]chan<- protocol.ScreenError
+	scrInp  map[string]chan<- protocol.ScreenInputStatus
+	// screen2 akislari: stream id -> abone; session_id -> stream id.
+	scr2    map[uint64]*screen2Sub
+	scr2Ids map[string]uint64
+	// imlec/pano mesajlari: session_id -> abone (bkz. screen_aux.go).
+	scrAux map[string]chan<- ScreenAux
 
 	// Aktif WebSocket passthrough akislari: req_id -> koprü.
 	wsMu      sync.Mutex
@@ -117,6 +146,10 @@ func NewSession(id, clientID, clientName, remoteAddr string, conn *websocket.Con
 		termExit:    make(map[string]chan<- protocol.TerminalExit),
 		scrSubs:     make(map[string]chan<- protocol.ScreenFrame),
 		scrErr:      make(map[string]chan<- protocol.ScreenError),
+		scrInp:      make(map[string]chan<- protocol.ScreenInputStatus),
+		scr2:        make(map[uint64]*screen2Sub),
+		scrAux:      make(map[string]chan<- ScreenAux),
+		scr2Ids:     make(map[string]uint64),
 	}
 }
 
@@ -194,6 +227,7 @@ func (s *Session) Run(ctx context.Context) error {
 	// Ayni sekilde acik WebSocket akislarini da serbest birak.
 	defer s.closeAllWS()
 	defer s.closeAllRaw()
+	defer s.closeAllFiles()
 
 	go s.heartbeat(ctx, cancel)
 
@@ -236,6 +270,14 @@ func (s *Session) Run(ctx context.Context) error {
 				continue
 			}
 			s.badFrames.Store(0)
+			if frame.FrameType == protocol.FrameScreen {
+				s.routeScreen2(data)
+				continue
+			}
+			if frame.FrameType == protocol.FrameFile {
+				s.routeFileData(frame)
+				continue
+			}
 			s.routeBodyFrame(frame)
 		}
 	}
@@ -390,6 +432,30 @@ func (s *Session) handleControl(ctx context.Context, data []byte) error {
 			default:
 			}
 		}
+
+	case protocol.TypeScreenInputStatus:
+		var m protocol.ScreenInputStatus
+		if err := json.Unmarshal(data, &m); err != nil {
+			return err
+		}
+		s.scrMu.Lock()
+		ch := s.scrInp[m.SessionID]
+		s.scrMu.Unlock()
+		if ch != nil {
+			select {
+			case ch <- m:
+			default:
+			}
+		}
+
+	case protocol.TypeScreenCursor, protocol.TypeScreenCursorShape, protocol.TypeScreenClipboard:
+		// Bozuk/asiri buyuk mesaj okuma dongusunu dusurmez; yalnizca atilir.
+		s.routeScreenAux(t, data)
+
+	case protocol.TypeFileOpenAck, protocol.TypeFileAck, protocol.TypeFileEnd,
+		protocol.TypeFileDone, protocol.TypeFileAbort, protocol.TypeFileListResult:
+		// Bozuk/beklenmeyen dosya mesaji okuma dongusunu dusurmez; atilir.
+		s.routeFileCtl(t, data)
 
 	case protocol.TypeHTTPError:
 		var msg protocol.HTTPError
@@ -630,6 +696,16 @@ func (s *Session) OpenScreen(ctx context.Context, sessionID string, fps, quality
 	}, protocol.TypeScreenOpen)
 }
 
+// SubscribeScreenInputStatus, oturumun girdi durumu bildirimlerine abone olur
+// ve istemcinin bu yetenegi destekleyip desteklemedigini doner. CloseScreen
+// aboneligi temizler.
+func (s *Session) SubscribeScreenInputStatus(sessionID string, ch chan<- protocol.ScreenInputStatus) (supported bool) {
+	s.scrMu.Lock()
+	s.scrInp[sessionID] = ch
+	s.scrMu.Unlock()
+	return s.screenInputStatus
+}
+
 // ScreenInput, fare/klavye olayini istemciye iletir.
 func (s *Session) ScreenInput(ctx context.Context, in protocol.ScreenInput) error {
 	in.Type = protocol.TypeScreenInput
@@ -641,6 +717,12 @@ func (s *Session) CloseScreen(ctx context.Context, sessionID string) {
 	s.scrMu.Lock()
 	delete(s.scrSubs, sessionID)
 	delete(s.scrErr, sessionID)
+	delete(s.scrInp, sessionID)
+	delete(s.scrAux, sessionID)
+	if id, ok := s.scr2Ids[sessionID]; ok {
+		delete(s.scr2, id)
+		delete(s.scr2Ids, sessionID)
+	}
 	s.scrMu.Unlock()
 
 	_ = s.Send(ctx, protocol.ScreenClose{

@@ -4,14 +4,15 @@ const props = defineProps<{
 }>()
 
 const { t } = useI18n()
+// Metin computed icinde cozulur: dil degisince etiket de guncellenir.
 const map = {
-  online:   { text: t('status.online'), dot: 'bg-accent',      fg: 'text-accent',    pulse: true },
-  offline:  { text: t('status.offline'), dot: 'bg-fg-subtle',  fg: 'text-fg-subtle', pulse: false },
-  enabled:  { text: t('status.enabled'), dot: 'bg-accent',      fg: 'text-accent',    pulse: false },
-  disabled: { text: t('status.disabled'), dot: 'bg-warn',        fg: 'text-warn',      pulse: false },
+  online:   { key: 'status.online', dot: 'bg-accent',      fg: 'text-accent',    pulse: true },
+  offline:  { key: 'status.offline', dot: 'bg-fg-subtle',  fg: 'text-fg-subtle', pulse: false },
+  enabled:  { key: 'status.enabled', dot: 'bg-accent',      fg: 'text-accent',    pulse: false },
+  disabled: { key: 'status.disabled', dot: 'bg-warn',        fg: 'text-warn',      pulse: false },
 }
 
-const s = computed(() => map[props.status])
+const s = computed(() => ({ ...map[props.status], text: t(map[props.status].key) }))
 </script>
 
 <template>

@@ -48,8 +48,13 @@ services:
       - "465:465"
       # Ham TCP/UDP rezerve-port tünelleri (FAZ 3 / D2, Mod A). Bu aralıktan her
       # tünele bir port atanır (<alan-adi>:PORT). Firewall'da da açık olmalı.
-      - "10000-10099:10000-10099"
-      - "10000-10099:10000-10099/udp"
+      # Iki IP'li kurulum (K3 Faz 5): birincil aralik TCP_BIND_IP1'e, ikinci IP'nin
+      # 10000-10099'u kapsayicinin 20000-20099'una baglanir (ZORVEN_TCP_BIND_IPS'teki
+      # +10000 kaydirmasi). Tek IP'de varsayilanlar bugunku davranisi korur.
+      - "${TCP_BIND_IP1:-0.0.0.0}:10000-10099:10000-10099"
+      - "${TCP_BIND_IP1:-0.0.0.0}:10000-10099:10000-10099/udp"
+      - "${TCP_BIND_IP2:-127.0.0.1}:10000-10099:20000-20099"
+      - "${TCP_BIND_IP2:-127.0.0.1}:10000-10099:20000-20099/udp"
     environment:
       - ZORVEN_DB_DSN=postgres://${POSTGRES_USER:-rpshell}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD gerekli (deploy/.env)}@postgres:5432/${POSTGRES_DB:-rpshell}?sslmode=disable
       - ZORVEN_PLATFORM_DOMAIN=${PLATFORM_DOMAIN:-localhost}
@@ -79,6 +84,12 @@ services:
       - GITHUB_CLIENT_SECRET=${GITHUB_CLIENT_SECRET:-}
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
+      # Rezerve port havuzu (bos = tek havuz, tum IP'ler). Or: 203.0.113.7+0,198.51.100.7+10000
+      - ZORVEN_TCP_BIND_IPS=${ZORVEN_TCP_BIND_IPS:-}
+      - ZORVEN_TCP_HOSTS=${ZORVEN_TCP_HOSTS:-}
+      # MTA-STS (bos = testing / varsayilan max_age). 23 Eki: enforce + 604800.
+      - ZORVEN_MTA_STS_MODE=${ZORVEN_MTA_STS_MODE:-}
+      - ZORVEN_MTA_STS_MAX_AGE=${ZORVEN_MTA_STS_MAX_AGE:-}
     volumes:
       # certs bir bind mount: setup öncesi buraya self-signed server.crt/server.key
       # yerleştirilir. DualCertManager bilinmeyen host'lar (ör. IP) için anında

@@ -34,6 +34,10 @@ func main() {
 		logLevel       string
 		enableTerminal bool
 		enableScreen   bool
+		noClipboard    bool
+		noFileTransfer bool
+		fileDir        string
+		fileMaxMB      int
 		noTerminal     bool
 		noScreen       bool
 		noAutoUpdate   bool
@@ -147,6 +151,10 @@ func main() {
 			Log:               log,
 			NoTerminal:        finalNoTerminal,
 			NoScreen:          finalNoScreen,
+			NoClipboard:       noClipboard,
+			NoFileTransfer:    noFileTransfer,
+			FileDir:           fileDir,
+			FileMaxSize:       int64(fileMaxMB) << 20,
 			Version:           version,
 			NoAutoUpdate:      noAutoUpdate,
 			TerminalPlainZsh:  plainZsh,
@@ -221,6 +229,10 @@ func main() {
 		f.BoolVar(&enableScreen, "enable-screen", false, "uzaktan ekran paylasimina izin ver (guvenlik nedeniyle varsayilan kapali)")
 		f.BoolVar(&noTerminal, "no-terminal", false, "uzaktan terminal erisimini kapat")
 		f.BoolVar(&noScreen, "no-screen", false, "uzaktan ekran paylasimini kapat")
+		f.BoolVar(&noClipboard, "no-clipboard", false, "ekran paylasiminda pano esitlemeyi kapat")
+		f.BoolVar(&noFileTransfer, "no-file-transfer", false, "ekran paylasiminda dosya aktarimini kapat")
+		f.StringVar(&fileDir, "file-dir", "", "dosya aktariminin tek izinli klasoru (varsayilan: Indirilenler/Zorven)")
+		f.IntVar(&fileMaxMB, "file-max-mb", 0, "tek dosya boyut siniri, MiB (varsayilan 2048)")
 		f.BoolVar(&noAutoUpdate, "no-auto-update", false, "otomatik guncellemeyi kapat")
 		f.BoolVar(&plainZsh, "terminal-plain-zsh", false, "uzak terminalde Zorven zsh profilini (istem, oneri, vurgulama) kullanma; zsh duz baslar")
 		f.BoolVar(&plainBash, "terminal-plain-bash", false, "uzak terminalde Zorven bash rcfile profilini kullanma")

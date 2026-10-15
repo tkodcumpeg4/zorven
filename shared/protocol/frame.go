@@ -37,7 +37,26 @@ const (
 	// bir datagramdir; sinir korunur, siralama/teslim garantisi yoktur. ReqID = flow id.
 	FrameDatagram uint8 = 5
 
+	// FrameScreen, screen2 uzak ekran karesi parcasini tasir (istemci -> sunucu).
+	// ReqID = ekran akis kimligi (ScreenOpen.StreamID), Seq = kare numarasi,
+	// bayraklar FlagEOF/FlagKeyframe/FlagFirst. Yuk duzeni: bkz. screen2.go ve
+	// docs/screen2-protocol.md. Yalnizca FeatureScreen2 pazarlik edilmisse gonderilir.
+	FrameScreen uint8 = 6
+
+	// FrameFile, ekran oturumu dosya aktarimi parcasini tasir (cift yonlu).
+	// ReqID = aktarim kimligi (FileOpen.XferID), Seq = parca sirasi. Yalnizca
+	// FeatureScreenFiles pazarlanmissa gonderilir; akis kontrolu file_ack ile.
+	FrameFile uint8 = 7
+
 	FlagEOF uint8 = 1 << 0
+	// FlagKeyframe (yalniz FrameScreen): kare tum ekrani tasir; alici once
+	// onceki durumu atabilir. FlagFirst: kareyi olusturan ilk mesaj.
+	FlagKeyframe uint8 = 1 << 1
+	FlagFirst    uint8 = 1 << 2
+	// Katman kimligi (yalniz FrameScreen, FeatureScreen2Layers): bayrak baytinin
+	// bit3-4'u (0..3). Katmansiz akista 0.
+	FlagLayerShift       = 3
+	FlagLayerMask  uint8 = 0x3 << FlagLayerShift
 )
 
 var (
@@ -77,7 +96,7 @@ func DecodeBodyFrame(data []byte) (BodyFrame, error) {
 	}
 	ft := data[0]
 	if ft != FrameRequestBody && ft != FrameResponseBody && ft != FrameWSData &&
-		ft != FrameStreamData && ft != FrameDatagram {
+		ft != FrameStreamData && ft != FrameDatagram && ft != FrameScreen && ft != FrameFile {
 		return BodyFrame{}, fmt.Errorf("%w: %d", ErrUnknownFrame, ft)
 	}
 	return BodyFrame{

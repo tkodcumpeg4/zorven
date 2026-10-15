@@ -32,12 +32,12 @@ func TestCSPReportModeAndAPIDocs(t *testing.T) {
 	if h.Get("Content-Security-Policy") != "" || !strings.Contains(h.Get("Content-Security-Policy-Report-Only"), "'unsafe-eval'") {
 		t.Fatalf("report modu: %v", h)
 	}
-	for _, p := range []string{"/docs/api", "/docs/api.html", "/en/docs/api", "/en/docs/api.html", "/en/docs/api/"} {
+	for _, p := range []string{"/docs/api", "/docs/api.html", "/en/docs/api", "/en/docs/api.html", "/en/docs/api/", "/ja/docs/api", "/ja/docs/api.html"} {
 		if !isAPIDocsPath(p) {
 			t.Errorf("%s API dokumani sayilmali", p)
 		}
 	}
-	for _, p := range []string{"/docs", "/docs/apis", "/clients", "/en/docs", "/api/v1/tunnels", "/docs/api/x"} {
+	for _, p := range []string{"/docs", "/docs/apis", "/clients", "/en/docs", "/ja/docs", "/api/v1/tunnels", "/docs/api/x"} {
 		if isAPIDocsPath(p) || strings.Contains(buildCSP(nil, isAPIDocsPath(p)), "unsafe-eval") {
 			t.Errorf("%s unsafe-eval almamali", p)
 		}
@@ -74,6 +74,17 @@ func TestCSPNoThirdPartyIPService(t *testing.T) {
 	for _, api := range []bool{false, true} {
 		if csp := buildCSP([]string{"https://analytics.example"}, api); strings.Contains(csp, "ipify") {
 			t.Fatalf("CSP ipify icermemeli: %s", csp)
+		}
+	}
+}
+
+// Ekran paylasimi blob: URL'leriyle cizer (MJPEG <img>, H.264 MSE <video>);
+// CSP bunlari engellerse panelde ekran siyah kalir (2026-10-14 olayi).
+func TestCSPAllowsBlobForScreenSharing(t *testing.T) {
+	csp := buildCSP(nil, false)
+	for _, want := range []string{"img-src 'self' data: https: blob:", "media-src 'self' blob:"} {
+		if !strings.Contains(csp, want) {
+			t.Errorf("CSP %q icermiyor: %s", want, csp)
 		}
 	}
 }

@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kbinani/screenshot"
 	"github.com/tkodcumpeg4/zorven/shared/protocol"
 	"golang.org/x/image/draw"
 )
@@ -36,7 +35,14 @@ type screenSession struct {
 	// bounds, YAKALANAN monitorun sanal masaustundeki dikdortgeni.
 	// Girdi koordinatlari bu dikdortgen icinde yorumlanir; aksi halde ikinci
 	// monitoru izlerken tiklamalar birinciye giderdi.
-	bounds displayRect
+	bounds   displayRect
+	boundsMu sync.RWMutex
+
+	// streamID/s2: yalniz screen2 modunda (bkz. screen2.go).
+	streamID uint64
+	s2       *screen2Session
+	// clip: pano izleyici (yalniz screen2 + FeatureScreenClipboard; boundsMu altinda).
+	clip *clipboardWatcher
 
 	// input, girdi olaylarinin kuyrugu.
 	//
@@ -51,6 +57,29 @@ type screenSession struct {
 	// FAZ 7 tanilama: "girdi alinmiyor" raporunda, girdinin sunucudan agent'a
 	// ULASIP ulasmadigini loglardan kesin ayirt edebilmek icin.
 	inputLog sync.Once
+
+	// statusGate, girdi durumu bildirimini kisar (bkz. input_status.go).
+	// Yalniz applyLoop goroutine'i kullanir.
+	statusGate inputStatusGate
+}
+
+func (ss *screenSession) getBounds() displayRect {
+	ss.boundsMu.RLock()
+	defer ss.boundsMu.RUnlock()
+	return ss.bounds
+}
+
+// setBounds, izlenen monitor degisince (screen2) girdi hedefini gunceller.
+func (ss *screenSession) setBounds(b displayRect) {
+	ss.boundsMu.Lock()
+	ss.bounds = b
+	ss.boundsMu.Unlock()
+}
+
+func (ss *screenSession) getS2() *screen2Session {
+	ss.boundsMu.RLock()
+	defer ss.boundsMu.RUnlock()
+	return ss.s2
 }
 
 // screenInputQueue, oturum basina bekleyen girdi olayi siniri.
@@ -85,6 +114,11 @@ const (
 
 // open, ekran yakalamayi baslatir ve kareleri sunucuya akitir.
 func (sm *screenManager) open(parent context.Context, msg protocol.ScreenOpen) {
+	useScreen2 := msg.Mode == protocol.ScreenModeScreen2 && sm.cs.screen2
+	if useScreen2 && platNumDisplays() == 0 {
+		sm.sendError(parent, msg.SessionID, errScreen2Unsupported.Error())
+		return
+	}
 	fps := msg.FPS
 	if fps <= 0 || fps > 30 {
 		fps = defaultFPS
@@ -100,7 +134,7 @@ func (sm *screenManager) open(parent context.Context, msg protocol.ScreenOpen) {
 
 	// Hangi monitor: gecersizse birincile dus.
 	display := msg.Display
-	if display < 0 || display >= screenshot.NumActiveDisplays() {
+	if display < 0 || display >= platNumDisplays() {
 		display = 0
 	}
 
@@ -108,12 +142,13 @@ func (sm *screenManager) open(parent context.Context, msg protocol.ScreenOpen) {
 
 	// Yakalanan monitorun sanal masaustundeki yeri: girdi koordinatlari bunun
 	// icinde yorumlanacak.
-	b := screenshot.GetDisplayBounds(display)
+	b := platBounds(display)
 	ss := &screenSession{
-		id:     msg.SessionID,
-		cancel: cancel,
-		bounds: displayRect{x: b.Min.X, y: b.Min.Y, w: b.Dx(), h: b.Dy()},
-		input:  make(chan protocol.ScreenInput, screenInputQueue),
+		id:       msg.SessionID,
+		cancel:   cancel,
+		bounds:   displayRect{x: b.Min.X, y: b.Min.Y, w: b.Dx(), h: b.Dy()},
+		input:    make(chan protocol.ScreenInput, screenInputQueue),
+		streamID: msg.StreamID,
 	}
 
 	sm.mu.Lock()
@@ -126,6 +161,16 @@ func (sm *screenManager) open(parent context.Context, msg protocol.ScreenOpen) {
 
 	// Girdi uygulayici: okuma dongusunden AYRI goroutine.
 	go sm.applyLoop(ctx, ss)
+
+	// screen2: karo tabanli ikili mod (yalniz FeatureScreen2 pazarlandiysa).
+	if useScreen2 {
+		p := screen2Params{FPS: msg.FPS, Quality: msg.Quality, MaxWidth: msg.MaxWidth, Display: display}
+		if sm.cs.screen2Layers {
+			p.Layers = msg.Layers // bos => eski (katmansiz) davranis
+		}
+		go sm.runScreen2(ctx, ss, p)
+		return
+	}
 
 	// Codec secimi: mode "mjpeg" degilse ve donanim H.264 encoder'i varsa H.264
 	// akisini dene (cok daha akici + dusuk bant genisligi). Basarisiz olursa
@@ -164,12 +209,12 @@ func (sm *screenManager) capture(ctx context.Context, ss *screenSession, display
 		}
 
 		capStart := time.Now()
-		bounds := screenshot.GetDisplayBounds(display)
-		img, err := screenshot.CaptureRect(bounds)
+		bounds := platBounds(display)
+		img, err := platCapture(display)
 		if err != nil {
 			// Masaustu degismis veya kilitlenmis olabilir; tekrar baglanmayi dene
 			attachToInputDesktop()
-			img, err = screenshot.CaptureRect(bounds)
+			img, err = platCapture(display)
 			if err != nil {
 				sm.sendError(ctx, ss.id, "ekran yakalanamadi: "+err.Error())
 				return
@@ -286,7 +331,10 @@ func (sm *screenManager) applyLoop(ctx context.Context, ss *screenSession) {
 			return
 		case msg := <-ss.input:
 			for _, ev := range coalesce(ss.input, msg) {
-				applyInput(ev, ss.bounds)
+				res := applyInput(ev, ss.getBounds())
+				if sm.cs.screenInputStatus && ss.statusGate.Should(res, time.Now()) {
+					sm.sendInputStatus(ctx, ss.id, res)
+				}
 			}
 		}
 	}
@@ -343,6 +391,17 @@ func (sm *screenManager) finish(ss *screenSession) {
 	if cb != nil {
 		cb()
 	}
+}
+
+// sendInputStatus, girdi uygulama durumunu sunucuya bildirir.
+func (sm *screenManager) sendInputStatus(ctx context.Context, id string, res inputResult) {
+	_ = sm.cs.sendControl(ctx, protocol.ScreenInputStatus{
+		Type:      protocol.TypeScreenInputStatus,
+		SessionID: id,
+		State:     res.State,
+		Code:      res.Code,
+		Detail:    res.Detail,
+	}, protocol.TypeScreenInputStatus)
 }
 
 func (sm *screenManager) sendError(ctx context.Context, id, message string) {

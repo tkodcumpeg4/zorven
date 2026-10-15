@@ -38,10 +38,10 @@ func cspModeFromEnv(v string) string {
 	return cspEnforce
 }
 
-// isAPIDocsPath: Scalar API dokumani sayfalari (TR/EN, .html'li ve sonda / ile).
+// isAPIDocsPath: Scalar API dokumani sayfalari (TR/EN/JA, .html'li ve sonda / ile).
 func isAPIDocsPath(p string) bool {
 	p = strings.TrimSuffix(strings.TrimSuffix(p, "/"), ".html")
-	return p == "/docs/api" || p == "/en/docs/api"
+	return p == "/docs/api" || p == "/en/docs/api" || p == "/ja/docs/api"
 }
 
 // buildCSP, yola gore CSP degerini uretir. Harici kaynaklar: Scalar
@@ -61,7 +61,10 @@ func buildCSP(analytics []string, apiDocs bool) string {
 		"default-src 'self'",
 		"script-src " + strings.Join(script, " "),
 		"style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
-		"img-src 'self' data: https:",
+		// blob: ekran paylasimi icin zorunlu: MJPEG kareleri <img src=blob:>,
+		// H.264 MSE akisi <video src=blob:> ile cizilir.
+		"img-src 'self' data: https: blob:",
+		"media-src 'self' blob:",
 		"font-src 'self' data:",
 		"connect-src " + strings.Join(connect, " "),
 		"frame-ancestors 'none'",

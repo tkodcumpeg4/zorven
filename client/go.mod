@@ -7,6 +7,8 @@ toolchain go1.26.6
 require (
 	github.com/aymanbagabas/go-pty v0.2.3
 	github.com/coder/websocket v1.8.15
+	github.com/ebitengine/purego v0.11.1
+	github.com/jezek/xgb v1.1.1
 	github.com/kardianos/service v1.3.0
 	github.com/kbinani/screenshot v0.0.0-20250624051815-089614a94018
 	github.com/minio/selfupdate v0.6.0
@@ -22,7 +24,6 @@ require (
 	github.com/gen2brain/shm v0.1.0 // indirect
 	github.com/godbus/dbus/v5 v5.1.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
-	github.com/jezek/xgb v1.1.1 // indirect
 	github.com/lxn/win v0.0.0-20210218163916-a377121e959e // indirect
 	github.com/spf13/pflag v1.0.9 // indirect
 	github.com/u-root/u-root v0.16.0 // indirect

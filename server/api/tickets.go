@@ -27,6 +27,10 @@ type TicketInfo struct {
 	ClientID  string
 	ExpiresAt time.Time
 	Release   func()
+	// ControlAllowed: ekran biletlerinde, bileti ALAN (kimligi dogrulanmis)
+	// istegin uzak ekrani denetleyip denetleyemeyecegi. WS acilisinda kullanici
+	// baglami yoktur; karar bilet verilirken verilir ve burada tasinir.
+	ControlAllowed bool
 }
 
 // TicketStore, terminal ve ekran WS'leri icin tek kullanimlik biletleri tutar.
@@ -54,6 +58,11 @@ func (ts *TicketStore) issue(kind, tenantID, clientID string) string {
 
 // issueWithRelease, slot tahsis fonksiyonu ile yeni bir bilet uretir.
 func (ts *TicketStore) issueWithRelease(kind, tenantID, clientID string, release func()) string {
+	return ts.issueFull(kind, tenantID, clientID, release, false)
+}
+
+// issueFull, issueWithRelease'in denetim izni de tasiyan hali (ekran biletleri).
+func (ts *TicketStore) issueFull(kind, tenantID, clientID string, release func(), controlAllowed bool) string {
 	b := make([]byte, 24)
 	rand.Read(b)
 	tok := hex.EncodeToString(b)
@@ -65,6 +74,8 @@ func (ts *TicketStore) issueWithRelease(kind, tenantID, clientID string, release
 		ClientID:  clientID,
 		ExpiresAt: time.Now().Add(ticketTTL),
 		Release:   release,
+
+		ControlAllowed: controlAllowed,
 	}
 	ts.mu.Unlock()
 	return tok
@@ -78,15 +89,21 @@ func (ts *TicketStore) redeem(kind, tok string, expectedTenantID, expectedClient
 
 // redeemWithRelease, bileti dogrular, siler ve varsa bagli release fonksiyonunu doner.
 func (ts *TicketStore) redeemWithRelease(kind, tok string, expectedTenantID, expectedClientID string) (string, func(), bool) {
+	info, ok := ts.redeemInfo(kind, tok, expectedTenantID, expectedClientID)
+	return info.TenantID, info.Release, ok
+}
+
+// redeemInfo, redeemWithRelease'in tam bilet bilgisini (ControlAllowed dahil) donen hali.
+func (ts *TicketStore) redeemInfo(kind, tok string, expectedTenantID, expectedClientID string) (TicketInfo, bool) {
 	if tok == "" {
-		return "", nil, false
+		return TicketInfo{}, false
 	}
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 
 	info, ok := ts.tickets[tok]
 	if !ok {
-		return "", nil, false
+		return TicketInfo{}, false
 	}
 	delete(ts.tickets, tok) // tek kullanimlik
 
@@ -94,27 +111,27 @@ func (ts *TicketStore) redeemWithRelease(kind, tok string, expectedTenantID, exp
 		if info.Release != nil {
 			info.Release()
 		}
-		return "", nil, false
+		return TicketInfo{}, false
 	}
 	if info.Kind != kind {
 		if info.Release != nil {
 			info.Release()
 		}
-		return "", nil, false
+		return TicketInfo{}, false
 	}
 	if info.TenantID != "" && expectedTenantID != "" && info.TenantID != expectedTenantID {
 		if info.Release != nil {
 			info.Release()
 		}
-		return "", nil, false
+		return TicketInfo{}, false
 	}
 	if info.ClientID != "" && expectedClientID != "" && info.ClientID != expectedClientID {
 		if info.Release != nil {
 			info.Release()
 		}
-		return "", nil, false
+		return TicketInfo{}, false
 	}
-	return info.TenantID, info.Release, true
+	return info, true
 }
 
 func (ts *TicketStore) janitor() {

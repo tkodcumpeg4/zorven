@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+	"unicode/utf8"
 )
 
 // Version, WSS upgrade sirasinda X-Tunnel-Client-Version basliginda gonderilir.
@@ -91,6 +92,31 @@ const (
 	TypeScreenInput MessageType = "screen_input"
 	TypeScreenClose MessageType = "screen_close"
 	TypeScreenError MessageType = "screen_error"
+	// TypeScreenInputStatus, girdi uygulama durumu (istemci -> sunucu -> dashboard).
+	// Yalnizca FeatureScreenInputStatus pazarlik edilmisse gonderilir.
+	TypeScreenInputStatus MessageType = "screen_input_status"
+	// screen2 kontrol mesajlari (sunucu -> istemci). Yalnizca FeatureScreen2.
+	TypeScreen2Keyframe MessageType = "screen2_keyframe"
+	TypeScreen2Settings MessageType = "screen2_settings"
+	// TypeScreen2Layers, etkin katman kumesini bildirir (sunucu -> istemci).
+	// Yalnizca FeatureScreen2Layers.
+	TypeScreen2Layers MessageType = "screen2_layers"
+	// Imlec katmani ve pano (docs/screen2-protocol.md). Yetenekler:
+	// FeatureScreenCursor / FeatureScreenClipboard.
+	TypeScreenCursor         MessageType = "screen_cursor"          // istemci -> sunucu: konum
+	TypeScreenCursorShape    MessageType = "screen_cursor_shape"    // istemci -> sunucu: imlec bicimi
+	TypeScreenClipboard      MessageType = "screen_clipboard"       // iki yon: pano metni
+	TypeScreenClipboardWatch MessageType = "screen_clipboard_watch" // sunucu -> istemci: pano izlemeyi ac/kapat
+
+	// Ekran oturumu dosya aktarimi (FeatureScreenFiles; bkz. files.go).
+	TypeFileOpen       MessageType = "file_open"        // sunucu -> istemci
+	TypeFileOpenAck    MessageType = "file_open_ack"    // istemci -> sunucu
+	TypeFileAck        MessageType = "file_ack"         // iki yon: tuketilen bayt (kredi)
+	TypeFileEnd        MessageType = "file_end"         // gonderen -> alici: veri bitti + sha256
+	TypeFileDone       MessageType = "file_done"        // istemci -> sunucu: yukleme sonucu
+	TypeFileAbort      MessageType = "file_abort"       // iki yon
+	TypeFileList       MessageType = "file_list"        // sunucu -> istemci
+	TypeFileListResult MessageType = "file_list_result" // istemci -> sunucu
 
 	TypeWindowUpdate MessageType = "window_update"
 )
@@ -458,7 +484,53 @@ type ScreenOpen struct {
 	Quality   int         `json:"quality"`   // JPEG kalitesi 1-100 (0 => varsayilan)
 	MaxWidth  int         `json:"max_width"` // kareyi bu genislige olcekle (0 => tam)
 	Display   int         `json:"display"`   // hangi monitor (0 => birincil)
-	Mode      string      `json:"mode"`      // auto|mjpeg|h264 (bos => auto)
+	Mode      string      `json:"mode"`      // auto|mjpeg|h264|screen2 (bos => auto)
+
+	// StreamID, screen2 modunda ikili karelerin ReqID alanida tasinan sayisal
+	// akis kimligi (sunucu atar). Diger modlarda 0.
+	StreamID uint64 `json:"stream_id,omitempty"`
+
+	// Layers, bos degilse oturum KATMANLI modda acilir (yalniz FeatureScreen2Layers
+	// pazarlandiysa): istemci yalnizca listedeki katmanlari karo hizali kodlar.
+	Layers []Screen2LayerSpec `json:"layers,omitempty"`
+}
+
+// Screen2LayerSpec, bir katmanin parametreleri. ID 0 = yuksek, 1 = dusuk.
+// MaxWidth 0 ise katman 0 icin varsayilan genislik, katman 1 icin katman 0
+// genisliginin yarisi kullanilir. Quality 0 => 70.
+type Screen2LayerSpec struct {
+	ID       int `json:"id"`
+	MaxWidth int `json:"max_width,omitempty"`
+	Quality  int `json:"quality,omitempty"`
+}
+
+// Screen2Layers, etkin katman kumesini TAMAMEN degistirir (sunucu -> istemci).
+// Bos liste: hicbir katman kodlanmaz. Key=true: listedeki tum katmanlar icin
+// tam kare (anahtar kare) gonderilir (bir katman yeniden etkinlestiginde).
+type Screen2Layers struct {
+	Type      MessageType        `json:"type"`
+	SessionID string             `json:"session_id"`
+	Layers    []Screen2LayerSpec `json:"layers"`
+	Key       bool               `json:"key,omitempty"`
+}
+
+// Screen2Keyframe, tam kare (anahtar kare) ister (sunucu -> istemci). Panel
+// yeniden boyutlandirdiginda veya paket/kare kaybinda kullanilir.
+type Screen2Keyframe struct {
+	Type      MessageType `json:"type"`
+	SessionID string      `json:"session_id"`
+}
+
+// Screen2Settings, acik screen2 oturumunun ayarlarini aninda degistirir
+// (sunucu -> istemci). Sifir/negatif degerler "degistirme" demektir; Display
+// icin -1 "degistirme" demektir (0 birincil monitordur).
+type Screen2Settings struct {
+	Type      MessageType `json:"type"`
+	SessionID string      `json:"session_id"`
+	FPS       int         `json:"fps,omitempty"`       // en yuksek hedef FPS
+	Quality   int         `json:"quality,omitempty"`   // en yuksek JPEG kalitesi
+	MaxWidth  int         `json:"max_width,omitempty"` // olcekleme siniri
+	Display   int         `json:"display"`             // -1 => degistirme
 }
 
 // ScreenFrame, tek bir ekran karesi (istemci -> sunucu -> dashboard).
@@ -558,6 +630,119 @@ type ScreenError struct {
 	SessionID string      `json:"session_id"`
 	Message   string      `json:"message"`
 }
+
+// Girdi durumu degerleri (ScreenInputStatus.State).
+const (
+	InputStateOK          = "ok"          // girdi uygulaniyor
+	InputStateBlocked     = "blocked"     // UIPI: yonetici penceresi on planda
+	InputStateUnsupported = "unsupported" // platformda girdi enjeksiyonu yok
+	InputStateNoSession   = "no_session"  // etkilesimli oturum yok (oturum 0 / servis)
+	InputStateError       = "error"       // baska bir hata (Code'a bak)
+	InputStateUnknown     = "unknown"     // yalniz sunucu uretir: eski istemci
+)
+
+// ScreenInputStatus, uzak girdinin gercekten uygulanip uygulanmadigini bildirir
+// (istemci -> sunucu -> dashboard). Her fare olayi icin gonderilmez: oturumun
+// ilk girdisinde, sonra yalnizca durum degisince (ve basarisizken en fazla ~2 sn
+// arayla) gonderilir.
+type ScreenInputStatus struct {
+	Type      MessageType `json:"type"`
+	SessionID string      `json:"session_id"`
+	State     string      `json:"state"`
+	Code      int         `json:"code,omitempty"`   // platform hata kodu (Windows GetLastError)
+	Detail    string      `json:"detail,omitempty"` // kisa aciklama
+}
+
+// FeatureScreenInputStatus, istemcinin screen_input_status gonderebildigini bildirir.
+const FeatureScreenInputStatus = "screen_input_status"
+
+// ScreenModeScreen2, ScreenOpen.Mode degeri: karo tabanli ikili ekran modu.
+const ScreenModeScreen2 = "screen2"
+
+// FeatureScreen2, istemcinin screen2 (karo tabanli, ikili) ekran modunu
+// destekledigini bildirir. Sunucu hello_ack'te yansitirsa istemci modu acar.
+const FeatureScreen2 = "screen2"
+
+// FeatureScreen2Layers, istemcinin screen2 katmanli modunu (karo hizali
+// dikdortgenler, izleyici basina ayar) destekledigini bildirir. Sunucu
+// yansitirsa ve screen_open.layers dolu gelirse istemci katmanli calisir;
+// aksi halde eski screen2 davranisi surer.
+const FeatureScreen2Layers = "screen2_layers"
+
+// FeatureScreenCursor, istemcinin screen_cursor / screen_cursor_shape
+// gonderebildigini bildirir (Windows, Linux X11). Kareler imleci icermez.
+const FeatureScreenCursor = "screen_cursor"
+
+// FeatureScreenClipboard, istemcinin iki yonlu metin panosunu destekledigini
+// bildirir (su an yalniz Windows; --no-clipboard ile ilan edilmez).
+const FeatureScreenClipboard = "screen_clipboard"
+
+// Imlec bicimi ve pano sinirlari. Sunucu ve istemci ayni sinirlari uygular.
+const (
+	MaxCursorDim           = 64       // imlec bicimi en fazla 64x64
+	MaxScreenClipboardSize = 64 << 10 // pano metni en fazla 64 KiB (UTF-8 bayt)
+)
+
+// ScreenCursor, uzak imlecin konumu (istemci -> sunucu -> panel). X/Y screen2
+// tuvalinin (olceklenmis kare) piksel uzayindadir; Visible=false imlec gizli.
+// W/H gonderildigi andaki tuval boyutudur (panel tuval boyutundan farkliysa
+// oranlar). Yalnizca degisince ve en fazla ~30/sn gonderilir.
+type ScreenCursor struct {
+	Type      MessageType `json:"type"`
+	SessionID string      `json:"session_id"`
+	X         int         `json:"x"`
+	Y         int         `json:"y"`
+	Visible   bool        `json:"visible"`
+	W         int         `json:"w,omitempty"`
+	H         int         `json:"h,omitempty"`
+}
+
+// ScreenCursorShape, gecerli imlec bicimi (RGBA). Yalniz imlec tutamaci
+// degisince gonderilir; hotspot (HotX,HotY) bicim piksel uzayindadir.
+type ScreenCursorShape struct {
+	Type      MessageType `json:"type"`
+	SessionID string      `json:"session_id"`
+	W         int         `json:"w"`
+	H         int         `json:"h"`
+	HotX      int         `json:"hot_x"`
+	HotY      int         `json:"hot_y"`
+	Data      []byte      `json:"data"` // W*H*4 bayt RGBA (JSON'da base64)
+}
+
+// Valid, bicimin sinirlar icinde ve veri uzunlugunun tutarli oldugunu soyler.
+func (s ScreenCursorShape) Valid() bool {
+	return s.W > 0 && s.H > 0 && s.W <= MaxCursorDim && s.H <= MaxCursorDim &&
+		len(s.Data) == s.W*s.H*4 &&
+		s.HotX >= 0 && s.HotX < s.W && s.HotY >= 0 && s.HotY < s.H
+}
+
+// ScreenClipboard, pano metni (iki yon). Panel -> istemci: istemcinin panosunu
+// ayarla; istemci -> panel: istemci panosu degisti. Yalniz kontrolcu izleyiciler.
+type ScreenClipboard struct {
+	Type      MessageType `json:"type"`
+	SessionID string      `json:"session_id"`
+	Text      string      `json:"text"`
+}
+
+// ClipboardTextOK, metnin pano sinirlarina uydugunu (<=64 KiB, gecerli UTF-8)
+// soyler.
+func ClipboardTextOK(text string) bool {
+	return len(text) <= MaxScreenClipboardSize && utf8.ValidString(text)
+}
+
+// ScreenClipboardWatch, sunucu -> istemci: Enable=true iken istemci panosunu
+// izler ve degisince screen_clipboard yollar (yalniz kontrolcu izleyici varken
+// acilir; panodaki eski icerik gonderilmez).
+type ScreenClipboardWatch struct {
+	Type      MessageType `json:"type"`
+	SessionID string      `json:"session_id"`
+	Enable    bool        `json:"enable"`
+}
+
+// InputKindSAS, ScreenInput.Kind degeri: Ctrl+Alt+Del (guvenli dikkat dizisi).
+// Yalniz Windows'ta ve istemci servis (SYSTEM) olarak calisiyorsa uygulanir;
+// aksi halde screen_input_status ile hata bildirilir.
+const InputKindSAS = "sas"
 
 // --- Akis kontrolu ---------------------------------------------------------
 

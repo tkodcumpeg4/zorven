@@ -3,6 +3,8 @@ package mail
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -312,22 +314,64 @@ func (h *AutoConfigHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(h.Cfg.AutodiscoverXML(email))
 	case "mtasts":
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = w.Write([]byte(mtaSTSPolicy(os.Getenv("ZORVEN_MTA_STS_MODE"), h.Cfg.Host)))
+		pol, _, _ := MTASTSPolicyFromEnv(h.Cfg.Host)
+		_, _ = w.Write([]byte(pol))
 	default:
 		http.NotFound(w, r)
 	}
 }
 
-// mtaSTSPolicy, RFC 8461 politika dosyasini uretir. Mod ZORVEN_MTA_STS_MODE
-// ile secilir (testing varsayilan; enforce yalniz TLS-RPT raporlari temizken).
-func mtaSTSPolicy(mode, mx string) string {
+// MTA-STS sabitleri (RFC 8461).
+const (
+	mtaSTSMaxAgeLimit = 31557600 // RFC 8461 ust sinir (1 yil)
+	mtaSTSEnforceMin  = 86400    // enforce icin onerilen alt sinir
+)
+
+// mtaSTSSettings, mod ve max_age'i cozer. mode: testing|enforce|none (bos veya
+// bilinmeyen = testing). maxAgeStr bos ise varsayilan: enforce 604800, digeri 86400.
+// Uyarilar log icin doner.
+func mtaSTSSettings(mode, maxAgeStr string) (string, int, []string) {
+	var warns []string
 	maxAge := 86400
 	switch mode {
 	case "enforce":
 		maxAge = 604800
-	case "none":
+	case "testing", "none":
 	default:
+		if mode != "" {
+			warns = append(warns, fmt.Sprintf("bilinmeyen ZORVEN_MTA_STS_MODE %q, testing kullaniliyor", mode))
+		}
 		mode = "testing"
 	}
+	if s := strings.TrimSpace(maxAgeStr); s != "" {
+		n, err := strconv.Atoi(s)
+		switch {
+		case err != nil || n < 0:
+			warns = append(warns, fmt.Sprintf("gecersiz ZORVEN_MTA_STS_MAX_AGE %q, varsayilan %d kullaniliyor", s, maxAge))
+		case n > mtaSTSMaxAgeLimit:
+			warns = append(warns, fmt.Sprintf("ZORVEN_MTA_STS_MAX_AGE %d ust siniri asiyor, %d'e indirildi", n, mtaSTSMaxAgeLimit))
+			maxAge = mtaSTSMaxAgeLimit
+		default:
+			maxAge = n
+		}
+	}
+	if mode == "enforce" && maxAge < mtaSTSEnforceMin {
+		warns = append(warns, fmt.Sprintf("enforce modunda max_age %d < %d; cok kisa", maxAge, mtaSTSEnforceMin))
+	}
+	return mode, maxAge, warns
+}
+
+// MTASTSPolicyFromEnv, ZORVEN_MTA_STS_MODE ve ZORVEN_MTA_STS_MAX_AGE'den politika
+// metnini, _mta-sts TXT icin onerilen kimligi (politika SHA-256 ilk 16 hex) ve
+// uyarilari doner. Politika degisince kimlik de degisir.
+func MTASTSPolicyFromEnv(mx string) (policy, id string, warns []string) {
+	mode, maxAge, warns := mtaSTSSettings(os.Getenv("ZORVEN_MTA_STS_MODE"), os.Getenv("ZORVEN_MTA_STS_MAX_AGE"))
+	policy = mtaSTSPolicy(mode, maxAge, mx)
+	sum := sha256.Sum256([]byte(policy))
+	return policy, hex.EncodeToString(sum[:8]), warns
+}
+
+// mtaSTSPolicy, RFC 8461 politika dosyasini uretir.
+func mtaSTSPolicy(mode string, maxAge int, mx string) string {
 	return fmt.Sprintf("version: STSv1\r\nmode: %s\r\nmx: %s\r\nmax_age: %d\r\n", mode, mx, maxAge)
 }

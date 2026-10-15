@@ -16,6 +16,7 @@ import (
 const (
 	keyPurposeVisitor   = "zorven-visitor-v1"
 	keyPurposeBasicAuth = "zorven-basic-auth-v1"
+	keyPurposeAnnounce  = "zorven-announce-unsub-v1"
 )
 
 // devVisitorSecret yalniz yerel gelistirmede (platform domain yok/localhost) ve

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { dateLocale } from '~/plugins/i18n'
 import type { APIToken, CreateAPITokenResponse, IPAllowlistRule, Tunnel } from '~/types/api'
 
 const api = useApi()
@@ -478,7 +479,7 @@ function isExpired(expiresAt?: string | null) {
                 </td>
                 <td class="py-3 px-4 font-mono text-fg">
                   <span v-if="tok.expires_at" :class="isExpired(tok.expires_at) ? 'text-danger font-bold' : 'text-fg font-medium'">
-                    {{ new Date(tok.expires_at).toLocaleDateString('tr-TR') }}
+                    {{ new Date(tok.expires_at).toLocaleDateString(dateLocale()) }}
                   </span>
                   <span v-else class="text-emerald-700 dark:text-emerald-400 font-bold">{{ t('tokens.noExpiry') }}</span>
                 </td>

@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kbinani/screenshot"
 	"github.com/tkodcumpeg4/zorven/shared/protocol"
 )
 
@@ -66,7 +65,7 @@ func (sm *screenManager) captureH264(ctx context.Context, ss *screenSession, dis
 
 	// Native ekran boyutu: dashboard'un cozunurluk menusu buna gore secenek
 	// uretir. Olceklenmis kare boyutundan cikarilamaz (bkz. protocol.ScreenFrame).
-	bounds := screenshot.GetDisplayBounds(display)
+	bounds := platBounds(display)
 	screenW, screenH := bounds.Dx(), bounds.Dy()
 
 	// gdigrab "desktop": tum sanal masaustunu yakalar. Tek monitor secimi icin

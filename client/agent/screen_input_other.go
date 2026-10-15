@@ -1,4 +1,4 @@
-//go:build !windows
+//go:build !windows && !linux && !darwin
 
 package agent
 
@@ -17,4 +17,6 @@ import "github.com/tkodcumpeg4/zorven/shared/protocol"
 // applyInput imzasi platformlar arasi ayni kalsin diye tanimli.
 type displayRect struct{ x, y, w, h int }
 
-func applyInput(_ protocol.ScreenInput, _ displayRect) {}
+func applyInput(_ protocol.ScreenInput, _ displayRect) inputResult {
+	return inputResult{State: protocol.InputStateUnsupported, Detail: "bu platformda uzaktan girdi yok"}
+}

@@ -80,7 +80,7 @@ const avgCpu = computed(() => {
   const online = clients.value.filter(c => c.status === 'online' && c.metrics?.cpu_percent != null)
   if (!online.length) return '—'
   const total = online.reduce((acc, c) => acc + (c.metrics?.cpu_percent || 0), 0)
-  return `%${Math.round(total / online.length)}`
+  return pct(total / online.length)
 })
 </script>
 
@@ -260,7 +260,7 @@ const avgCpu = computed(() => {
                   <div>
                     <div class="flex justify-between text-[11px] text-fg-muted mb-0.5">
                       <span>{{ t('overview.cpu') }}</span>
-                      <span class="font-mono font-medium" :class="c.metrics.cpu_percent > 85 ? 'text-danger' : 'text-fg'">%{{ c.metrics.cpu_percent.toFixed(0) }}</span>
+                      <span class="font-mono font-medium" :class="c.metrics.cpu_percent > 85 ? 'text-danger' : 'text-fg'">{{ pct(c.metrics.cpu_percent) }}</span>
                     </div>
                     <div class="h-1.5 w-full rounded-full bg-surface-2 overflow-hidden">
                       <div
@@ -276,7 +276,7 @@ const avgCpu = computed(() => {
                     <div class="flex justify-between text-[11px] text-fg-muted mb-0.5">
                       <span>{{ t('overview.ram') }}</span>
                       <span class="font-mono font-medium" :class="c.metrics.memory_percent > 85 ? 'text-danger' : 'text-fg'">
-                        %{{ c.metrics.memory_percent.toFixed(0) }}
+                        {{ pct(c.metrics.memory_percent) }}
                         <span v-if="c.metrics.memory_used_mb" class="text-[10px] text-fg-subtle font-normal">({{ (c.metrics.memory_used_mb / 1024).toFixed(1) }} GB)</span>
                       </span>
                     </div>
@@ -291,7 +291,7 @@ const avgCpu = computed(() => {
 
                   <!-- Disk -->
                   <div v-if="c.metrics.disk_percent" class="text-[10px] text-fg-subtle">
-                    {{ t('overview.disk') }}: %{{ c.metrics.disk_percent.toFixed(0) }}
+                    {{ t('overview.disk') }}: {{ pct(c.metrics.disk_percent) }}
                   </div>
                 </div>
                 <span v-else-if="c.status === 'online'" class="text-xs text-fg-subtle">{{ t('overview.waitingMetrics') }}</span>

@@ -33,6 +33,9 @@ const keyInput = ref('')
 
 const error = ref('')
 const loading = ref(false)
+// Urun duyurusu e-postasi (opt-in): ISARETSIZ baslar, onceden secilmez.
+const announceOptIn = ref(false)
+const { setPending: setAnnouncePending } = useAnnouncementConsent()
 // Kayıt sonrası e-posta doğrulama beklerken dolu olur (oturum henüz açılmadı).
 const signedUpEmail = ref('')
 // Şifremi unuttum akışı
@@ -147,6 +150,8 @@ async function handleSignUp() {
   }
   loading.value = true
   try {
+    // Secim (evet/hayir) once saklanir: dogrulama e-postasi veya oturum sonrasi panelde uygulanir.
+    setAnnouncePending(announceOptIn.value, email.value.trim())
     const r = await signUpWithEmail(email.value.trim(), password.value, name.value.trim())
     if (r.needsVerification) {
       // Hesap oluştu ama oturum açılmadı: e-posta doğrulama ekranını göster.
@@ -162,6 +167,7 @@ async function handleSignUp() {
 
 async function handleSocialGithub() {
   error.value = ''
+  if (announceOptIn.value) setAnnouncePending(true)
   try {
     await loginWithBetterAuthGithub()
   } catch {
@@ -172,6 +178,7 @@ async function handleSocialGithub() {
 
 async function handleSocialGoogle() {
   error.value = ''
+  if (announceOptIn.value) setAnnouncePending(true)
   try {
     await loginWithBetterAuthGoogle()
   } catch (e: any) {
@@ -427,6 +434,10 @@ async function handleKeySubmit() {
               {{ t('auth.googleContinue') }}
             </button>
           </div>
+          <label class="mt-3 flex cursor-pointer items-start gap-2 text-[11px] leading-relaxed text-fg-muted">
+            <input v-model="announceOptIn" type="checkbox" class="mt-0.5 size-4 shrink-0 accent-[var(--color-accent,#3ddc84)]">
+            <span>{{ t('auth.announceOptInSocial') }}</span>
+          </label>
         </div>
 
         <!-- Sözleşme onayı -->
@@ -479,6 +490,11 @@ async function handleKeySubmit() {
             class="w-full rounded-md border border-line bg-bg px-3 py-2 text-sm text-fg placeholder:text-fg-subtle focus:border-accent focus:outline-none"
           />
         </div>
+
+        <label class="flex cursor-pointer items-start gap-2 text-xs leading-relaxed text-fg-muted">
+          <input v-model="announceOptIn" type="checkbox" class="mt-0.5 size-4 shrink-0 accent-[var(--color-accent,#3ddc84)]">
+          <span>{{ t('auth.announceOptIn') }}</span>
+        </label>
 
         <button
           type="submit"

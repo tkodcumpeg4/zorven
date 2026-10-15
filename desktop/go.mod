@@ -20,6 +20,7 @@ require (
 	github.com/bep/debounce v1.2.1 // indirect
 	github.com/coder/websocket v1.8.15 // indirect
 	github.com/creack/pty v1.1.24 // indirect
+	github.com/ebitengine/purego v0.11.1 // indirect
 	github.com/gen2brain/shm v0.1.0 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/godbus/dbus/v5 v5.1.0 // indirect

@@ -3,6 +3,8 @@
 package agent
 
 import (
+	"sync"
+	"syscall"
 	"unsafe"
 
 	"github.com/tkodcumpeg4/zorven/shared/protocol"
@@ -118,29 +120,75 @@ type displayRect struct{ x, y, w, h int }
 // rect, YAKALANAN monitorun sanal masaustundeki konumudur: normalize koordinat
 // o monitorun icinde yorumlanir, sonra sanal masaustune cevrilir. Aksi halde
 // ikinci monitoru izlerken tiklamalar birinciye giderdi.
-func applyInput(msg protocol.ScreenInput, rect displayRect) {
+func applyInput(msg protocol.ScreenInput, rect displayRect) inputResult {
+	if msg.Kind == protocol.InputKindSAS {
+		// Servis oturum 0'da calisir; sessionPrecheck'e takilmamali.
+		return sendSAS()
+	}
+	if pre := sessionPrecheck(); pre.State != protocol.InputStateOK {
+		return pre
+	}
+	res := inputResult{State: protocol.InputStateOK}
 	switch msg.Kind {
 	case "mousemove":
-		moveMouse(msg.X, msg.Y, rect)
+		res = res.merge(moveMouse(msg.X, msg.Y, rect))
 	case "mousedown":
-		moveMouse(msg.X, msg.Y, rect)
-		mouseButton(msg.Button, true)
+		res = res.merge(moveMouse(msg.X, msg.Y, rect))
+		res = res.merge(mouseButton(msg.Button, true))
 	case "mouseup":
-		moveMouse(msg.X, msg.Y, rect)
-		mouseButton(msg.Button, false)
+		res = res.merge(moveMouse(msg.X, msg.Y, rect))
+		res = res.merge(mouseButton(msg.Button, false))
 	case "wheel":
-		wheel(msg.DeltaX, msg.DeltaY, msg.DeltaMode)
+		res = res.merge(wheel(msg.DeltaX, msg.DeltaY, msg.DeltaMode))
 	case "keydown":
-		keyEvent(msg, true)
+		res = res.merge(keyEvent(msg, true))
 	case "keyup":
-		keyEvent(msg, false)
+		res = res.merge(keyEvent(msg, false))
 	}
+	return res
 }
 
-func moveMouse(nx, ny float64, rect displayRect) {
+var (
+	precheckOnce sync.Once
+	precheckRes  inputResult
+)
+
+// sessionPrecheck, surecin etkilesimli bir oturumda olup olmadigina bir kez bakar.
+// Oturum 0 (Windows servisi) girdi masaustune erisemez; SendInput orada ise
+// yaramaz. Sezgisel: ProcessIdToSessionId == 0.
+func sessionPrecheck() inputResult {
+	precheckOnce.Do(func() {
+		precheckRes = inputResult{State: protocol.InputStateOK}
+		var sid uint32
+		if err := windows.ProcessIdToSessionId(windows.GetCurrentProcessId(), &sid); err == nil && sid == 0 {
+			precheckRes = inputResult{State: protocol.InputStateNoSession, Detail: "surec oturum 0'da (servis)"}
+		}
+	})
+	return precheckRes
+}
+
+// rawSendInput, SendInput'u cagirir ve sonucu siniflandirir. SendInput istenenden
+// az olay enjekte ederse ve GetLastError == ERROR_ACCESS_DENIED ise UIPI engeli
+// (on plandaki pencere daha yuksek yetkide) sayilir.
+func rawSendInput(n int, p unsafe.Pointer) inputResult {
+	r1, _, errno := procSendInput.Call(uintptr(n), uintptr(p), inputSize)
+	if int(r1) >= n {
+		return inputResult{State: protocol.InputStateOK}
+	}
+	code := 0
+	if e, ok := errno.(syscall.Errno); ok {
+		code = int(e)
+	}
+	if code == int(windows.ERROR_ACCESS_DENIED) {
+		return inputResult{State: protocol.InputStateBlocked, Code: code, Detail: "SendInput reddedildi (UIPI)"}
+	}
+	return inputResult{State: protocol.InputStateError, Code: code, Detail: "SendInput basarisiz"}
+}
+
+func moveMouse(nx, ny float64, rect displayRect) inputResult {
 	vx, vy, vw, vh := virtualScreen()
 	if vw <= 0 || vh <= 0 {
-		return
+		return inputResult{State: protocol.InputStateOK}
 	}
 
 	// Normalize koordinati once YAKALANAN monitorun piksel uzayina, sonra
@@ -164,10 +212,10 @@ func moveMouse(nx, ny float64, rect displayRect) {
 		dy:      absY,
 		dwFlags: mouseeventfMove | mouseeventfAbsolute | mouseeventfVirtualDesk,
 	}
-	sendInputs(in)
+	return sendInputs(in)
 }
 
-func mouseButton(button int, down bool) {
+func mouseButton(button int, down bool) inputResult {
 	var flag uint32
 	switch button {
 	case 2: // sag (tarayici standardi: 2=sag)
@@ -177,30 +225,32 @@ func mouseButton(button int, down bool) {
 	default: // sol
 		flag = boolPick(down, mouseeventfLeftDown, mouseeventfLeftUp)
 	}
-	sendInputs(mouseInput{typ: inputMouse, dwFlags: flag})
+	return sendInputs(mouseInput{typ: inputMouse, dwFlags: flag})
 }
 
 // wheel, tarayici tekerlek olayini Windows centik birimine cevirir.
 //
 // deltaMode: 0=piksel, 1=satir, 2=sayfa. Ham deltaY gondermek yanlisti:
 // deltaMode=1'de deltaY=3 gelir ve 3/120 centik ≈ hic kaydirma demektir.
-func wheel(dx, dy float64, deltaMode int) {
+func wheel(dx, dy float64, deltaMode int) inputResult {
+	res := inputResult{State: protocol.InputStateOK}
 	if amount := wheelAmount(dy, deltaMode); amount != 0 {
 		// Tarayici: asagi POZITIF. Windows: yukari pozitif → isaret ters.
-		sendInputs(mouseInput{
+		res = res.merge(sendInputs(mouseInput{
 			typ:       inputMouse,
 			mouseData: uint32(int32(-amount)),
 			dwFlags:   mouseeventfWheel,
-		})
+		}))
 	}
 	if amount := wheelAmount(dx, deltaMode); amount != 0 {
 		// Yatay tekerlekte iki taraf da saga pozitif; ters cevirme YOK.
-		sendInputs(mouseInput{
+		res = res.merge(sendInputs(mouseInput{
 			typ:       inputMouse,
 			mouseData: uint32(int32(amount)),
 			dwFlags:   mouseeventfHWheel,
-		})
+		}))
 	}
+	return res
 }
 
 // wheelAmount, tarayici deltasini WHEEL_DELTA (120) birimine cevirir.
@@ -237,15 +287,14 @@ func wheelAmount(delta float64, deltaMode int) int {
 //     duzeninden BAGIMSIZ dogru yazilir.
 //   - Aksi halde (kisayol veya ozel tus): VK yolu. Unicode enjeksiyonu
 //     modifier durumuyla birlesmedigi icin Ctrl+C'yi ancak boyle yapabiliriz.
-func keyEvent(msg protocol.ScreenInput, down bool) {
+func keyEvent(msg protocol.ScreenInput, down bool) inputResult {
 	shortcut := msg.Ctrl || msg.Alt || msg.Meta
 
 	if !shortcut {
 		if r := singleRune(msg.Key); r != 0 && r != ' ' {
 			// Bosluk VK yoluna birakilir: Unicode bosluk bazi uygulamalarda
 			// tus olarak algilanmaz (or. oyunlarda ziplama).
-			typeUnicode(r, down)
-			return
+			return typeUnicode(r, down)
 		}
 	}
 
@@ -253,20 +302,18 @@ func keyEvent(msg protocol.ScreenInput, down bool) {
 	if !ok {
 		// Code gelmediyse (cok eski dashboard) Key uzerinden son bir deneme.
 		if vk, ok = codeToVKShortcut(keyToCode(msg.Key)); !ok {
-			return
+			return inputResult{State: protocol.InputStateOK}
 		}
 	}
 
 	// Modifier tuslarinin KENDISI geldiginde sarmalama yapma: sonsuz dongu
 	// olurdu (Ctrl'yi basmak icin Ctrl'yi basmak).
 	if isModifierVK(vk) {
-		sendKey(vk, down)
-		return
+		return sendKey(vk, down)
 	}
 
 	if !down {
-		sendKey(vk, false)
-		return
+		return sendKey(vk, false)
 	}
 
 	// Kisayol: modifier'lari bas, tusa bas, modifier'lari birak.
@@ -282,7 +329,7 @@ func keyEvent(msg protocol.ScreenInput, down bool) {
 	for i := len(mods) - 1; i >= 0; i-- {
 		batch = append(batch, keyStroke(mods[i], false))
 	}
-	sendKeyBatch(batch)
+	return sendKeyBatch(batch)
 }
 
 // heldModifiers, olayda basili bildirilen modifier'larin VK listesi.
@@ -318,17 +365,17 @@ func isModifierVK(vk uint16) bool {
 }
 
 // typeUnicode, tek bir karakteri Unicode olarak yazar (duzenden bagimsiz).
-func typeUnicode(r rune, down bool) {
+func typeUnicode(r rune, down bool) inputResult {
 	// BMP disi karakterler (emoji vb.) iki UTF-16 birimi ister; yaygin
 	// kullanimda gerekmedigi icin atlaniyor.
 	if r > 0xFFFF {
-		return
+		return inputResult{State: protocol.InputStateOK}
 	}
 	flags := keyeventfUnicode
 	if !down {
 		flags |= keyeventfKeyup
 	}
-	sendKeyBatch([]keybdInput{{typ: inputKeyboard, wScan: uint16(r), dwFlags: flags}})
+	return sendKeyBatch([]keybdInput{{typ: inputKeyboard, wScan: uint16(r), dwFlags: flags}})
 }
 
 func keyStroke(vk uint16, down bool) keybdInput {
@@ -342,22 +389,22 @@ func keyStroke(vk uint16, down bool) keybdInput {
 	return keybdInput{typ: inputKeyboard, wVk: vk, dwFlags: flags}
 }
 
-func sendKey(vk uint16, down bool) {
-	sendKeyBatch([]keybdInput{keyStroke(vk, down)})
+func sendKey(vk uint16, down bool) inputResult {
+	return sendKeyBatch([]keybdInput{keyStroke(vk, down)})
 }
 
-func sendKeyBatch(in []keybdInput) {
+func sendKeyBatch(in []keybdInput) inputResult {
 	if len(in) == 0 {
-		return
+		return inputResult{State: protocol.InputStateOK}
 	}
-	procSendInput.Call(uintptr(len(in)), uintptr(unsafe.Pointer(&in[0])), inputSize)
+	return rawSendInput(len(in), unsafe.Pointer(&in[0]))
 }
 
-func sendInputs(in ...mouseInput) {
+func sendInputs(in ...mouseInput) inputResult {
 	if len(in) == 0 {
-		return
+		return inputResult{State: protocol.InputStateOK}
 	}
-	procSendInput.Call(uintptr(len(in)), uintptr(unsafe.Pointer(&in[0])), inputSize)
+	return rawSendInput(len(in), unsafe.Pointer(&in[0]))
 }
 
 // keyToCode, KeyboardEvent.key'den makul bir code tahmin eder.

@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -38,6 +39,7 @@ import (
 	"github.com/tkodcumpeg4/zorven/server/session"
 	"github.com/tkodcumpeg4/zorven/server/sqliteimport"
 	"github.com/tkodcumpeg4/zorven/server/store"
+	"github.com/tkodcumpeg4/zorven/server/updates"
 	"github.com/tkodcumpeg4/zorven/server/store/pgstore"
 	"github.com/tkodcumpeg4/zorven/server/tlscert"
 	"github.com/tkodcumpeg4/zorven/server/tunnel"
@@ -401,6 +403,7 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				PublicPaths: map[string]bool{
 					"/api/v1/health":               true,
 					"/api/v1/status":               true,
+					api.PublicUpdatesPath:          true,
 					"/api/v1/openapi.yaml":         true,
 					"/api/v1/openapi.en.yaml":      true,
 					"/api/v1/auth/config":          true,
@@ -658,6 +661,25 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 
 			dash := dashboardHandler()
 			marketing := marketingHandler()
+			// Guncellemeler sayfalari, RSS ve /u/announcements (abonelikten cik):
+			// yalniz Postgres depoda; tanitim hostunda statik siteden ONCE yakalanir.
+			announceKey := deriveKey([]byte(visitorSecret), keyPurposeAnnounce)
+			apiSrv.AnnounceKey = announceKey
+			if us, ok := st.(store.UpdatesStore); ok {
+				// Onceki surecte yarim kalan duyuru gonderimleri "interrupted" olur;
+				// otomatik devam ETMEZ (panelde "Devam et" ile surdurulur).
+				if n, merr := us.MarkInterruptedUpdateSends(context.Background()); merr != nil {
+					log.Warn("yarim kalan duyuru gonderimleri isaretlenemedi", "hata", merr)
+				} else if n > 0 {
+					log.Warn("yarim kalan duyuru gonderimi kesildi olarak isaretlendi", "adet", n)
+				}
+				if mfs, ferr := fs.Sub(marketingFS, "marketing"); ferr == nil {
+					marketing = (&updates.Site{
+						Store: us, FS: mfs, Key: announceKey,
+						BaseURL: "https://" + firstNonEmpty(apiSrv.PlatformDomain, "zorven.app"), Log: log,
+					}).Wrap(marketing)
+				}
+			}
 
 			// Tanitim (pazarlama) hostlari: kok domain + www. Bu hostlarda panel
 			// yerine tanitim sitesi gosterilir; panel panel.zorven.app'tedir.
@@ -851,6 +873,11 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 					} else if cc != nil {
 						apiSrv.MailClient = cc
 						mailAuto = mail.NewAutoConfigHandler(*cc)
+						_, stsID, stsWarns := mail.MTASTSPolicyFromEnv(cc.Host)
+						for _, sw := range stsWarns {
+							log.Warn("mta-sts", "uyari", sw)
+						}
+						log.Info("mta-sts politika kimligi", "id", stsID, "txt", "v=STSv1; id="+stsID)
 						platformHostList = append(platformHostList, mailAuto.Hosts()...)
 						// autoconfig.mail.<platform> gibi iki seviyeli adlar wildcard'a
 						// girmez; kendi ACME sertifikalarini alsinlar (yoksa telefon/Outlook
