@@ -86,3 +86,21 @@ func TestLookupAuthoritativeLive(t *testing.T) {
 	}
 	t.Fatalf("%s yetkili cevap %v, beklenen %s", fqdn, ips, want)
 }
+
+// TXT cevabi ayristirilir; 255 baytlik parcalara bolunmus uzun deger birlestirilir.
+func TestParseAuthoritativeTXT(t *testing.T) {
+	n, _ := dnsmessage.NewName("_zorven-challenge.ornek.com.")
+	h := dnsmessage.ResourceHeader{Name: n, Type: dnsmessage.TypeTXT, Class: dnsmessage.ClassINET, TTL: 60}
+	b := buildResp(t, 9, true, dnsmessage.RCodeSuccess, []dnsmessage.Resource{
+		{Header: h, Body: &dnsmessage.TXTResource{TXT: []string{"rpsh-verify-abc"}}},
+		{Header: h, Body: &dnsmessage.TXTResource{TXT: []string{"parca1", "parca2"}}},
+	})
+	a, err := parseAuthoritative(b, 9)
+	if err != nil || len(a.txts) != 2 || a.txts[0] != "rpsh-verify-abc" || a.txts[1] != "parca1parca2" {
+		t.Fatalf("TXT: %+v %v", a.txts, err)
+	}
+	// Yetkili olmayan cevap reddedilir (onbellekten gelen eski deger kabul edilmez).
+	if _, err := parseAuthoritative(buildResp(t, 9, false, dnsmessage.RCodeSuccess, nil), 9); err == nil {
+		t.Fatal("AA bitsiz cevap kabul edildi")
+	}
+}

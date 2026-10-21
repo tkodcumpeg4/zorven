@@ -17,6 +17,8 @@ const (
 	keyPurposeVisitor   = "zorven-visitor-v1"
 	keyPurposeBasicAuth = "zorven-basic-auth-v1"
 	keyPurposeAnnounce  = "zorven-announce-unsub-v1"
+	keyPurposeDoorAddr  = "zorven-door-addr-v1"
+	keyPurposeOAuth     = "zorven-oauth-as-v1"
 )
 
 // devVisitorSecret yalniz yerel gelistirmede (platform domain yok/localhost) ve

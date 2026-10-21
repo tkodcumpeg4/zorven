@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { Hostname, Tunnel, VerificationInstructions, PathRoute } from '~/types/api'
+import type { Client, Hostname, Tunnel, VerificationInstructions, PathRoute } from '~/types/api'
 
 const api = useApi()
 const { t } = useI18n()
@@ -10,6 +10,7 @@ const { isPrivileged } = useRole()
 
 const hostnames = ref<Hostname[]>([])
 const tunnels = ref<Tunnel[]>([])
+const clients = ref<Client[]>([])
 const pending = ref(true)
 const saving = ref(false)
 const formError = ref('')
@@ -133,8 +134,8 @@ async function removePath(h: Hostname, routeID: string) {
 
 onMounted(async () => {
   try {
-    ;[hostnames.value, tunnels.value] = await Promise.all([
-      api.listHostnames(), api.listTunnels(),
+    ;[hostnames.value, tunnels.value, clients.value] = await Promise.all([
+      api.listHostnames(), api.listTunnels(), api.listClients().catch(() => [] as Client[]),
     ])
   } catch (e) {
     // Başarısız yükleme sonsuz spinner bırakmasın.
@@ -759,14 +760,14 @@ async function remove(h: Hostname) {
                 </template>
               </td>
               <td class="px-4 py-2.5 font-mono text-xs">
-                <select
-                  class="cursor-pointer rounded border border-line bg-surface px-2 py-1 text-xs font-mono text-fg transition-colors hover:border-accent focus:border-accent"
-                  :value="h.tunnel_id || ''"
-                  @change="changeAttachment(h, ($event.target as HTMLSelectElement).value)"
-                >
-                  <option value="">{{ t('domains.idle') }}</option>
-                  <option v-for="t in tunnels" :key="t.id" :value="t.id">{{ t.target }} ({{ t.id }})</option>
-                </select>
+                <TunnelPicker
+                  :model-value="h.tunnel_id || ''"
+                  :tunnels="tunnels"
+                  :clients="clients"
+                  :empty-label="t('domains.idle')"
+                  allow-idle
+                  @update:model-value="v => { if (v !== (h.tunnel_id || '')) changeAttachment(h, v) }"
+                />
               </td>
               <td class="px-4 py-2.5 text-xs text-fg-muted font-medium">{{ relativeTime(h.created_at) }}</td>
               <td class="px-4 py-2.5 text-right">
@@ -832,10 +833,14 @@ async function remove(h: Hostname) {
                   <div class="flex flex-wrap items-center gap-2">
                     <input v-model="pathForm.path_prefix" placeholder="/api" class="w-32 rounded border border-line bg-bg px-2 py-1.5 font-mono text-xs focus:border-accent">
                     <span class="text-fg-subtle">→</span>
-                    <select v-model="pathForm.tunnel_id" class="flex-1 min-w-[180px] cursor-pointer rounded border border-line bg-bg px-2 py-1.5 text-xs focus:border-accent">
-                      <option value="">{{ t('domains.pathSelectTunnel') }}</option>
-                      <option v-for="tn in tunnels" :key="tn.id" :value="tn.id">{{ tn.target }} ({{ tn.id }})</option>
-                    </select>
+                    <TunnelPicker
+                      v-model="pathForm.tunnel_id"
+                      class="flex-1"
+                      :tunnels="tunnels"
+                      :clients="clients"
+                      :empty-label="t('domains.pathSelectTunnel')"
+                      size="md"
+                    />
                     <button :disabled="pathSaving || !pathForm.path_prefix.trim() || !pathForm.tunnel_id" class="shrink-0 rounded bg-accent px-3 py-1.5 text-xs font-medium text-on-accent transition-opacity hover:opacity-90 disabled:opacity-50" @click="addPath(h)">
                       {{ t('common.add') }}
                     </button>

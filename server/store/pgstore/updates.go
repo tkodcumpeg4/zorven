@@ -203,6 +203,12 @@ func (s *Store) GetAnnouncementPref(ctx context.Context, userID string) (store.A
 	return pref, err
 }
 
+func (s *Store) SetAnnouncementLang(ctx context.Context, userID, lang string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE announcement_prefs SET lang = $2 WHERE user_id = $1 AND lang IS DISTINCT FROM $2`, userID, lang)
+	return err
+}
+
 func (s *Store) SetAnnouncementPref(ctx context.Context, userID string, subscribed bool, lang, source string) error {
 	if userID == "" {
 		return fmt.Errorf("kullanici kimligi bos")

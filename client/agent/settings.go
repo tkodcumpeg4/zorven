@@ -43,6 +43,12 @@ type settingsState struct {
 	caps localCaps
 	eff  effectiveSettings
 
+	// remoteTerminal / remoteScreen: sunucunun son istedigi izin (nil = hic
+	// istenmedi). Yerel tavan sonradan yukselirse (zorven enable ...) bu istek
+	// hemen etkin olur; tavan dusurse eff hemen kapanir.
+	remoteTerminal *bool
+	remoteScreen   *bool
+
 	// levelVar doluysa uzak log_level CANLI uygulanir (cagiran logger'i bu
 	// LevelVar ile kurmus olmali). nil ise log seviyesi degistirilmez.
 	levelVar *slog.LevelVar
@@ -73,6 +79,8 @@ func (st *settingsState) apply(s *protocol.AgentSettings, log *slog.Logger) {
 	defer st.mu.Unlock()
 
 	if s.AllowTerminal != nil {
+		v := *s.AllowTerminal
+		st.remoteTerminal = &v
 		// VE (AND): sunucu yalnizca kisitlayabilir.
 		want := *s.AllowTerminal && st.caps.terminal
 		if want != st.eff.allowTerminal {
@@ -84,6 +92,8 @@ func (st *settingsState) apply(s *protocol.AgentSettings, log *slog.Logger) {
 		}
 	}
 	if s.AllowScreen != nil {
+		v := *s.AllowScreen
+		st.remoteScreen = &v
 		want := *s.AllowScreen && st.caps.screen
 		if want != st.eff.allowScreen {
 			st.eff.allowScreen = want
@@ -183,4 +193,39 @@ func (st *settingsState) maxBackoffOr(def time.Duration) time.Duration {
 		return def
 	}
 	return st.eff.maxBackoff
+}
+
+// Caps, yerel tavan ve etkin durumun anlik goruntusudur.
+type Caps struct {
+	TerminalCap, ScreenCap bool // yerel tavan (--enable-*, zorven enable ...)
+	TerminalEff, ScreenEff bool // etkin = tavan VE uzak ayar
+}
+
+func (st *settingsState) snapshot() Caps {
+	st.mu.RLock()
+	defer st.mu.RUnlock()
+	return Caps{st.caps.terminal, st.caps.screen, st.eff.allowTerminal, st.eff.allowScreen}
+}
+
+// setCaps, yerel tavani calisirken degistirir. nil alan degismez. Acilista
+// sunucunun daha once istedigi ayar (yoksa tavan) hemen etkin olur; kapatmada
+// etkin izin hemen duser. Hangi iznin kapandigini (oturumlar kapatilmali) doner.
+func (st *settingsState) setCaps(terminal, screen *bool, log *slog.Logger) (c Caps, closedTerminal, closedScreen bool) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if terminal != nil {
+		st.caps.terminal = *terminal
+		want := *terminal && (st.remoteTerminal == nil || *st.remoteTerminal)
+		closedTerminal = st.eff.allowTerminal && !want
+		st.eff.allowTerminal = want
+		log.Warn("yerel komut: terminal tavani degisti", "tavan", *terminal, "etkin", want)
+	}
+	if screen != nil {
+		st.caps.screen = *screen
+		want := *screen && (st.remoteScreen == nil || *st.remoteScreen)
+		closedScreen = st.eff.allowScreen && !want
+		st.eff.allowScreen = want
+		log.Warn("yerel komut: ekran tavani degisti", "tavan", *screen, "etkin", want)
+	}
+	return Caps{st.caps.terminal, st.caps.screen, st.eff.allowTerminal, st.eff.allowScreen}, closedTerminal, closedScreen
 }

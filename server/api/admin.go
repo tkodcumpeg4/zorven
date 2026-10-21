@@ -239,6 +239,10 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // serveAuthenticated, kimlik dogrulama zinciri (oturum cerezi, API token, admin anahtari).
 func (m *Middleware) serveAuthenticated(w http.ResponseWriter, r *http.Request) {
+	// 0. /mcp'nin surec-ici OAuth kimligi (oauth_principal.go).
+	if m.serveOAuthPrincipal(w, r) {
+		return
+	}
 
 	// 1. Better Auth oturum cerezi kontrolu (better-auth.session_token veya __Secure-better-auth.session_token)
 	if m.BetterAuth != nil {

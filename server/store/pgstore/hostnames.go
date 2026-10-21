@@ -52,9 +52,17 @@ func (s *Store) AddHostname(ctx context.Context, tenantID, tunnelID, fqdn, typ s
 }
 
 func (s *Store) AddCustomHostname(ctx context.Context, tenantID, tunnelID, fqdn, verifyToken string) (store.Hostname, error) {
-	var projectID string
-	if def, err := s.GetDefaultProject(ctx, tenantID); err == nil {
-		projectID = def.ID
+	return s.AddCustomHostnameWithProject(ctx, tenantID, tunnelID, fqdn, verifyToken, "")
+}
+
+// AddCustomHostnameWithProject, ozel alan adini panelde secili projeye ekler.
+// 2026-10-17: once proje hep varsayilana yaziliyordu; baska projeden eklenen
+// alan adi "Default"a dusuyordu.
+func (s *Store) AddCustomHostnameWithProject(ctx context.Context, tenantID, tunnelID, fqdn, verifyToken, projectID string) (store.Hostname, error) {
+	if projectID == "" {
+		if def, err := s.GetDefaultProject(ctx, tenantID); err == nil {
+			projectID = def.ID
+		}
 	}
 	var tunnelVal *string
 	if tunnelID != "" {

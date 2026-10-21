@@ -20,6 +20,10 @@ type Config struct {
 	LocalURL   string `json:"local_url,omitempty"`
 	CACertPath string `json:"ca_cert_path,omitempty"`
 	Insecure   bool   `json:"insecure,omitempty"`
+	// EnableTerminal / EnableScreen: kalici yerel izin tavani (zorven enable ... --persist,
+	// service install --enable-*). Varsayilan KAPALI. Sunucudan degistirilemez.
+	EnableTerminal bool `json:"enable_terminal,omitempty"`
+	EnableScreen   bool `json:"enable_screen,omitempty"`
 }
 
 // legacyDefaultLocalURLs, eski surumlerin config dosyasina KENDILIGINDEN

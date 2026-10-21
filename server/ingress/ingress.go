@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -419,7 +420,7 @@ func (h *Handler) proxy(w http.ResponseWriter, r *http.Request, sess *tunnel.Ses
 	ex, err := sess.SendRequest(ctx, protocol.HTTPRequest{
 		TunnelID:      tunnelID,
 		Method:        r.Method,
-		Path:          r.URL.Path,
+		Path:          agentPath(r.URL),
 		Query:         r.URL.RawQuery,
 		Headers:       reqHeaders,
 		HasBody:       hasBody,
@@ -737,4 +738,17 @@ func (h *Handler) emitEntry(e reqlog.Entry) {
 	if h.Events != nil {
 		h.Events.PublishTenant(entry.TenantID, events.TypeRequestCompleted, entry)
 	}
+}
+
+// agentPath, ajana iletilecek yolu ISTEMCININ GONDERDIGI kodlamayla doner
+// (EscapedPath: %2F, %20 vb. korunur; r.URL.Path cozulmus haldir ve bu
+// kodlamalari kaybeder). "@" ayrica %40 olarak gonderilir: eski ajanlar (<=0.2.15)
+// yolda ham "@" iceren istekleri SSRF onlemi diye reddediyordu
+// (local_unreachable); %40 her surumde gecer ve backend icin ayni anlamdadir.
+func agentPath(u *url.URL) string {
+	p := u.EscapedPath()
+	if p == "" {
+		p = "/"
+	}
+	return strings.ReplaceAll(p, "@", "%40")
 }

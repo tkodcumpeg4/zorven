@@ -59,12 +59,18 @@ type accessPageData struct {
 	CloseText  string // "Kapiyi kapat" dugmesi
 	CloseHref  string // kapali sayfasinda "tekrar giris yap" baglantisi
 	ReopenText string
+	// diger IP ailesi yan kanali (bos = yok)
+	AddrURL     string
+	ScriptNonce string
+	ConnectHost string
 }
 
 // doorRow, "kapi acildi" sayfasindaki etiket/deger satiri.
 type doorRow struct {
-	Label string
-	Value string
+	Label  string
+	Value  string
+	ID     string // yan kanalin doldurdugu satirlar icin
+	Hidden bool
 }
 
 // pageText, bir dilin tum metinleri.
@@ -84,6 +90,7 @@ type pageText struct {
 	doorOpenTitle, doorOpenMsg, doorClosedTitle, doorClosedMsg string
 	doorUnavailTitle, doorUnavailMsg                           string
 	doorIP, doorUntil, doorAddr, doorProto, doorIdentity       string
+	doorIPv4, doorIPv6                                         string
 	doorClose, doorReopen                                      string
 	doorRemainingFmt                                           string // %d sa %d dk
 	doorRemainingDaysFmt                                       string // %d gun %d sa
@@ -118,6 +125,8 @@ var pageTexts = map[string]pageText{
 		doorUnavailTitle:     "Kapı kullanılamıyor",
 		doorUnavailMsg:       "Bu tünelin planı web ile kapı açmayı içermiyor. Lütfen tünel sahibiyle iletişime geçin.",
 		doorIP:               "IP adresiniz",
+		doorIPv4:             "IPv4 (izinli)",
+		doorIPv6:             "IPv6 (izinli)",
 		doorUntil:            "Geçerlilik bitişi",
 		doorAddr:             "Bağlantı adresi",
 		doorProto:            "Protokol",
@@ -155,6 +164,8 @@ var pageTexts = map[string]pageText{
 		doorUnavailTitle:     "Door unavailable",
 		doorUnavailMsg:       "This tunnel's plan does not include web door access. Please contact the tunnel owner.",
 		doorIP:               "Your IP address",
+		doorIPv4:             "IPv4 (allowed)",
+		doorIPv6:             "IPv6 (allowed)",
 		doorUntil:            "Valid until",
 		doorAddr:             "Connection address",
 		doorProto:            "Protocol",
@@ -275,8 +286,14 @@ func renderAccessPage(w http.ResponseWriter, r *http.Request, status int, d acce
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("X-Frame-Options", "DENY")
 	h.Set("Referrer-Policy", "same-origin")
-	h.Set("Content-Security-Policy",
-		"default-src 'none'; style-src 'unsafe-inline'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+	csp := "default-src 'none'; style-src 'unsafe-inline'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+	if d.AddrURL != "" && d.ScriptNonce != "" && d.ConnectHost != "" {
+		// Diger IP ailesi yan kanali: tek nonce'lu betik + yalniz o hosta baglanti.
+		csp += "; script-src 'nonce-" + d.ScriptNonce + "'; connect-src https://" + d.ConnectHost
+	} else {
+		d.AddrURL = ""
+	}
+	h.Set("Content-Security-Policy", csp)
 	h.Set("X-Rpshell-Error", d.Code)
 	w.WriteHeader(status)
 	if r.Method == http.MethodHead {
@@ -329,6 +346,7 @@ var accessPageTmpl = template.Must(template.New("access").Parse(`<!doctype html>
   .kv div { display:flex; justify-content:space-between; gap:16px; padding:10px 12px; font-size:13px;
             border-top:1px solid var(--line); }
   .kv div:first-child { border-top:0; }
+  .kv div[hidden] { display:none; }
   .kv dt { color:var(--muted); }
   .kv dd { margin:0; color:var(--fg); text-align:right; word-break:break-all;
            font-family:ui-monospace,'JetBrains Mono',monospace; }
@@ -362,8 +380,18 @@ var accessPageTmpl = template.Must(template.New("access").Parse(`<!doctype html>
         <button class="btn primary" type="submit">{{.SubmitText}}</button>
       </form>
     {{else if eq .Kind "dooropen"}}
-      <dl class="kv">{{range .Rows}}<div><dt>{{.Label}}</dt><dd>{{.Value}}</dd></div>
+      <dl class="kv">{{range .Rows}}<div{{if .ID}} id="{{.ID}}"{{end}}{{if .Hidden}} hidden{{end}}><dt>{{.Label}}</dt><dd>{{.Value}}</dd></div>
       {{end}}</dl>
+      {{if .AddrURL}}<div id="zv-addr" data-url="{{.AddrURL}}" hidden></div>
+      <script nonce="{{.ScriptNonce}}">
+      (function(){var el=document.getElementById('zv-addr'),row=document.getElementById('zv-other');
+      if(!el||!row||!window.fetch)return;var c=window.AbortController?new AbortController():null;
+      if(c)setTimeout(function(){c.abort()},6000);
+      fetch(el.getAttribute('data-url'),{mode:'cors',credentials:'omit',cache:'no-store',referrerPolicy:'no-referrer',signal:c?c.signal:undefined})
+      .then(function(r){return r.ok?r.json():null})
+      .then(function(j){if(j&&j.ip&&!j.noop){row.querySelector('dd').textContent=j.ip;row.hidden=false}})
+      .catch(function(){});})();
+      </script>{{end}}
       <form method="post" action="/_zvd/close">
         <button class="btn" type="submit">{{.CloseText}}</button>
       </form>

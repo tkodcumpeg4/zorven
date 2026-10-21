@@ -24,6 +24,7 @@ const (
 type RetentionResult struct {
 	RequestLogs int64
 	UDPStats    int64
+	TCPStats    int64
 	// Captures, request_captures (istek govdesi yakalama) silme sayisi.
 	Captures int64
 	// AccessEvents, tunnel_access_events (ziyaretci giris olaylari) silme sayisi.
@@ -81,6 +82,13 @@ func (s *Store) pruneRetentionAt(ctx context.Context, now time.Time, days int) (
 	res.UDPStats = n
 	if err != nil {
 		return res, fmt.Errorf("retention: udp_stats_minute: %w", err)
+	}
+	n, err = s.batchDelete(ctx,
+		`DELETE FROM tcp_stats_minute WHERE (tunnel_id, minute) IN (
+		   SELECT tunnel_id, minute FROM tcp_stats_minute WHERE minute < $1 LIMIT $2)`, cutoff)
+	res.TCPStats = n
+	if err != nil {
+		return res, fmt.Errorf("retention: tcp_stats_minute: %w", err)
 	}
 	n, err = s.batchDelete(ctx,
 		`DELETE FROM tunnel_access_events WHERE id IN (

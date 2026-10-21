@@ -50,6 +50,7 @@ const nav = computed(() => {
     { to: '/tokens',   label: t('nav.security'), icon: 'lucide:shield-check' },
     { to: '/policies', label: t('nav.policies'), icon: 'lucide:shield-half' },
     { to: '/network',  label: t('nav.network'),  icon: 'lucide:network' },
+    { to: '/shares',   label: t('nav.shares'),   icon: 'lucide:share-2' },
     { to: '/secrets',  label: t('nav.secrets'),  icon: 'lucide:key-round' },
     { to: '/organization', label: t('nav.organization'), icon: 'lucide:building-2' },
     { to: '/team',     label: t('nav.team'),     icon: 'lucide:users' },

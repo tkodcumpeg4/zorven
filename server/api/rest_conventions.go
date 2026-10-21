@@ -38,10 +38,10 @@ const (
 var (
 	allReadScopes = []string{
 		ScopeClientsRead, ScopeTunnelsRead, ScopeHostnamesRead,
-		ScopeIPAllowRead, ScopeAnalyticsRead,
+		ScopeIPAllowRead, ScopeAnalyticsRead, ScopeNetRead,
 	}
 	allWriteScopes = []string{
-		ScopeClientsWrite, ScopeTunnelsWrite, ScopeHostnamesWrite, ScopeIPAllowWrite,
+		ScopeClientsWrite, ScopeTunnelsWrite, ScopeHostnamesWrite, ScopeIPAllowWrite, ScopeNetWrite,
 	}
 )
 
@@ -150,7 +150,13 @@ var tokenPublicRoutes = []tokenRoute{
 	{"PUT", "/api/v1/tunnels/{id}/lb"},
 	{"GET", "/api/v1/tunnels/{id}/udp"},
 	{"PUT", "/api/v1/tunnels/{id}/udp"},
+	{"GET", "/api/v1/tunnels/{id}/tcp"},
 	{"GET", "/api/v1/tunnels/{id}/game-status"},
+	// MCP (M1): metrik, ziyaretci erisim olaylari ve web kapisi okuma/ac-kapat.
+	{"GET", "/api/v1/tunnels/{id}/metrics"},
+	{"GET", "/api/v1/tunnels/{id}/access-events"},
+	{"GET", "/api/v1/tunnels/{id}/door"},
+	{"PUT", "/api/v1/tunnels/{id}/door"},
 
 	{"GET", "/api/v1/hostnames"},
 	{"POST", "/api/v1/hostnames"},
@@ -175,6 +181,15 @@ var tokenPublicRoutes = []tokenRoute{
 	{"GET", "/api/v1/network/resources"},
 	{"POST", "/api/v1/network/resources"},
 	{"GET", "/api/v1/network/connect"},
+
+	// Zorven Net (WireGuard port paylasimi): "zorven access/net status" API token ile.
+	{"GET", "/api/v1/net/nodes"},
+	{"DELETE", "/api/v1/net/nodes/{id}"},
+	{"GET", "/api/v1/net/shares"},
+	{"POST", "/api/v1/net/shares"},
+	{"PATCH", "/api/v1/net/shares/{id}"},
+	{"DELETE", "/api/v1/net/shares/{id}"},
+	{"GET", "/api/v1/net/session"},
 
 	// Cihazlar: envanter okuma otomasyonu token ile calisabilmeli.
 	{"GET", "/api/v1/devices"},

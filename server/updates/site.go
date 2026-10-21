@@ -18,7 +18,7 @@ import (
 // ve abonelikten cikma sayfasini sunar. Diger yollar next'e gecer.
 //
 // Sayfa iskeleti (head/header/footer) ELLE KOPYALANMAZ: scripts/sync_marketing_shell.py
-// ile guncel tutulan sablon sayfalardan (guncellemeler.html, en/updates.html,
+// ile guncel tutulan sablon sayfalardan (updates.html, en/updates.html,
 // ja/updates.html) okunur ve <main> govdesi + baslik/canonical doldurulur.
 type Site struct {
 	Store   store.UpdatesStore
@@ -64,9 +64,27 @@ func parseRoute(p string) (routeKind, string, string) {
 	return routeNone, "", ""
 }
 
+// legacyRedirect, eski /guncellemeler[/...] yolunu yeni TR yoluna cevirir.
+func legacyRedirect(p string) (string, bool) {
+	if p == LegacyListPathTR || p == LegacyListPathTR+"/" {
+		return ListPath(LangTR), true
+	}
+	if rest, ok := strings.CutPrefix(p, LegacyListPathTR+"/"); ok {
+		return ListPath(LangTR) + "/" + rest, true
+	}
+	return "", false
+}
+
 // Wrap, Guncellemeler yollarini yakalar; gerisini next'e verir.
 func (s *Site) Wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if to, ok := legacyRedirect(r.URL.Path); ok {
+			if q := r.URL.RawQuery; q != "" {
+				to += "?" + q
+			}
+			http.Redirect(w, r, to, http.StatusMovedPermanently)
+			return
+		}
 		kind, lang, slug := parseRoute(r.URL.Path)
 		if kind == routeNone || s.Store == nil {
 			next.ServeHTTP(w, r)
@@ -112,7 +130,7 @@ var (
 )
 
 func (s *Site) template(lang string) (string, bool) {
-	names := map[string]string{LangTR: "guncellemeler.html", LangEN: "en/updates.html", LangJA: "ja/updates.html"}
+	names := map[string]string{LangTR: "updates.html", LangEN: "en/updates.html", LangJA: "ja/updates.html"}
 	if b, err := fs.ReadFile(s.FS, names[lang]); err == nil {
 		return string(b), true
 	}

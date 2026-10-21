@@ -49,6 +49,8 @@ type clientSession struct {
 
 	// screenInputStatus, girdi durumu bildirimi pazarlandiysa true (conn.go).
 	screenInputStatus bool
+	// udpProbe, UDP tunel olcumu pazarlandiysa true (conn.go).
+	udpProbe bool
 	// screen2, screen2 modu pazarlandiysa true (conn.go).
 	screen2 bool
 	// screen2Layers, katmanli screen2 pazarlandiysa true (conn.go).
@@ -68,6 +70,9 @@ type clientSession struct {
 	// streamConns, aktif ham TCP/UDP tunel akislari: req_id -> yerel conn (FAZ 3 / D2).
 	streamMu    sync.Mutex
 	streamConns map[uint64]net.Conn
+	// streamTunnels, UDP akislarinin tunel kimligi (dusurme sayaci icin).
+	streamTunnels map[uint64]string
+	udpDrops      udpDropCounter
 
 	onRequest func(method, path string, status int, duration time.Duration)
 }
@@ -118,14 +123,15 @@ func (i *inflight) closeBody(err error) {
 
 func newClientSession(conn *websocket.Conn, localURL string, log *slog.Logger) *clientSession {
 	return &clientSession{
-		conn:     conn,
-		log:      log,
-		localURL: strings.TrimSuffix(localURL, "/"),
-		inflight: make(map[uint64]*inflight),
-		targets:     make(map[string]string),
-		wsConns:     make(map[uint64]net.Conn),
-		streamConns: make(map[uint64]net.Conn),
-		windows:     newWindowTable(),
+		conn:          conn,
+		log:           log,
+		localURL:      strings.TrimSuffix(localURL, "/"),
+		inflight:      make(map[uint64]*inflight),
+		targets:       make(map[string]string),
+		wsConns:       make(map[uint64]net.Conn),
+		streamConns:   make(map[uint64]net.Conn),
+		streamTunnels: make(map[uint64]string),
+		windows:       newWindowTable(),
 		http: &http.Client{
 			// Yonlendirmeleri TAKIP ETME: 301/302 oldugu gibi tarayiciya
 			// donmeli, yoksa yerel servisin yonlendirme mantigi bozulur.
@@ -144,6 +150,18 @@ func newClientSession(conn *websocket.Conn, localURL string, log *slog.Logger) *
 
 // --- yazma ----------------------------------------------------------------
 
+// connWriteCtx, sunucu baglantisina yazim baglami. Istek baglami yazim
+// SIRASINDA iptal edilirse coder/websocket tum baglantiyi kapatir (tek istegin
+// iptali tuneli dusurur); zaten iptal edilmisse yazmadan doner, aksi halde
+// iptali yazima tasimaz, yalniz zaman asimi uygular.
+func connWriteCtx(ctx context.Context, d time.Duration) (context.Context, context.CancelFunc, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	c, cancel := context.WithTimeout(context.WithoutCancel(ctx), d)
+	return c, cancel, nil
+}
+
 func (cs *clientSession) sendControl(ctx context.Context, v any, t protocol.MessageType) error {
 	data, err := protocol.Marshal(v, t)
 	if err != nil {
@@ -152,7 +170,10 @@ func (cs *clientSession) sendControl(ctx context.Context, v any, t protocol.Mess
 	cs.writeMu.Lock()
 	defer cs.writeMu.Unlock()
 
-	wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	wctx, cancel, err := connWriteCtx(ctx, 10*time.Second)
+	if err != nil {
+		return err
+	}
 	defer cancel()
 	return cs.conn.Write(wctx, websocket.MessageText, data)
 }
@@ -162,7 +183,10 @@ func (cs *clientSession) sendBinary(ctx context.Context, b []byte) error {
 	cs.writeMu.Lock()
 	defer cs.writeMu.Unlock()
 
-	wctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	wctx, cancel, err := connWriteCtx(ctx, 15*time.Second)
+	if err != nil {
+		return err
+	}
 	defer cancel()
 	return cs.conn.Write(wctx, websocket.MessageBinary, b)
 }
@@ -171,7 +195,10 @@ func (cs *clientSession) sendFrame(ctx context.Context, f protocol.BodyFrame) er
 	cs.writeMu.Lock()
 	defer cs.writeMu.Unlock()
 
-	wctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	wctx, cancel, err := connWriteCtx(ctx, 30*time.Second)
+	if err != nil {
+		return err
+	}
 	defer cancel()
 	return cs.conn.Write(wctx, websocket.MessageBinary, f.Encode())
 }
@@ -490,7 +517,10 @@ func validLocalPath(p string) bool {
 	if p == "" || p[0] != '/' {
 		return false
 	}
-	if strings.ContainsAny(p, "@\\") || strings.Contains(p, "://") {
+	// "@" yolda serbesttir (or. /u/@kullanici, /%40scope/paket): yol "/" ile
+	// basladigi icin authority'ye karisamaz; asagida doLocal hedef host'un
+	// degismedigini ayrica dogrular. Ters egik cizgi ve "://" reddedilir.
+	if strings.Contains(p, "\\") || strings.Contains(p, "://") {
 		return false
 	}
 	for i := 0; i < len(p); i++ {

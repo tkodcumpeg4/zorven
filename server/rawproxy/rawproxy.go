@@ -13,9 +13,21 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tkodcumpeg4/zorven/server/bandwidth"
 	"github.com/tkodcumpeg4/zorven/server/ipfilter"
 	"github.com/tkodcumpeg4/zorven/server/tunnel"
+	"github.com/tkodcumpeg4/zorven/shared/protocol"
 )
+
+// bridgeStream, bridgeTCP'nin ajan akisindan bekledigi yuzeydir (*tunnel.RawStream
+// uygular). Testler gercek bir ajan oturumu olmadan sahte akis verebilsin diye ayridir.
+type bridgeStream interface {
+	Accept() <-chan protocol.StreamAck
+	FromLocal() <-chan []byte
+	Closed() <-chan struct{}
+	Send(ctx context.Context, d []byte) error
+	Close(reason string)
+}
 
 // streamAckTimeout, ajanin yerel hedefe baglanip StreamAck dondurmesi icin sure.
 const streamAckTimeout = 15 * time.Second
@@ -61,6 +73,9 @@ type Manager struct {
 	List     Lister
 	// Door, web ile kapi acma durumu (nil = ozellik kapali). Bkz. door.go.
 	Door DoorGate
+	// Usage, kiracinin aylik kullanimini yazan ve hiz sinirini veren kaynak
+	// (nil = olcum/sinir yok). main.go LocalUsageRecorder baglar.
+	Usage bandwidth.UsageSource
 
 	mu      sync.Mutex
 	tcpLn   map[listenKey]net.Listener
@@ -70,6 +85,12 @@ type Manager struct {
 
 	// doorConns, grant ile kabul edilen acik baglantilar (grant iptalinde kesilir).
 	doorConns connRegistry
+
+	// tcpStats, tunel kimligi -> *tcpStat (tcpstats.go).
+	tcpStats sync.Map
+
+	// openStream nil degilse bridgeTCP ajan akisini Hub yerine buradan alir (testler).
+	openStream func(ctx context.Context, ti TunnelInfo, remote string) (bridgeStream, bool, error)
 }
 
 // ctx, baslatilmamis yoneticide (testler) bile bos olmayan bir context doner.
@@ -204,15 +225,26 @@ func (m *Manager) HandleSNIConn(conn net.Conn, ti TunnelInfo) {
 // bridgeTCP, verilen conn'u tunelin ajan oturumuna bir ham TCP akisiyla baglar.
 func (m *Manager) bridgeTCP(conn net.Conn, ti TunnelInfo) {
 	// IP izin listesi ve/veya web-door grant'i.
+	st := m.tcpStatFor(ti)
 	ip := hostOf(conn.RemoteAddr().String())
 	ok, grantExp := m.admit(m.ctx(), ti, ip)
 	if !ok {
+		if m.Door != nil && m.Door.DoorEnabled(ti.TunnelID) {
+			st.reject(TCPRejectDoor)
+		} else {
+			st.reject(TCPRejectIP)
+		}
 		m.Log.Warn("rawproxy: IP engellendi", "ip", ip, "tunnel", ti.TunnelID)
 		return
 	}
 
-	sess, online := m.Hub.Get(ti.ClientID)
+	var sess *tunnel.Session
+	online := true
+	if m.openStream == nil {
+		sess, online = m.Hub.Get(ti.ClientID)
+	}
 	if !online {
+		st.reject(TCPRejectOffline)
 		m.Log.Debug("rawproxy: istemci cevrimdisi", "client", ti.ClientID, "tunnel", ti.TunnelID)
 		return
 	}
@@ -232,8 +264,20 @@ func (m *Manager) bridgeTCP(conn net.Conn, ti TunnelInfo) {
 		defer t.Stop()
 	}
 
-	stream, err := sess.OpenStream(ctx, ti.TunnelID, "tcp", conn.RemoteAddr().String())
+	var stream bridgeStream
+	var err error
+	if m.openStream != nil {
+		var off bool
+		stream, off, err = m.openStream(ctx, ti, conn.RemoteAddr().String())
+		if off {
+			st.reject(TCPRejectOffline)
+			return
+		}
+	} else {
+		stream, err = sess.OpenStream(ctx, ti.TunnelID, "tcp", conn.RemoteAddr().String())
+	}
 	if err != nil {
+		st.reject(TCPRejectDial)
 		m.Log.Warn("rawproxy: akis acilamadi", "tunnel", ti.TunnelID, "hata", err)
 		return
 	}
@@ -243,24 +287,41 @@ func (m *Manager) bridgeTCP(conn net.Conn, ti TunnelInfo) {
 	select {
 	case ack := <-stream.Accept():
 		if ack.Code != "" {
+			st.reject(TCPRejectDial)
 			m.Log.Debug("rawproxy: yerel hedefe baglanilamadi", "tunnel", ti.TunnelID, "code", ack.Code, "msg", ack.Message)
 			return
 		}
 	case <-time.After(streamAckTimeout):
+		st.reject(TCPRejectDial)
 		return
 	case <-ctx.Done():
 		return
 	}
 
+	// Aylik kullanim + kiraci hiz siniri (HTTP ile ayni sayac/limiter). Baglanti
+	// basina tek Batcher: sicak yolda atomik, kapanista flush.
+	meter := bandwidth.NewBatcher(m.Usage, ti.TenantID, bandwidth.UsageTypeTCP)
+	defer meter.Flush()
+
+	st.open()
+	began := time.Now()
+	defer func() { st.closeConn(time.Since(began)) }()
+
 	// ziyaretci -> ajan
 	go func() {
+		defer meter.Flush() // bridge donduktan sonra gelen son baytlar da yazilir
 		buf := make([]byte, 32*1024)
 		for {
 			n, rerr := conn.Read(buf)
 			if n > 0 {
+				if bandwidth.WaitN(ctx, meter.Limiter(ctx), n) != nil {
+					break
+				}
 				if serr := stream.Send(context.Background(), buf[:n]); serr != nil {
 					break
 				}
+				st.bytesIn.Add(int64(n))
+				meter.Add(int64(n), 0)
 			}
 			if rerr != nil {
 				break
@@ -273,7 +334,13 @@ func (m *Manager) bridgeTCP(conn net.Conn, ti TunnelInfo) {
 	for {
 		select {
 		case data := <-stream.FromLocal():
-			if _, werr := conn.Write(data); werr != nil {
+			if bandwidth.WaitN(ctx, meter.Limiter(ctx), len(data)) != nil {
+				return
+			}
+			n, werr := conn.Write(data)
+			st.bytesOut.Add(int64(n))
+			meter.Add(0, int64(n))
+			if werr != nil {
 				return
 			}
 		case <-stream.Closed():

@@ -472,3 +472,30 @@ func TestFileListAndSessionDrop(t *testing.T) {
 }
 
 var _ sync.Mutex
+
+// Yazim sirasinda cagiranin baglami iptal edilse de ajan baglantisi kapanmamali
+// (coder/websocket iptalde tum baglantiyi kapatir; writeCtx iptali yazima tasimaz).
+func TestSendCancelDoesNotCloseAgentConn(t *testing.T) {
+	h := newFileHarness(t, true)
+	go func() { // ajan tarafi: gelenleri tuket
+		for {
+			if _, _, err := h.agent.Read(context.Background()); err != nil {
+				return
+			}
+		}
+	}()
+	big := protocol.BodyFrame{FrameType: protocol.FrameFile, ReqID: 1, Payload: make([]byte, protocol.FileChunkSize)}
+	for i := 0; i < 300; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		go cancel()
+		_ = h.s.SendBinary(ctx, big)
+	}
+	if err := h.s.Send(context.Background(), protocol.FileAbort{Type: protocol.TypeFileAbort, XferID: 9}, protocol.TypeFileAbort); err != nil {
+		t.Fatalf("iptallerden sonra baglanti kapanmis: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := h.s.Send(ctx, protocol.FileAbort{Type: protocol.TypeFileAbort, XferID: 9}, protocol.TypeFileAbort); err == nil {
+		t.Fatal("onceden iptal edilmis baglamla yazim hata vermeli")
+	}
+}

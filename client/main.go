@@ -4,6 +4,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -19,6 +20,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/tkodcumpeg4/zorven/client/agent"
 	"github.com/tkodcumpeg4/zorven/client/config"
+	"github.com/tkodcumpeg4/zorven/client/localctl"
 	"github.com/tkodcumpeg4/zorven/shared/protocol"
 )
 
@@ -44,16 +46,31 @@ func main() {
 		plainZsh       bool
 		plainBash      bool
 		printURL       bool
+		noNet          bool
+		accessSpecs    []string
 
 		// ephemeralTTLSec (FAZ 2 / F07): yalnizca "ephemeral" alt komutu doldurur.
 		// 0 kalirsa acilan tunel kalicidir.
 		ephemeralTTLSec int
+		persistFlag     bool
 	)
 
 	runTunnel := func(cmd *cobra.Command, args []string) error {
 		cfg, err := config.Load()
 		if err != nil {
 			slog.Warn("ayar dosyasi okunamadi, varsayilanlar kullanilacak", "hata", err)
+		}
+
+		// Calisan bir istemci varsa (on plan veya servis) ikinci baglanti acma
+		// (sunucu 409 verir); izin degisikligini yerel kanaldan ona ilet.
+		if done, ferr := tryForwardFlags(enableTerminal, enableScreen, noTerminal, noScreen, persistFlag); done {
+			return ferr
+		}
+		// `zorven --access ad=port` (hedef tunel yok): calisan ajana ilet.
+		if len(accessSpecs) > 0 && len(args) == 0 && local == "" {
+			if done, aerr := accessViaAgent(accessSpecs); done || aerr != nil {
+				return aerr
+			}
 		}
 
 		// 1. Port veya hedef URL argumanini cozumle (or. "8080", "http://localhost:8080")
@@ -65,6 +82,11 @@ func main() {
 		if len(args) > 0 && !looksLikeTarget(target) {
 			// "zorven versoin" gibi yazim hatasi/bilinmeyen alt komut, "http://versoin"
 			// hedefli bir tunel acmasin.
+			// Tek kelimelik harf dizisi buyuk olasilikla bu surumde olmayan bir
+			// alt komuttur (or. yeni surumdeki "up"): guncellemeyi oner.
+			if w := args[0]; len(args) <= 2 && isPlainWord(w) {
+				return fmt.Errorf("bilinmeyen komut %q (surum %s). Yeni bir surumde eklenmis olabilir: 'zorven update' ile guncelleyin; komutlar icin 'zorven --help'", w, version)
+			}
 			return fmt.Errorf("gecersiz hedef %q: bir port (8080), host:port veya URL verin; komutlar icin 'zorven --help'", strings.Join(args, " "))
 		}
 
@@ -121,11 +143,11 @@ func main() {
 		// 5. Guvenlik Kuralı: CLI ile calisirken Uzaktan Erisim (Terminal ve Ekran Paylasimi) VARSAYILAN OLARAK KAPALIDIR.
 		// Yalnizca kullanici --enable-terminal veya --enable-screen bayraklarini verirse acilir.
 		finalNoTerminal := true
-		if enableTerminal && !noTerminal {
+		if (enableTerminal || cfg.EnableTerminal) && !noTerminal {
 			finalNoTerminal = false
 		}
 		finalNoScreen := true
-		if enableScreen && !noScreen {
+		if (enableScreen || cfg.EnableScreen) && !noScreen {
 			finalNoScreen = false
 		}
 
@@ -160,6 +182,18 @@ func main() {
 			TerminalPlainZsh:  plainZsh,
 			TerminalPlainBash: plainBash,
 			LogLevel:          levelVar,
+			NoNet:             noNet,
+		}
+		for _, spec := range accessSpecs {
+			tgt, loc, ok := strings.Cut(spec, "=")
+			if !ok || strings.TrimSpace(tgt) == "" || strings.TrimSpace(loc) == "" {
+				return fmt.Errorf("gecersiz --access %q (bicim: paylasim[:port]=yerel_port)", spec)
+			}
+			loc = strings.TrimSpace(loc)
+			if !strings.Contains(loc, ":") {
+				loc = "127.0.0.1:" + loc
+			}
+			ag.NetAccess = append(ag.NetAccess, agent.NetAccessSpec{Target: strings.TrimSpace(tgt), Local: loc})
 		}
 
 		// Canli HTTP isteklerini terminale bas
@@ -202,7 +236,15 @@ func main() {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 
-		return ag.Run(ctx)
+		if uep, uerr := localctl.UserEndpoint(); uerr == nil {
+			ag.OnReady = func(c context.Context) { startLocalCtl(c, ag, uep) }
+		}
+		err = ag.Run(ctx)
+		var fe *agent.FatalError
+		if errors.As(err, &fe) && strings.Contains(fe.Msg, "409") {
+			fmt.Println("Ipucu: calisan bir istemci var. Izinleri degistirmek icin: zorven enable terminal | zorven enable screen")
+		}
+		return err
 	}
 
 	root := &cobra.Command{
@@ -233,9 +275,12 @@ func main() {
 		f.BoolVar(&noFileTransfer, "no-file-transfer", false, "ekran paylasiminda dosya aktarimini kapat")
 		f.StringVar(&fileDir, "file-dir", "", "dosya aktariminin tek izinli klasoru (varsayilan: Indirilenler/Zorven)")
 		f.IntVar(&fileMaxMB, "file-max-mb", 0, "tek dosya boyut siniri, MiB (varsayilan 2048)")
+		f.BoolVar(&persistFlag, "persist", false, "--enable-terminal/--enable-screen calisan istemciye iletilirse yerel ayara da yaz")
 		f.BoolVar(&noAutoUpdate, "no-auto-update", false, "otomatik guncellemeyi kapat")
 		f.BoolVar(&plainZsh, "terminal-plain-zsh", false, "uzak terminalde Zorven zsh profilini (istem, oneri, vurgulama) kullanma; zsh duz baslar")
 		f.BoolVar(&plainBash, "terminal-plain-bash", false, "uzak terminalde Zorven bash rcfile profilini kullanma")
+		f.BoolVar(&noNet, "no-net", false, "Zorven Net (WireGuard port paylasimi) ozelligini kapat")
+		f.StringArrayVar(&accessSpecs, "access", nil, "bu cihaza acilan bir paylasima yerel dinleyici: paylasim[:port]=yerel_port")
 		f.BoolVar(&printURL, "print-url", false, "gosterge yerine baglantida makine-okur 'zorven-url: <url>' satirlari yaz (SDK'lar icin)")
 	}
 	addTunnelFlags(root)
@@ -305,6 +350,7 @@ func main() {
 		},
 	}
 	root.AddCommand(authtokenCmd)
+	root.AddCommand(newCtlCmds()...)
 
 	// config alt komut grubu
 	configCmd := &cobra.Command{
@@ -410,6 +456,19 @@ func main() {
 			if err := ag.CheckUpdateNow(cmd.Context()); err != nil {
 				return fmt.Errorf("guncelleme yapilamadi: %w", err)
 			}
+			// Diskteki ikili guncel; arka planda calisan istemci (servis ya da
+			// on plan) eski surumle calisiyor olabilir. Yerel kanaldan bulup
+			// ona da guncellemeyi tetikle: panelde eski surum gorunmesin.
+			if ep, r, _ := localctl.Find(); ep != nil && r != nil && r.Version != "" && r.Version != version {
+				if _, err := localctl.Call(*ep, localctl.Request{Op: "update"}); err != nil {
+					fmt.Printf("Calisan istemci eski surumde (%s); guncelleme tetiklenemedi: %v\n", r.Version, err)
+					if ep.Service {
+						fmt.Println("  Ipucu: sudo zorven update  ya da  sudo zorven service restart")
+					}
+				} else {
+					fmt.Printf("Calisan istemci (%s, surum %s) guncelleniyor; birkac saniye icinde yeni surumle yeniden baslar.\n", map[bool]string{true: "arka plan servisi", false: "on plan istemci"}[ep.Service], r.Version)
+				}
+			}
 			return nil
 		},
 	}
@@ -426,8 +485,13 @@ func main() {
 	})
 
 	root.AddCommand(newServiceCmd())
+	root.AddCommand(newShortcutCmds()...)
 	root.AddCommand(newForwardCmd())
 	root.AddCommand(newConnectCmd())
+	root.AddCommand(newMCPCmd())
+	root.AddCommand(newShareCmd())
+	root.AddCommand(newAccessCmd())
+	root.AddCommand(newNetCmd())
 
 	// Ust-seviye "zorven status": istemci ayarlarini ve arka plan servisinin
 	// durumunu tek bakista gosterir. (Alt komut olarak tanimli olmasaydi cobra
@@ -648,4 +712,18 @@ func httpStatusText(status int) string {
 	default:
 		return ""
 	}
+}
+
+// isPlainWord, yalniz kucuk harf ve tireden olusan (port, nokta, iki nokta
+// icermeyen) bir sozcuk mu: bilinmeyen alt komut ipucu icin.
+func isPlainWord(w string) bool {
+	if w == "" {
+		return false
+	}
+	for _, r := range w {
+		if !(r >= 'a' && r <= 'z') && r != '-' {
+			return false
+		}
+	}
+	return true
 }

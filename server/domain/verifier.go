@@ -32,11 +32,23 @@ func NewNetDNSVerifier() *NetDNSVerifier {
 	return &NetDNSVerifier{Resolver: net.DefaultResolver}
 }
 
+// LookupCNAME, once zone'un yetkili sunucularina sorar (ozyinelemeli
+// cozumleyicilerin eski/negatif onbellegi kullaniciyi bekletmesin); yetkili
+// cevap yoksa sistem cozumleyicisine duser.
 func (v *NetDNSVerifier) LookupCNAME(ctx context.Context, host string) (string, error) {
+	if c, err := lookupAuthoritativeCNAME(ctx, host); err == nil && c != "" {
+		return c + ".", nil
+	}
 	return v.Resolver.LookupCNAME(ctx, host)
 }
 
+// LookupTXT, once yetkili sunuculardan okur; yetkili cevap alinamazsa sistem
+// cozumleyicisine duser. 2026-10-17: kullanici TXT degerini degistirdikten sonra
+// sistem cozumleyicisi eski degeri onbellekten verdigi icin dogrulama gecmiyordu.
 func (v *NetDNSVerifier) LookupTXT(ctx context.Context, name string) ([]string, error) {
+	if txts, err := lookupAuthoritativeTXT(ctx, name); err == nil && len(txts) > 0 {
+		return txts, nil
+	}
 	return v.Resolver.LookupTXT(ctx, name)
 }
 

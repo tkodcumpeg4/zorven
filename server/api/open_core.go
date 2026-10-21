@@ -18,6 +18,9 @@ import (
 func (s *Server) audit(_ *http.Request, _, _, _ string)       {}
 func (s *Server) auditFor(_ *http.Request, _, _, _, _ string) {}
 
+// AuditExternal: dis paketlerin (MCP, OAuth) denetim kancasi; acikta NO-OP.
+func (s *Server) AuditExternal(_, _, _, _, _, _ string) {}
+
 // auditActor, istegi yapan kimligin insan-okur etiketi (ziyaretci oturumu
 // olaylarinda kullanilir; denetim kaydindan bagimsizdir).
 func auditActor(r *http.Request) string {

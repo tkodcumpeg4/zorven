@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,6 +24,7 @@ import (
 	"github.com/tkodcumpeg4/zorven/server/ingress"
 	"github.com/tkodcumpeg4/zorven/server/ipfilter"
 	"github.com/tkodcumpeg4/zorven/server/mail"
+	"github.com/tkodcumpeg4/zorven/server/netctl"
 	"github.com/tkodcumpeg4/zorven/server/portpool"
 	"github.com/tkodcumpeg4/zorven/server/rawproxy"
 	"github.com/tkodcumpeg4/zorven/server/reqlog"
@@ -89,6 +91,8 @@ type Server struct {
 
 	// UDPStats (FAZ 4 / F24), UDP tunelinin canli istatistikleri (rawproxy).
 	UDPStats func(tunnelID string) (rawproxy.UDPLiveStats, bool)
+	// TCPStats, ham TCP tunelinin canli istatistikleri (rawproxy).
+	TCPStats func(tunnelID string) (rawproxy.TCPLiveStats, bool)
 
 	// GitHub, GitHub OAuth ile giris (opsiyonel; yalnizca yapilandirilinca acilir).
 	GitHub GitHubAuth
@@ -130,6 +134,11 @@ type Server struct {
 	// MailClient, mail istemcisi erisimi (IMAP/SMTP gonderim) sunucu ayarlari.
 	// nil ise "Mail uygulamalarinda kullan" ozelligi kapalidir.
 	MailClient *mail.ClientConfig
+
+	// Net, Zorven Net (WireGuard) kontrol duzlemi; nil ise /api/v1/net/* kapali.
+	Net *netctl.Manager
+	// NetGate (opsiyonel), plan kapisi kancasi (acik surumde nil = izin ver).
+	NetGate func(ctx context.Context, tenantID string) error
 }
 
 // WriteEntitlementError, kota/entitlement hatasini API bicimiyle yazar (dis paketler icin).
@@ -235,6 +244,7 @@ func (s *Server) Routes() *http.ServeMux {
 	// UDP ileri + oyun sunucusu durumu (FAZ 4 / F24)
 	mux.HandleFunc("GET /api/v1/tunnels/{id}/udp", s.getTunnelUDP)
 	mux.HandleFunc("PUT /api/v1/tunnels/{id}/udp", s.setTunnelUDP)
+	mux.HandleFunc("GET /api/v1/tunnels/{id}/tcp", s.getTunnelTCP)
 	mux.HandleFunc("GET /api/v1/tunnels/{id}/game-status", s.getGameStatus)
 	// Web ile kapi acma (ham TCP/UDP tunelleri)
 	mux.HandleFunc("GET /api/v1/tunnels/{id}/door", s.getTunnelDoor)
@@ -355,6 +365,15 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("GET /api/v1/network/resources", s.listNetworkResources)
 	mux.HandleFunc("POST /api/v1/network/resources", s.createNetworkResource)
 	mux.HandleFunc("GET /api/v1/network/connect", s.connectNetwork)
+
+	// Zorven Net (WireGuard): paylasimlar, dugumler, `zorven access` oturumu.
+	mux.HandleFunc("GET /api/v1/net/nodes", s.listNetNodes)
+	mux.HandleFunc("DELETE /api/v1/net/nodes/{id}", s.revokeNetNode)
+	mux.HandleFunc("GET /api/v1/net/shares", s.listNetShares)
+	mux.HandleFunc("POST /api/v1/net/shares", s.createNetShare)
+	mux.HandleFunc("PATCH /api/v1/net/shares/{id}", s.updateNetShare)
+	mux.HandleFunc("DELETE /api/v1/net/shares/{id}", s.deleteNetShare)
+	mux.HandleFunc("GET /api/v1/net/session", s.netSession)
 
 	mux.HandleFunc("GET /api/v1/devices", s.listDevices)
 	mux.HandleFunc("GET /api/v1/devices/{id}", s.getDevice)
@@ -495,6 +514,20 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	out["platform_admin"] = isPlatformAdmin(r.Context())
+	// API token ile gelindiyse etkin (genisletilmis) kapsamlar da bildirilir:
+	// MCP araclari ve istemciler hangi islemlerin calisacagini buradan bilir.
+	if granted, ok := apiScopesFromContext(r.Context()); ok {
+		eff := effectiveScopes(granted)
+		list := make([]string, 0, len(eff))
+		for sc := range eff {
+			list = append(list, sc)
+		}
+		sort.Strings(list)
+		out["scopes"] = list
+	}
+	if projID, ok := s.projectFor(r); ok && projID != "" {
+		out["project_id"] = projID
+	}
 	writeJSON(w, http.StatusOK, out)
 }
 

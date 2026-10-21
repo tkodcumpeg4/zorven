@@ -35,16 +35,16 @@ function errMsg(err: any, fallback: string): string {
 }
 
 // Tab state: 'tokens' | 'ip'
-const activeTab = ref<'tokens' | 'ip'>((route.query.tab as any) || 'tokens')
+const activeTab = ref<'tokens' | 'ip' | 'apps'>((route.query.tab as any) || 'tokens')
 
 // Watch query param
 watch(() => route.query.tab, (tab) => {
-  if (tab === 'tokens' || tab === 'ip') {
+  if (tab === 'tokens' || tab === 'ip' || tab === 'apps') {
     activeTab.value = tab
   }
 })
 
-function switchTab(tab: 'tokens' | 'ip') {
+function switchTab(tab: 'tokens' | 'ip' | 'apps') {
   activeTab.value = tab
   router.replace({ query: { ...route.query, tab } })
 }
@@ -374,7 +374,20 @@ function isExpired(expiresAt?: string | null) {
           {{ ipRules.length }}
         </span>
       </button>
+
+      <button
+        type="button"
+        class="flex cursor-pointer items-center gap-2 pb-3 text-sm font-medium transition-colors border-b-2"
+        :class="activeTab === 'apps' ? 'border-accent text-fg font-semibold' : 'border-transparent text-fg-muted hover:text-fg'"
+        @click="switchTab('apps')"
+      >
+        <Icon name="lucide:plug-zap" class="size-4" :class="activeTab === 'apps' ? 'text-accent' : ''" />
+        <span>{{ t('oauth.apps.tab') }}</span>
+      </button>
     </div>
+
+    <!-- TAB 4: BAGLI UYGULAMALAR (OAuth / MCP) -->
+    <OAuthConnectedApps v-if="activeTab === 'apps'" />
 
     <!-- TAB 1: REST API ANAHTARLARI -->
     <div v-if="activeTab === 'tokens'" class="space-y-6">
@@ -514,6 +527,7 @@ function isExpired(expiresAt?: string | null) {
           </table>
         </div>
       </div>
+      <McpConnectCard />
     </div>
 
     <!-- TAB 3: INGRESS IP FILTRELEME (ALLOWLIST) -->

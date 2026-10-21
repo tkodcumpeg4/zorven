@@ -19,6 +19,7 @@ package api
 //	                                               force=true + confirm="RESEND" herkese yeniden gonderir
 //	GET    /api/v1/announcements/preference       — oturumdaki kullanicinin tercihi
 //	PUT    /api/v1/announcements/preference       — tercihi degistir
+//	PUT    /api/v1/announcements/preference/lang  — yalniz e-posta dilini panel diline esitle
 
 import (
 	"context"
@@ -53,6 +54,7 @@ func (s *Server) registerUpdates(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/admin/updates/{id}/send", s.adminSendUpdate)
 	mux.HandleFunc("GET /api/v1/announcements/preference", s.getAnnouncementPref)
 	mux.HandleFunc("PUT /api/v1/announcements/preference", s.putAnnouncementPref)
+	mux.HandleFunc("PUT /api/v1/announcements/preference/lang", s.putAnnouncementLang)
 }
 
 // updatesStore, depo Guncellemeler'i destekliyorsa doner; yoksa 501 yazar.
@@ -542,6 +544,34 @@ func (s *Server) putAnnouncementPref(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, pref)
+}
+
+// putAnnouncementLang, panel dili degisince duyuru e-postalarinin dilini esitler.
+// Abonelik/onay bilgisine dokunmaz; tercih satiri yoksa (hic sorulmamis) etkisizdir.
+func (s *Server) putAnnouncementLang(w http.ResponseWriter, r *http.Request) {
+	u, ok := invitationUser(w, r)
+	if !ok {
+		return
+	}
+	us, ok := s.updatesStore(w)
+	if !ok {
+		return
+	}
+	var b struct {
+		Lang string `json:"lang"`
+	}
+	if !decode(w, r, &b) {
+		return
+	}
+	if strings.TrimSpace(b.Lang) == "" {
+		writeJSONError(w, http.StatusBadRequest, "invalid_request", "lang gerekli")
+		return
+	}
+	if err := us.SetAnnouncementLang(r.Context(), u.ID, updates.NormLang(b.Lang)); err != nil {
+		s.fail(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // ForceResendConfirm, "herkese yeniden gonder" (force) icin panelde yazilan onay metni.

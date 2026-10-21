@@ -56,7 +56,7 @@ func (h *Handler) serveWebSocket(w http.ResponseWriter, r *http.Request, sess *t
 			delete(wsHeaders, "Cookie")
 		}
 	}
-	stream, err := sess.OpenWS(ctx, tunnelID, r.URL.Path, r.URL.RawQuery, wsHeaders)
+	stream, err := sess.OpenWS(ctx, tunnelID, agentPath(r.URL), r.URL.RawQuery, wsHeaders)
 	if err != nil {
 		logRec.status = http.StatusBadGateway
 		writeError(w, r, http.StatusBadGateway, protocol.CodeClientOffline,

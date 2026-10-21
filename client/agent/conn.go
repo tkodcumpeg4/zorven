@@ -19,6 +19,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/tkodcumpeg4/zorven/client/metrics"
+	"github.com/tkodcumpeg4/zorven/client/wgnet"
 	"github.com/tkodcumpeg4/zorven/shared/protocol"
 )
 
@@ -66,10 +67,28 @@ type Agent struct {
 	// updating, es zamanli guncelleme tetiklerini serilestiren bayrak.
 	updating atomic.Bool
 	// forceUpdate: elle `zorven update` (sunucu ayarindan bagimsiz); lastUpdateErr sonucunu tasir.
-	forceUpdate   atomic.Bool
+	forceUpdate atomic.Bool
 	// updateKeys: test icin acik anahtar listesi gecersiz kilma (nil = updatesig.PublicKeys).
-	updateKeys []string
+	updateKeys    []string
 	lastUpdateErr error
+
+	// OnReady, ayarlar kurulduktan sonra Run basinda bir kez cagrilir; yerel
+	// kontrol kanali (IPC) bu noktada baslatilir.
+	OnReady func(ctx context.Context)
+	// NoNet true ise Zorven Net (WireGuard port paylasimi) ilan edilmez (--no-net).
+	NoNet bool
+	// NetKeyPath, wg ozel anahtar dosyasi (bos: <ayar dizini>/zorven/wg.key).
+	NetKeyPath string
+	// NetShares, baglaninca olusturulacak paylasimlar (`zorven share`).
+	NetShares []NetShareSpec
+	// NetAccess, bu cihaza acilan paylasimlar icin yerel dinleyiciler (--access).
+	NetAccess []NetAccessSpec
+	// OnNetEvent, net olaylarini bildirir (CLI yazdirir). nil olabilir.
+	OnNetEvent func(string)
+	// wgNet, sunucu wg_net + wg_relay'i etkinlestirdiyse true.
+	wgNet bool
+	// netRT, calisan wg dugumu ve IPC ile acilan paylasim/erisim kayitlari.
+	netRT netRuntime
 
 	// RequestedTarget, tek komutla acilacak port/hedef (or. "http://localhost:8080").
 	RequestedTarget string
@@ -99,6 +118,8 @@ type Agent struct {
 
 	// screenInputStatus, sunucu hello_ack ile screen_input_status'u etkinlestirdiyse true.
 	screenInputStatus bool
+	// udpProbe, sunucu hello_ack ile udp_probe'u etkinlestirdiyse true.
+	udpProbe bool
 	// screen2, sunucu hello_ack ile screen2'yi etkinlestirdiyse true.
 	screen2 bool
 	// screen2Layers, sunucu hello_ack ile katmanli screen2yi etkinlestirdiyse true.
@@ -150,6 +171,49 @@ func (a *Agent) setupTLS() error {
 	return nil
 }
 
+// Caps, calisan ajanin yerel izin tavanini ve etkin durumunu doner.
+func (a *Agent) Caps() Caps {
+	if a.settings == nil {
+		return Caps{}
+	}
+	return a.settings.snapshot()
+}
+
+// SetCaps, calisan ajanda terminal/ekran tavanini yeniden baslatmadan degistirir
+// (nil = degistirme). YALNIZCA yerel yollardan (IPC, masaustu arayuzu) cagrilir;
+// hicbir ag mesaji buraya ulasmaz. Kapatilan izne ait aktif oturumlar hemen
+// sonlandirilir.
+func (a *Agent) SetCaps(terminal, screen *bool) Caps {
+	if a.settings == nil {
+		return Caps{}
+	}
+	c, ct, cs := a.settings.setCaps(terminal, screen, a.Log)
+	a.mu.Lock()
+	tm, sm := a.terminal, a.screen
+	a.mu.Unlock()
+	if ct && tm != nil {
+		tm.closeAll()
+	}
+	if cs && sm != nil {
+		sm.closeAll()
+	}
+	return c
+}
+
+// HTTPClientWithCA, verilen CA sertifikasina guvenen bir http istemcisi doner
+// (CLI alt komutlari icin; self-signed sunucu).
+func HTTPClientWithCA(path string) (*http.Client, error) {
+	pem, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("CA sertifikasi okunamadi: %w", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("%s gecerli bir PEM sertifikasi icermiyor", path)
+	}
+	return &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}}}, nil
+}
+
 // Run, baglanti kopsa da surekli yeniden dener; yalnizca ctx iptal edilince
 // veya token kalici olarak gecersizse (401/409/426) durur.
 func (a *Agent) Run(ctx context.Context) error {
@@ -159,6 +223,9 @@ func (a *Agent) Run(ctx context.Context) error {
 		screen:   !a.NoScreen,
 	}, !a.NoAutoUpdate)
 	a.settings.levelVar = a.LogLevel
+	if a.OnReady != nil {
+		a.OnReady(ctx)
+	}
 
 	if err := a.setupTLS(); err != nil {
 		a.emit(Status{State: StateFatal, Message: err.Error()})
@@ -384,17 +451,24 @@ func (a *Agent) handshake(ctx context.Context, conn *websocket.Conn) error {
 	// -> flowControl false kalir ve govde kredisiz gonderilir (eski davranis).
 	a.flowControl = false
 	a.screenInputStatus = false
+	a.udpProbe = false
 	a.screen2 = false
 	a.screen2Layers = false
 	a.screenCursor = false
 	a.screenClipboard = false
 	a.screenFiles = false
+	var wgNet, wgRelay bool
 	for _, f := range ack.Features {
+		wgNet = wgNet || f == protocol.FeatureWGNet
+		wgRelay = wgRelay || f == protocol.FeatureWGRelay
 		if f == protocol.FeatureFlowControl {
 			a.flowControl = true
 		}
 		if f == protocol.FeatureScreenInputStatus {
 			a.screenInputStatus = true
+		}
+		if f == protocol.FeatureUDPProbe {
+			a.udpProbe = true
 		}
 		if f == protocol.FeatureScreen2 {
 			a.screen2 = true
@@ -412,6 +486,8 @@ func (a *Agent) handshake(ctx context.Context, conn *websocket.Conn) error {
 			a.screenFiles = true
 		}
 	}
+
+	a.wgNet = wgNet && wgRelay && !a.NoNet
 
 	// Uzak ayarlar (F15). Yerel tavanla sinirlanarak uygulanir; yerelde
 	// kapali bir izni sunucu ACAMAZ (bkz. settings.go).
@@ -447,6 +523,7 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) error {
 	cs := newClientSession(conn, a.LocalURL, a.Log)
 	cs.flowControl = a.flowControl // el sikismada pazarlandi
 	cs.screenInputStatus = a.screenInputStatus
+	cs.udpProbe = a.udpProbe
 	cs.screen2 = a.screen2
 	cs.screen2Layers = a.screen2 && a.screen2Layers
 	cs.screenCursor = a.screenCursor
@@ -478,6 +555,23 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) error {
 	}
 	tm.onChanged = refreshSessions
 	sm.onChanged = refreshSessions
+
+	if cs.udpProbe {
+		go cs.runUDPAgentStats(ctx)
+	}
+
+	// Zorven Net: wg dugumu (yalniz pazarlandiysa).
+	var wn *wgnet.Node
+	if a.wgNet {
+		nctx, ncancel := context.WithCancel(ctx)
+		defer ncancel()
+		wn = a.startNet(nctx, cs)
+		if wn != nil {
+			a.netRT.set(nctx, wn)
+			defer a.netRT.clear(wn)
+			defer wn.Close()
+		}
+	}
 
 	defer func() {
 		a.mu.Lock()
@@ -539,6 +633,12 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) error {
 				}
 				continue
 			}
+			if frame.FrameType == protocol.FrameWG {
+				if wn != nil {
+					wn.HandleFrame(frame.ReqID, frame.Payload)
+				}
+				continue
+			}
 			if frame.FrameType == protocol.FrameWSData {
 				cs.routeWSData(frame.ReqID, frame.Payload)
 				continue
@@ -575,6 +675,20 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) error {
 				return fmt.Errorf("pong gonderilemedi: %w", err)
 			}
 			a.Log.Debug("ping/pong", "cpu", m.CPUPercent, "mem", m.MemoryPercent)
+
+		case protocol.TypeUDPProbe:
+			// Yalniz pazarlandiysa yanki doner; sunucu zaten pazarlanmadan yollamaz.
+			if cs.udpProbe {
+				var pr protocol.UDPProbe
+				if err := json.Unmarshal(data, &pr); err == nil {
+					cs.echoUDPProbe(ctx, pr)
+				}
+			}
+
+		case protocol.TypeNetRegistered, protocol.TypeNetMap, protocol.TypeNetShareResult, protocol.TypeNetError:
+			if wn != nil {
+				wn.HandleControl(ctx, mt, data)
+			}
 
 		case protocol.TypeHTTPRequest:
 			var req protocol.HTTPRequest

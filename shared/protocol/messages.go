@@ -119,6 +119,11 @@ const (
 	TypeFileListResult MessageType = "file_list_result" // istemci -> sunucu
 
 	TypeWindowUpdate MessageType = "window_update"
+
+	// UDP tunel olcumu (FeatureUDPProbe): gecikme / kayip yoklamasi.
+	TypeUDPProbe      MessageType = "udp_probe"       // sunucu -> istemci
+	TypeUDPProbeEcho  MessageType = "udp_probe_echo"  // istemci -> sunucu (aynen yanki)
+	TypeUDPAgentStats MessageType = "udp_agent_stats" // istemci -> sunucu: kuyruk dusurme sayaclari
 )
 
 // Envelope yalnizca tip alanini cozer; gercek mesaj ikinci gecerde cozulur.
@@ -129,7 +134,7 @@ type Envelope struct {
 // --- Client -> Server ------------------------------------------------------
 
 type Hello struct {
-	Type          MessageType `json:"type"`
+	Type MessageType `json:"type"`
 	// ClientVersion, istemci ikilisinin GERCEK surumu ("0.2.2", yerel derlemede "dev").
 	// Protokol uyumlulugu ProtocolVersion / X-Tunnel-Client-Version ile ayridir.
 	ClientVersion string `json:"client_version"`

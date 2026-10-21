@@ -98,6 +98,8 @@ func (f *fakeStore) CountAnnouncementRecipients(context.Context) (int, error) {
 func (f *fakeStore) GetAnnouncementPref(_ context.Context, id string) (store.AnnouncementPref, error) {
 	return store.AnnouncementPref{Subscribed: f.sub[id]}, nil
 }
+func (f *fakeStore) SetAnnouncementLang(context.Context, string, string) error { return nil }
+
 func (f *fakeStore) SetAnnouncementPref(_ context.Context, id string, sub bool, _, _ string) error {
 	f.mu.Lock()
 	f.sub[id] = sub
@@ -327,9 +329,9 @@ func TestCampaignNoConcurrentRunForSamePost(t *testing.T) {
 
 func siteWith(f *fakeStore) (*Site, http.Handler) {
 	var mfs fs.FS = fstest.MapFS{
-		"guncellemeler.html": {Data: []byte(`<html lang="tr"><head><title>x</title><meta name="description" content="d">
+		"updates.html": {Data: []byte(`<html lang="tr"><head><title>x</title><meta name="description" content="d">
 <!-- zv:head -->
-  <link rel="canonical" href="https://zorven.app/guncellemeler">
+  <link rel="canonical" href="https://zorven.app/updates">
 <!-- /zv:head --></head><body><header></header><main>old</main></body></html>`)},
 		"en/updates.html": {Data: []byte(`<html lang="en"><head><title>x</title><meta name="description" content="d">
 <!-- zv:head --><!-- /zv:head --></head><body><main>old</main></body></html>`)},
@@ -352,10 +354,10 @@ func TestSitePublicOnlyPublishedAndFallback(t *testing.T) {
 	f.posts = []store.UpdatePost{pub, draft}
 	_, h := siteWith(f)
 
-	if rec := get(h, "GET", "/guncellemeler"); rec.Code != 200 || strings.Contains(rec.Body.String(), "GIZLI TASLAK") || !strings.Contains(rec.Body.String(), "Yeni surum") {
+	if rec := get(h, "GET", "/updates"); rec.Code != 200 || strings.Contains(rec.Body.String(), "GIZLI TASLAK") || !strings.Contains(rec.Body.String(), "Yeni surum") {
 		t.Fatalf("liste hatali: %d %s", rec.Code, rec.Body.String())
 	}
-	if rec := get(h, "GET", "/guncellemeler/taslak"); rec.Code != 404 {
+	if rec := get(h, "GET", "/updates/taslak"); rec.Code != 404 {
 		t.Fatalf("taslak acik: %d", rec.Code)
 	}
 	if rec := get(h, "GET", "/en/updates/v0-2-9"); rec.Code != 200 || !strings.Contains(rec.Body.String(), "New release") {
@@ -366,7 +368,7 @@ func TestSitePublicOnlyPublishedAndFallback(t *testing.T) {
 	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "New release") || !strings.Contains(rec.Body.String(), "upd-note") {
 		t.Fatalf("ja yedek hatali: %d %s", rec.Code, rec.Body.String())
 	}
-	if rec := get(h, "GET", "/guncellemeler/..%2fx"); rec.Code == 200 {
+	if rec := get(h, "GET", "/updates/..%2fx"); rec.Code == 200 {
 		t.Fatal("gecersiz slug 200")
 	}
 	if rec := get(h, "GET", "/about"); rec.Code != 299 {
@@ -376,8 +378,20 @@ func TestSitePublicOnlyPublishedAndFallback(t *testing.T) {
 	if rss.Code != 200 || !strings.Contains(rss.Header().Get("Content-Type"), "rss+xml") || strings.Contains(rss.Body.String(), "taslak") {
 		t.Fatalf("rss hatali: %d %s", rss.Code, rss.Body.String())
 	}
-	if rec := get(h, "POST", "/guncellemeler"); rec.Code != 405 {
+	if rec := get(h, "POST", "/updates"); rec.Code != 405 {
 		t.Fatalf("POST izinli: %d", rec.Code)
+	}
+	// Eski Turkce yol kalici olarak /updates'e yonlenir (gonderilmis e-posta linkleri).
+	for from, to := range map[string]string{
+		"/guncellemeler":               "/updates",
+		"/guncellemeler/":              "/updates",
+		"/guncellemeler/surum-1":       "/updates/surum-1",
+		"/guncellemeler/rss.xml?utm=x": "/updates/rss.xml?utm=x",
+	} {
+		rec := get(h, "GET", from)
+		if rec.Code != http.StatusMovedPermanently || rec.Header().Get("Location") != to {
+			t.Fatalf("%s: %d -> %q, beklenen 301 %q", from, rec.Code, rec.Header().Get("Location"), to)
+		}
 	}
 }
 

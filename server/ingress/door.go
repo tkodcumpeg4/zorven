@@ -1,6 +1,8 @@
 package ingress
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
@@ -145,12 +147,38 @@ func (h *Handler) serveDoor(w http.ResponseWriter, r *http.Request, tun store.Ho
 		writeError(w, r, http.StatusInternalServerError, protocol.CodeAccessDenied, "Kapi acilamadi.")
 		return
 	}
-	renderAccessPage(w, r, http.StatusOK, accessPageData{
+	pd := accessPageData{
 		Lang: lang, Code: "door_open", Kind: pageDoorOpen,
 		Heading: t.doorOpenTitle, Message: t.doorOpenMsg,
 		Rows:      h.doorRows(tun, g, t, time.Now()),
 		CloseText: t.doorClose,
-	})
+	}
+	h.attachAddrProbe(&pd, g, normalizeHost(r.Host))
+	renderAccessPage(w, r, http.StatusOK, pd)
+}
+
+// attachAddrProbe, kapi sayfasina diger IP ailesini ogrenen yan kanal fetch'ini ekler.
+// Yan kanal kapaliysa, diger aile hosta tanimli degilse ya da o aile zaten grant'e
+// bagliysa hicbir sey eklemez. Basarisizlik ana grant'i etkilemez (sessizce atlanir).
+func (h *Handler) attachAddrProbe(pd *accessPageData, g store.DoorGrant, doorHost string) {
+	if h.Door == nil || len(g.ExtraIPs) > 0 {
+		return
+	}
+	host := h.Door.AddrHost(g.IP)
+	if host == "" {
+		return
+	}
+	tok := h.Door.IssueAddrToken(g, doorHost)
+	if tok == "" {
+		return
+	}
+	nonce := make([]byte, 16)
+	if _, err := rand.Read(nonce); err != nil {
+		return
+	}
+	pd.ScriptNonce = base64.RawURLEncoding.EncodeToString(nonce)
+	pd.ConnectHost = host
+	pd.AddrURL = "https://" + host + door.AddrPath + "?t=" + url.QueryEscape(tok)
 }
 
 func (h *Handler) renderDoorUnavailable(w http.ResponseWriter, r *http.Request, title, msg, lang string) {
@@ -251,7 +279,18 @@ func (h *Handler) doorConnectAddr(tun store.HostRoute) string {
 }
 
 func (h *Handler) doorRows(tun store.HostRoute, g store.DoorGrant, t pageText, now time.Time) []doorRow {
-	rows := []doorRow{{Label: t.doorIP, Value: g.IP}}
+	// Ana adres + (varsa) ek adres aile etiketiyle; diger aile yan kanaldan sonra dolar.
+	rows := []doorRow{{Label: familyLabel(t, g.IP), Value: g.IP}}
+	for _, x := range g.ExtraIPs {
+		rows = append(rows, doorRow{Label: familyLabel(t, x), Value: x})
+	}
+	if h.Door != nil && len(g.ExtraIPs) == 0 && h.Door.AddrHost(g.IP) != "" {
+		other := t.doorIPv6
+		if strings.Contains(g.IP, ":") {
+			other = t.doorIPv4
+		}
+		rows = append(rows, doorRow{ID: "zv-other", Label: other, Hidden: true})
+	}
 	if g.Identity != "" {
 		rows = append(rows, doorRow{Label: t.doorIdentity, Value: g.Identity})
 	}
@@ -270,6 +309,14 @@ func (h *Handler) doorRows(tun store.HostRoute, g store.DoorGrant, t pageText, n
 		rows = append(rows, doorRow{Label: t.doorProto, Value: proto})
 	}
 	return rows
+}
+
+// familyLabel, adresin ailesine gore "IPv4 (izinli)" / "IPv6 (izinli)" etiketi.
+func familyLabel(t pageText, ip string) string {
+	if strings.Contains(ip, ":") {
+		return t.doorIPv6
+	}
+	return t.doorIPv4
 }
 
 // remainingText, kalan sureyi "11 sa 59 dk kaldi" bicimine cevirir.

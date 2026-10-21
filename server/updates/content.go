@@ -132,8 +132,12 @@ func ListPath(lang string) string {
 	case LangJA:
 		return "/ja/updates"
 	}
-	return "/guncellemeler"
+	return "/updates"
 }
+
+// LegacyListPathTR, eski Turkce liste yolu; /updates altina kalici yonlendirilir
+// (gonderilmis e-postalardaki ve disaridaki eski linkler kirilmasin).
+const LegacyListPathTR = "/guncellemeler"
 
 // Excerpt, govdeden kisa duz-metin ozet cikarir.
 func Excerpt(md string, max int) string {

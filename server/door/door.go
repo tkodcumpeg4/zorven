@@ -111,6 +111,12 @@ type Service struct {
 	blocked map[blockKey]*blockedAgg
 	revs    map[string]*revCache // tunel -> oturum iptalleri
 	plans   map[string]planEntry // kiraci -> plan kapisi sonucu
+
+	// Diger IP ailesi yan kanali (addr.go).
+	TokenKey []byte // bos = yan kanal kapali
+	V4Host   string // yalniz A kaydi olan host (door4.<platform>); bos = yok
+	V6Host   string // yalniz AAAA kaydi olan host (door6.<platform>); bos = yok
+	addrUsed map[string]time.Time
 }
 
 // New, Service uretir. Run ayrica baslatilmalidir.
@@ -388,13 +394,15 @@ func (s *Service) loadGrants(tunnelID string, now time.Time) *grantCache {
 		if g.RevokedAt != nil {
 			continue
 		}
-		ip := NormalizeIP(g.IP)
-		if ip == "" {
-			continue
-		}
-		k := grantKey(ip)
-		if cur, ok := gc.byIP[k]; !ok || g.ExpiresAt.After(cur) {
-			gc.byIP[k] = g.ExpiresAt
+		for _, raw := range allIPs(g) {
+			ip := NormalizeIP(raw)
+			if ip == "" {
+				continue
+			}
+			k := grantKey(ip)
+			if cur, ok := gc.byIP[k]; !ok || g.ExpiresAt.After(cur) {
+				gc.byIP[k] = g.ExpiresAt
+			}
 		}
 	}
 	s.mu.Lock()
@@ -447,6 +455,13 @@ func (s *Service) Close(ctx context.Context, t Target, ip, identity, method, use
 	if ip == "" {
 		return 0, errors.New("gecersiz istemci ip adresi")
 	}
+	// Ek (diger aile) adresler de kapanir: iptalden ONCE tum adresler okunur.
+	addrs := []string{ip}
+	if as, ok := s.St.(AddrStore); ok {
+		if list, err := as.DoorGrantAddrsByIP(ctx, t.TenantID, t.TunnelID, ip); err == nil && len(list) > 0 {
+			addrs = list
+		}
+	}
 	n, err := s.St.RevokeDoorGrantsByIP(ctx, t.TenantID, t.TunnelID, ip)
 	if err != nil {
 		return 0, err
@@ -455,8 +470,10 @@ func (s *Service) Close(ctx context.Context, t Target, ip, identity, method, use
 	// Ziyaretci kapattiysa kopyalanmis/eski oturum cerezi kapiyi yeniden acamasin.
 	_ = s.RecordRevocation(ctx, t.TunnelID, identity)
 	if n > 0 {
-		if s.OnRevoke != nil {
-			s.OnRevoke(t.TunnelID, ip)
+		for _, a := range addrs {
+			if s.OnRevoke != nil {
+				s.OnRevoke(t.TunnelID, NormalizeIP(a))
+			}
 		}
 		s.emit(accesslog.Event{
 			TenantID: t.TenantID, TunnelID: t.TunnelID, Hostname: t.Host,
@@ -476,8 +493,10 @@ func (s *Service) Revoke(ctx context.Context, tenantID, tunnelID, grantID string
 	s.Invalidate(tunnelID)
 	// Kisinin giris oturumu da dusurulur: eski cerezle kapi yeniden acilamaz.
 	_ = s.RecordRevocation(ctx, tunnelID, g.Identity)
-	if s.OnRevoke != nil {
-		s.OnRevoke(tunnelID, NormalizeIP(g.IP))
+	for _, a := range allIPs(g) {
+		if s.OnRevoke != nil {
+			s.OnRevoke(tunnelID, NormalizeIP(a))
+		}
 	}
 	s.emit(accesslog.Event{
 		TenantID: tenantID, TunnelID: tunnelID,
@@ -574,8 +593,10 @@ func (s *Service) EnforcePlan(ctx context.Context, tenantID string) (int, error)
 	for _, g := range grants {
 		withGrant[g.TunnelID] = true
 		s.Invalidate(g.TunnelID)
-		if s.OnRevoke != nil {
-			s.OnRevoke(g.TunnelID, NormalizeIP(g.IP))
+		for _, a := range allIPs(g) {
+			if s.OnRevoke != nil {
+				s.OnRevoke(g.TunnelID, NormalizeIP(a))
+			}
 		}
 		s.emit(accesslog.Event{
 			TenantID: tenantID, TunnelID: g.TunnelID,

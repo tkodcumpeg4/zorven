@@ -6,6 +6,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- Zorven Net: WireGuard-based port sharing between devices (shares, nodes, `zorven up/down/autostart`, local control socket, panel Shares page).
+- MCP server (remote endpoint and `zorven mcp` over stdio) and an OAuth 2.1 authorization server for custom connectors; connected-apps tab and connect card in the panel.
+- TCP and UDP tunnel metrics (connections, rejections, bytes, durations, RTT/loss), monthly usage metering, tunnel connection-quality view.
+- Authoritative DNS verification for custom domains, two-step tunnel picker, custom 404 pages, `/updates` path (old `/guncellemeler` redirects), Go SDK.
 - Remote screen "screen2" mode: binary tile protocol (only changed 64x64 tiles, JPEG/PNG/solid per region, adaptive quality/fps), canvas compositing in the panel; legacy MJPEG/H.264 kept for old clients.
 - Per-viewer screen settings: shared capture with a server-side tile store; each viewer gets its own fps and one of two quality layers without affecting others.
 - Multi-viewer screen sessions, server-enforced view-only, remote cursor overlay, text clipboard sync (Windows), Ctrl+Alt+Del and shortcut menu, input status badge (applied / blocked by an elevated window / unsupported).
@@ -20,6 +24,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Remote screen control (input, clipboard, files, shortcuts) is limited to tenant owners and admins; members can only watch. The decision is made when the screen ticket is issued.
 
 ### Fixed
+- Cancelling a browser/visitor request no longer drops the whole agent WebSocket connection (server and client, with regression tests).
 - CSP blocked blob: images and media, which left MJPEG/H.264 screen sharing black.
 - Markdown links with nested parentheses; a rejected link no longer leaks characters into the output.
 

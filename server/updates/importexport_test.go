@@ -51,7 +51,7 @@ func TestImportExampleFileIsValid(t *testing.T) {
 		t.Fatalf("ornek gecersiz: %v %+v", err, items)
 	}
 	p := items[0].Post
-	if p.Published || p.BodyTR == "" || p.BodyEN == "" || p.BodyJA == "" || p.Slug != "surum-0-2-8-0-2-9" {
+	if p.Published || p.BodyTR == "" || p.BodyEN == "" || p.BodyJA == "" || p.Slug != "zorven-0-2-15" {
 		t.Fatalf("ornek icerigi: %+v", p)
 	}
 }

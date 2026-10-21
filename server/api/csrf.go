@@ -192,3 +192,7 @@ func (m *Middleware) csrfCheck(w http.ResponseWriter, r *http.Request) bool {
 	}
 	return true
 }
+
+// OriginTrusted, istegin Origin/Referer'inin guvenilir olup olmadigini soyler
+// (MCP uc noktasi gibi harici paketler icin disa acik sarmalayici).
+func (m *Middleware) OriginTrusted(r *http.Request) bool { return m.originTrusted(r) }

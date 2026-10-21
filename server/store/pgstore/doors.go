@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -140,6 +141,107 @@ func scanGrant(row pgx.Row) (store.DoorGrant, error) {
 	return g, err
 }
 
+// attachExtraIPs, grant'lerin ek (diger aile) adreslerini tek sorguyla doldurur.
+func (s *Store) attachExtraIPs(ctx context.Context, gs []store.DoorGrant) error {
+	if len(gs) == 0 {
+		return nil
+	}
+	ids := make([]string, len(gs))
+	idx := make(map[string]int, len(gs))
+	for i := range gs {
+		ids[i] = gs[i].ID
+		idx[gs[i].ID] = i
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT grant_id, ip FROM tunnel_door_grant_addrs WHERE grant_id = ANY($1) ORDER BY family`, ids)
+	if err != nil {
+		return fmt.Errorf("kapi ek adresleri okunamadi: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, ip string
+		if err := rows.Scan(&id, &ip); err != nil {
+			return err
+		}
+		if i, ok := idx[id]; ok {
+			gs[i].ExtraIPs = append(gs[i].ExtraIPs, ip)
+		}
+	}
+	return rows.Err()
+}
+
+// AddDoorGrantAddr, aktif bir grant'e diger IP ailesinden ek adres baglar (aile basina
+// tek adres; yenisi eskisini degistirir). Grant aktif degilse ErrNotFound. ip grant'in
+// ANA adresiyle ayni ailedeyse bir sey yapmaz (added=false). Guncel grant doner.
+func (s *Store) AddDoorGrantAddr(ctx context.Context, grantID, ip string) (store.DoorGrant, bool, error) {
+	pip := net.ParseIP(ip)
+	if pip == nil {
+		return store.DoorGrant{}, false, errors.New("gecersiz ip")
+	}
+	fam := 6
+	if pip.To4() != nil {
+		fam = 4
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return store.DoorGrant{}, false, err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	g, err := scanGrant(tx.QueryRow(ctx,
+		`SELECT `+grantCols+` FROM tunnel_door_grants
+		  WHERE id=$1 AND revoked_at IS NULL AND expires_at > now() FOR UPDATE`, grantID))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return store.DoorGrant{}, false, store.ErrNotFound
+		}
+		return store.DoorGrant{}, false, err
+	}
+	if pg := net.ParseIP(g.IP); pg != nil && (pg.To4() != nil) == (fam == 4) {
+		return g, false, nil
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO tunnel_door_grant_addrs (grant_id, family, ip) VALUES ($1,$2,$3)
+		 ON CONFLICT (grant_id, family) DO UPDATE SET ip=EXCLUDED.ip, created_at=now()`,
+		grantID, fam, ip); err != nil {
+		return store.DoorGrant{}, false, fmt.Errorf("kapi ek adresi yazilamadi: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return store.DoorGrant{}, false, err
+	}
+	gs := []store.DoorGrant{g}
+	if err := s.attachExtraIPs(ctx, gs); err != nil {
+		return g, true, nil
+	}
+	return gs[0], true, nil
+}
+
+// DoorGrantAddrsByIP, ip'nin ana ya da ek adresi oldugu aktif grant'lerin TUM adreslerini
+// (ana + ek) tekrarsiz doner. Kapi kapatilirken tum acik baglantilari kesmek icin.
+func (s *Store) DoorGrantAddrsByIP(ctx context.Context, tenantID, tunnelID, ip string) ([]string, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT g.ip FROM tunnel_door_grants g
+		  WHERE g.tenant_id=$1 AND g.tunnel_id=$2 AND g.revoked_at IS NULL AND g.expires_at > now()
+		    AND (g.ip=$3 OR g.id IN (SELECT grant_id FROM tunnel_door_grant_addrs WHERE ip=$3))
+		 UNION
+		 SELECT a.ip FROM tunnel_door_grant_addrs a JOIN tunnel_door_grants g ON g.id=a.grant_id
+		  WHERE g.tenant_id=$1 AND g.tunnel_id=$2 AND g.revoked_at IS NULL AND g.expires_at > now()
+		    AND (g.ip=$3 OR g.id IN (SELECT grant_id FROM tunnel_door_grant_addrs WHERE ip=$3))`,
+		tenantID, tunnelID, ip)
+	if err != nil {
+		return nil, fmt.Errorf("kapi adresleri okunamadi: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var a string
+		if err := rows.Scan(&a); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
 // OpenDoorGrant, (tunel, ip) icin aktif grant varsa onu doner, yoksa olusturur.
 func (s *Store) OpenDoorGrant(ctx context.Context, g store.DoorGrant) (store.DoorGrant, bool, error) {
 	if g.ID == "" {
@@ -162,7 +264,12 @@ func (s *Store) OpenDoorGrant(ctx context.Context, g store.DoorGrant) (store.Doo
 		  WHERE tunnel_id=$1 AND ip=$2 AND revoked_at IS NULL AND expires_at > now()
 		  ORDER BY expires_at DESC LIMIT 1`, g.TunnelID, g.IP))
 	if err == nil {
-		return cur, false, tx.Commit(ctx)
+		if err := tx.Commit(ctx); err != nil {
+			return store.DoorGrant{}, false, err
+		}
+		gs := []store.DoorGrant{cur}
+		_ = s.attachExtraIPs(ctx, gs)
+		return gs[0], false, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return store.DoorGrant{}, false, err
@@ -202,7 +309,14 @@ func (s *Store) ListDoorGrants(ctx context.Context, tenantID, tunnelID string, a
 		}
 		out = append(out, g)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	if err := s.attachExtraIPs(ctx, out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // ListActiveDoorGrantsByTunnel, rawproxy onbellegi icin aktif grant'ler (kiracisiz).
@@ -222,7 +336,14 @@ func (s *Store) ListActiveDoorGrantsByTunnel(ctx context.Context, tunnelID strin
 		}
 		out = append(out, g)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	if err := s.attachExtraIPs(ctx, out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // RevokeDoorGrant, tek grant'i iptal eder; iptal edilen kaydi doner.
@@ -237,14 +358,17 @@ func (s *Store) RevokeDoorGrant(ctx context.Context, tenantID, tunnelID, grantID
 		}
 		return store.DoorGrant{}, fmt.Errorf("kapi izni iptal edilemedi: %w", err)
 	}
-	return g, nil
+	gs := []store.DoorGrant{g}
+	_ = s.attachExtraIPs(ctx, gs)
+	return gs[0], nil
 }
 
 // RevokeDoorGrantsByIP, (tunel, ip) icin aktif tum grant'leri iptal eder.
 func (s *Store) RevokeDoorGrantsByIP(ctx context.Context, tenantID, tunnelID, ip string) (int, error) {
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE tunnel_door_grants SET revoked_at = now()
-		  WHERE tenant_id=$1 AND tunnel_id=$2 AND ip=$3 AND revoked_at IS NULL AND expires_at > now()`,
+		  WHERE tenant_id=$1 AND tunnel_id=$2 AND revoked_at IS NULL AND expires_at > now()
+		    AND (ip=$3 OR id IN (SELECT grant_id FROM tunnel_door_grant_addrs WHERE ip=$3))`,
 		tenantID, tunnelID, ip)
 	if err != nil {
 		return 0, fmt.Errorf("kapi izinleri iptal edilemedi: %w", err)
@@ -353,5 +477,6 @@ func (s *Store) CloseDoorsForTenant(ctx context.Context, tenantID string, at tim
 	if err := tx.Commit(ctx); err != nil {
 		return nil, nil, err
 	}
+	_ = s.attachExtraIPs(ctx, revoked)
 	return tunnelIDs, revoked, nil
 }

@@ -4,7 +4,8 @@ Open a public Zorven tunnel to a local service **from your code**, in Go, Node.j
 
 | Language | Package | Kind |
 |---|---|---|
-| **Go** | `github.com/tkodcumpeg4/zorven/client/sdk` | Native — embeds the agent, no external binary needed |
+| **Go** (embedded agent) | `github.com/tkodcumpeg4/zorven/client/sdk` | Native — embeds the agent, no external binary needed |
+| **Go** (REST API) | `github.com/tkodcumpeg4/zorven/sdk/go` ([`go/`](./go)) | REST API client (clients, tunnels, hostnames, IP rules, analytics) + CLI `Connect` helper |
 | **Node.js** | `@zorven/sdk` ([`node/`](./node)) | Wraps the `zorven` CLI |
 | **Python** | `zorven` ([`python/`](./python)) | Wraps the `zorven` CLI |
 
@@ -19,6 +20,15 @@ defer sess.Close()
 log.Println("public URL:", sess.URL())
 sess.Wait()
 ```
+
+## Go REST API client
+
+```go
+c := zorven.NewClient(zorven.Options{Token: os.Getenv("ZORVEN_TOKEN")})
+for t, err := range c.Tunnels.Iter(ctx, nil) { /* ... */ }
+```
+
+See [`go/README.md`](./go/README.md).
 
 ## Node.js
 

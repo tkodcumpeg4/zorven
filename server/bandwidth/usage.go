@@ -12,6 +12,9 @@ const (
 	UsageTypeProxyHTTP    UsageType = "proxy_http"
 	UsageTypeScreenStream UsageType = "screen_stream"
 	UsageTypeShell        UsageType = "shell"
+	UsageTypeTCP          UsageType = "proxy_tcp"
+	UsageTypeUDP          UsageType = "proxy_udp"
+	UsageTypeNetRelay     UsageType = "net_relay"
 )
 
 // UsageEvent, veri duzleminde olusan bir bant genisligi tuketim olayi.

@@ -126,6 +126,8 @@ func (f *updatesFake) GetAnnouncementPref(_ context.Context, id string) (store.A
 	sub, ok := f.prefs[id] // opt-in: satir yoksa abone degil, sorulmadi
 	return store.AnnouncementPref{Subscribed: sub, Asked: ok}, nil
 }
+func (f *updatesFake) SetAnnouncementLang(context.Context, string, string) error { return nil }
+
 func (f *updatesFake) SetAnnouncementPref(_ context.Context, id string, sub bool, _, _ string) error {
 	f.prefs[id] = sub
 	return nil

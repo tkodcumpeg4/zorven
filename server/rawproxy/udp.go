@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/tkodcumpeg4/zorven/server/bandwidth"
 	"github.com/tkodcumpeg4/zorven/server/tunnel"
 )
 
@@ -92,7 +93,7 @@ func (b *tokenBucket) allow(rate int, now time.Time) bool {
 }
 
 type udpFlow struct {
-	stream   *tunnel.RawStream
+	stream   bridgeStream
 	cancel   context.CancelFunc
 	lastSeen int64       // unix nano (mu altinda)
 	bucket   tokenBucket // flow PPS (yalnizca okuma dongusu)
@@ -128,6 +129,11 @@ type udpListener struct {
 	tunnelBucket  tokenBucket // tunel PPS (yalnizca okuma dongusu)
 	newFlowBucket tokenBucket // yeni flow hizi (yalnizca okuma dongusu)
 
+	// meter: kiracinin aylik kullanimi + hiz siniri (nil = yok). Dinleyici
+	// basina tek Batcher; datagram basina yalnizca atomikler, rateLoop (1 sn)
+	// ve close'da flush.
+	meter *bandwidth.Batcher
+
 	done      chan struct{}
 	closeOnce sync.Once
 }
@@ -153,6 +159,7 @@ func (m *Manager) newUDPListener(bind string, port int, ti TunnelInfo) (*udpList
 		started: time.Now(),
 	}
 	ul.setInfo(ti)
+	ul.meter = bandwidth.NewBatcher(m.Usage, ti.TenantID, bandwidth.UsageTypeUDP)
 	go ul.readLoop()
 	go ul.idleSweep()
 	go ul.rateLoop()
@@ -172,6 +179,7 @@ func (ul *udpListener) close() {
 	ul.closeOnce.Do(func() {
 		close(ul.done)
 		ul.conn.Close()
+		ul.meter.Flush()
 		ul.mu.Lock()
 		for k, f := range ul.flows {
 			f.cancel()
@@ -241,6 +249,12 @@ func (ul *udpListener) handle(src *net.UDPAddr, data []byte) {
 		f.bucket.allow(ti.UDP.MaxFlowPPS, now)
 	}
 
+	// Kiraci bant siniri (kota asilinca dusuk hiz): token yoksa datagram dusulur.
+	if !bandwidth.AllowN(ul.meter.Limiter(context.Background()), len(data)) {
+		ul.stats.droppedRate.Add(1)
+		return
+	}
+	ul.meter.Add(int64(len(data)), 0)
 	ul.touch(f)
 	ul.stats.packetsIn.Add(1)
 	ul.stats.bytesIn.Add(int64(len(data)))
@@ -305,12 +319,17 @@ func (ul *udpListener) pumpFromLocal(f *udpFlow, src *net.UDPAddr, key string) {
 	for {
 		select {
 		case data := <-f.stream.FromLocal():
+			if !bandwidth.AllowN(ul.meter.Limiter(context.Background()), len(data)) {
+				ul.stats.droppedRate.Add(1)
+				continue
+			}
 			if _, err := ul.conn.WriteToUDP(data, src); err != nil {
 				ul.removeFlow(key, f)
 				return
 			}
 			ul.stats.packetsOut.Add(1)
 			ul.stats.bytesOut.Add(int64(len(data)))
+			ul.meter.Add(0, int64(len(data)))
 			ul.touch(f)
 		case <-f.stream.Closed():
 			ul.removeFlow(key, f)
@@ -379,6 +398,7 @@ func (ul *udpListener) rateLoop() {
 		case <-ul.done:
 			return
 		case now := <-tk.C:
+			ul.meter.Flush()
 			in, out := ul.stats.packetsIn.Load(), ul.stats.packetsOut.Load()
 			if dt := now.Sub(last).Seconds(); dt > 0 {
 				ul.stats.ppsInBits.Store(math.Float64bits(float64(in-lastIn) / dt))
@@ -407,6 +427,11 @@ type UDPLiveStats struct {
 	DroppedRate  int64     `json:"dropped_rate"`
 	DroppedSize  int64     `json:"dropped_size"`
 	DroppedFlows int64     `json:"dropped_flows"`
+
+	// ProbeSupported: istemci udp_probe'u destekliyor mu (panel "desteklemiyor" gostersin).
+	// ProbeRTTMs, oturum boyunca ussel ortalama gecikme (yoksa nil).
+	ProbeSupported bool     `json:"probe_supported"`
+	ProbeRTTMs     *float64 `json:"probe_rtt_ms"`
 }
 
 // UDPMinute, bir dinleyicinin son toplamadan bu yana biriken farki.
@@ -418,6 +443,14 @@ type UDPMinute struct {
 	FlowsNew                               int64
 	FlowsPeak                              int
 	DroppedRate, DroppedSize, DroppedFlows int64
+
+	// Olcum (FeatureUDPProbe). ProbeSupported false ise istemci desteklemiyor
+	// ya da cevrimdisi: RTT/kayip nil kalir. DroppedDatagrams kuyruk tasmalaridir.
+	ProbeSupported   bool
+	RTTP50Ms         *float64
+	RTTP95Ms         *float64
+	ProbeLossPct     *float64
+	DroppedDatagrams int64
 }
 
 type udpSnapshot struct {
@@ -461,7 +494,16 @@ func (m *Manager) UDPStats(tunnelID string) (UDPLiveStats, bool) {
 			if port == 0 {
 				port = k.port
 			}
-			return ul.live(port), true
+			ls := ul.live(port)
+			if m.Hub != nil {
+				if sess, on := m.Hub.Get(ti.ClientID); on && sess.UDPProbeSupported() {
+					ls.ProbeSupported = true
+					if v, ok := sess.UDPProbes().EWMA(ti.TunnelID); ok {
+						ls.ProbeRTTMs = &v
+					}
+				}
+			}
+			return ls, true
 		}
 	}
 	return UDPLiveStats{}, false
@@ -495,14 +537,75 @@ func (m *Manager) collectUDPMinutes(minute time.Time) []UDPMinute {
 			DroppedRate: cur.droppedRate - prev.droppedRate, DroppedSize: cur.droppedSize - prev.droppedSize,
 			DroppedFlows: cur.droppedFlows - prev.droppedFlows,
 		}
+		ul.applyProbe(&d, ti)
 		// Tamamen sessiz dakikalar yazilmaz (bos satir kalabaligi olmasin).
-		if d.PacketsIn == 0 && d.PacketsOut == 0 && d.FlowsNew == 0 && d.FlowsPeak == 0 &&
+		if d.DroppedDatagrams == 0 && d.ProbeLossPct == nil && d.RTTP50Ms == nil &&
+			d.PacketsIn == 0 && d.PacketsOut == 0 && d.FlowsNew == 0 && d.FlowsPeak == 0 &&
 			d.DroppedRate == 0 && d.DroppedSize == 0 && d.DroppedFlows == 0 {
 			continue
 		}
 		out = append(out, d)
 	}
 	return out
+}
+
+// applyProbe, istemci oturumunun yoklama penceresini dakikalik satira ekler.
+func (ul *udpListener) applyProbe(d *UDPMinute, ti TunnelInfo) {
+	if ul.m == nil || ul.m.Hub == nil {
+		return
+	}
+	sess, online := ul.m.Hub.Get(ti.ClientID)
+	if !online || !sess.UDPProbeSupported() {
+		return
+	}
+	d.ProbeSupported = true
+	w, ok := sess.UDPProbes().Drain(ti.TunnelID, time.Now())
+	if !ok {
+		return
+	}
+	d.DroppedDatagrams = w.Dropped
+	if w.HasRTT {
+		p50, p95 := w.P50Ms, w.P95Ms
+		d.RTTP50Ms, d.RTTP95Ms = &p50, &p95
+	}
+	if l, ok := w.LossPct(); ok {
+		d.ProbeLossPct = &l
+	}
+}
+
+// probeOnce, acik her UDP dinleyicisinin istemcisine bir yoklama yollar.
+// Istemci desteklemiyorsa ya da cevrimdisiysa atlanir.
+func (m *Manager) probeOnce(ctx context.Context) {
+	if m.Hub == nil {
+		return
+	}
+	m.mu.Lock()
+	infos := make([]TunnelInfo, 0, len(m.udpLn))
+	for _, ul := range m.udpLn {
+		infos = append(infos, ul.info())
+	}
+	m.mu.Unlock()
+	for _, ti := range infos {
+		sess, online := m.Hub.Get(ti.ClientID)
+		if !online {
+			continue
+		}
+		_, _ = sess.SendUDPProbe(ctx, ti.TunnelID)
+	}
+}
+
+// RunUDPProbes, UDP tunelleri icin periyodik gecikme/kayip yoklamasi yollar.
+func (m *Manager) RunUDPProbes(ctx context.Context) {
+	tk := time.NewTicker(tunnel.UDPProbeInterval)
+	defer tk.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tk.C:
+			m.probeOnce(ctx)
+		}
+	}
 }
 
 // RunUDPStats, her dakika dinleyicilerin farklarini sink'e verir. Sink hatasi

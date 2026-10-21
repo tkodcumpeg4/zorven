@@ -104,6 +104,11 @@ func (cs *clientSession) handleStreamOpen(m protocol.StreamOpen) {
 	// yollar; akis kayitli degilse routeStreamData o baytlari sessizce dusurur
 	// (eszamanli baglantilarda aralikli 19/20 hatasinin kok nedeni).
 	cs.registerStream(m.ReqID, conn)
+	if m.Proto == protocol.ProtoUDP {
+		cs.streamMu.Lock()
+		cs.streamTunnels[m.ReqID] = m.TunnelID
+		cs.streamMu.Unlock()
+	}
 	cs.sendStreamAck(m.ReqID, "", "")
 
 	frameType := protocol.FrameStreamData
@@ -123,6 +128,9 @@ func (cs *clientSession) handleStreamOpen(m protocol.StreamOpen) {
 				if serr := cs.sendFrame(context.Background(), protocol.BodyFrame{
 					FrameType: frameType, ReqID: m.ReqID, Payload: buf[:n],
 				}); serr != nil {
+					if m.Proto == protocol.ProtoUDP {
+						cs.udpDrops.add(m.TunnelID, 1) // sunucuya gonderilemedi
+					}
 					break
 				}
 			}
@@ -143,11 +151,15 @@ func (cs *clientSession) handleStreamOpen(m protocol.StreamOpen) {
 func (cs *clientSession) routeStreamData(_ uint8, reqID uint64, payload []byte) {
 	cs.streamMu.Lock()
 	conn, ok := cs.streamConns[reqID]
+	tunnelID := cs.streamTunnels[reqID]
 	cs.streamMu.Unlock()
 	if !ok {
 		return
 	}
 	if _, err := conn.Write(payload); err != nil {
+		if tunnelID != "" {
+			cs.udpDrops.add(tunnelID, 1) // UDP datagrami yerel servise yazilamadi
+		}
 		cs.closeStream(reqID)
 	}
 }
@@ -172,6 +184,7 @@ func (cs *clientSession) closeStream(reqID uint64) {
 	cs.streamMu.Lock()
 	conn, ok := cs.streamConns[reqID]
 	delete(cs.streamConns, reqID)
+	delete(cs.streamTunnels, reqID)
 	cs.streamMu.Unlock()
 	if ok {
 		conn.Close()
@@ -186,6 +199,7 @@ func (cs *clientSession) closeAllStreams() {
 		conns = append(conns, c)
 	}
 	cs.streamConns = make(map[uint64]net.Conn)
+	cs.streamTunnels = make(map[uint64]string)
 	cs.streamMu.Unlock()
 	for _, c := range conns {
 		c.Close()

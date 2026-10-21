@@ -1,8 +1,8 @@
 <script setup lang="ts">
 const api = useApi()
 const toast = useToast()
-const { platformAdmin } = useAuth()
-const { t } = useI18n()
+const { platformAdmin, platformDomain } = useAuth()
+const { t, locale } = useI18n()
 
 type Post = {
   id: string; slug: string; kind: string; version: string
@@ -138,7 +138,15 @@ watch([bodyOf, editing], () => {
 }, { immediate: true })
 onBeforeUnmount(() => { if (timer) clearTimeout(timer) })
 
-const publicPath = computed(() => `/guncellemeler/${form.slug}`)
+// Yazi tanitim sitesinde yayinlanir (panel hostunda yok): mutlak, panel diline gore adres.
+const siteOrigin = computed(() => {
+  const d = platformDomain.value || (import.meta.client ? location.host.replace(/^(panel|app)\./, '') : 'zorven.app')
+  return `https://${d}`
+})
+const publicPath = computed(() => {
+  const pre = locale.value === 'en' ? '/en' : locale.value === 'ja' ? '/ja' : ''
+  return `${siteOrigin.value}${pre}/updates/${form.slug}`
+})
 
 async function sendTest() {
   if (!editId.value) return

@@ -1,5 +1,6 @@
 import type {
   AccessEvent, AccessEventSummary, AccessEventsPage,
+  NetShare, NetNode, NetGrantee,
   Client, Tunnel, Hostname, RequestLog, LogFilter, CreateClientResponse,
   CreateCustomHostnameResponse, VerifyHostnameResponse, DNSCheckResult,
   Subscription, Plan, SubscriptionResponse, PlansResponse,
@@ -10,7 +11,7 @@ import type {
   TunnelAccess, TunnelAccessInput, TunnelDoor, DoorGrant,
   RequestDetail, ReplayResult, ReplayOverrides, Device,
   AbuseReport,
-  TunnelReplica, TunnelLBConfig, TunnelLBResp, TunnelUDPConfig, TunnelUDPResp, GameStatus,
+  TunnelReplica, TunnelLBConfig, TunnelLBResp, TunnelUDPConfig, TunnelUDPResp, TunnelTCPResp, GameStatus,
   TrafficPolicy, TrafficConfig,
   TunnelMetricsResp,
   TunnelAlert,
@@ -328,6 +329,11 @@ export function useApi() {
     return req<TunnelUDPResp>(`/tunnels/${id}/udp`)
   }
 
+  async function getTunnelTCP(id: string): Promise<TunnelTCPResp> {
+    if (USE_MOCK) { await delay(); return { live: null, series: [] } }
+    return req<TunnelTCPResp>(`/tunnels/${id}/tcp`)
+  }
+
   async function setTunnelUDP(id: string, payload: TunnelUDPConfig): Promise<TunnelUDPConfig> {
     if (USE_MOCK) { await delay(); return payload }
     return req<TunnelUDPConfig>(`/tunnels/${id}/udp`, { method: 'PUT', body: payload })
@@ -591,6 +597,22 @@ export function useApi() {
     return req<Tunnel>('/network/resources', { method: 'POST', body: p })
   }
 
+  // --- Zorven Net (WireGuard port paylaşımı) ---
+  async function listNetShares(): Promise<NetShare[]> {
+    const r = await req<{ shares: NetShare[] }>('/net/shares')
+    return r.shares || []
+  }
+  async function createNetShare(p: { client_id: string, port: number, proto: string, name?: string, to: NetGrantee[], expires_in_sec?: number }): Promise<void> {
+    await req('/net/shares', { method: 'POST', body: p })
+  }
+  async function deleteNetShare(id: string): Promise<void> {
+    await req(`/net/shares/${id}`, { method: 'DELETE' })
+  }
+  async function listNetNodes(): Promise<NetNode[]> {
+    const r = await req<{ nodes: NetNode[] }>('/net/nodes')
+    return r.nodes || []
+  }
+
   async function replayRequest(id: string, overrides?: ReplayOverrides): Promise<ReplayResult> {
     // Düzenleme yoksa gövde HİÇ gönderilmez: sunucu tarafında gövdesiz çağrı
     // "orijinali aynen gönder" anlamına gelir.
@@ -776,6 +798,11 @@ export function useApi() {
   }
   async function setAnnouncementPref(subscribed: boolean, lang: string, source: 'signup' | 'profile' | 'banner' = 'profile'): Promise<{ subscribed: boolean, asked: boolean, lang: string, source: string }> {
     return req(`/announcements/preference`, { method: 'PUT', body: { subscribed, lang, source } })
+  }
+  /** Panel dili degisince duyuru e-postalarinin dilini esitler (abonelik degismez). */
+  async function setAnnouncementLang(lang: string): Promise<void> {
+    if (USE_MOCK) return
+    await req(`/announcements/preference/lang`, { method: 'PUT', body: { lang } })
   }
 
   async function adminSwitchTenant(tenantId: string): Promise<{ success: boolean, tenant: { id: string, slug: string } }> {
@@ -1192,7 +1219,7 @@ export function useApi() {
     listTunnels, createTunnel, updateTunnel, deleteTunnel, getTunnelAccess, setTunnelAccess, revokeVisitorSessions,
     getTunnelDoor, setTunnelDoor, listDoorGrants, revokeDoorGrant,
     getTunnelReplicas, addTunnelReplica, removeTunnelReplica, getTunnelLB, setTunnelLB,
-    getTunnelUDP, setTunnelUDP, getGameStatus,
+    getTunnelUDP, getTunnelTCP, setTunnelUDP, getGameStatus,
     getTunnelTraffic, setTunnelTraffic,
     getTunnelMetrics, getAccessEventsSummary, listAccessEvents,
     getTunnelAlert, setTunnelAlert,
@@ -1202,10 +1229,11 @@ export function useApi() {
     listRequests, streamRequests, deviceApprove,
     getCaptureEnabled, setCaptureEnabled, getRequestDetail, replayRequest,
     listDevices, getDevice, listNetworkResources, createNetworkResource,
+    listNetShares, createNetShare, deleteNetShare, listNetNodes,
     adminGetStats, adminListTenants, adminListClients, adminListHostnames, adminSwitchTenant,
     adminListAbuseReports, adminFreeze,
     adminListUpdates, adminSaveUpdate, adminDeleteUpdate, adminPublishUpdate, adminPreviewUpdate, adminImportUpdates, adminExportUpdates,
-    adminUpdateSubscribers, adminTestUpdateEmail, adminSendUpdate, getAnnouncementPref, setAnnouncementPref,
+    adminUpdateSubscribers, adminTestUpdateEmail, adminSendUpdate, getAnnouncementPref, setAnnouncementPref, setAnnouncementLang,
     getSubscription, listPlans,
     listTeamMembers, inviteTeamMember, updateMemberRole, removeTeamMember,
     listMemberTokens, createMemberToken, revokeMemberToken,

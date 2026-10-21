@@ -353,8 +353,29 @@ func (s *Server) createCustomHostname(w http.ResponseWriter, r *http.Request) {
 		parentZone = verifiedParentZone(existing, fqdn)
 	}
 
+	// Ayni kiracida baska projede kayitliysa acik mesaj: kullanici hangi
+	// projede oldugunu gorsun (genel "zaten alinmis" yerine).
+	if existing, lerr := s.Store.ListHostnames(r.Context(), tenantID); lerr == nil {
+		for _, ex := range existing {
+			if ex.Type == store.HostTypeCustom && strings.EqualFold(ex.FQDN, fqdn) {
+				projName := ex.ProjectID
+				if p, perr := s.Store.GetProjectByID(r.Context(), tenantID, ex.ProjectID); perr == nil {
+					projName = p.Name
+				}
+				writeJSON(w, http.StatusConflict, map[string]any{"error": map[string]any{
+					"code":       "hostname_in_other_project",
+					"message":    fqdn + " bu organizasyonda '" + projName + "' projesinde zaten kayitli; o projede dogrulayin ya da oradan silip burada ekleyin",
+					"project_id": ex.ProjectID,
+					"project":    projName,
+				}})
+				return
+			}
+		}
+	}
+
 	verifyToken := "rpsh-verify-" + randomHex(8)
-	h, err := s.Store.AddCustomHostname(r.Context(), tenantID, body.TunnelID, fqdn, verifyToken)
+	projectID, _ := s.projectFor(r)
+	h, err := s.Store.AddCustomHostnameWithProject(r.Context(), tenantID, body.TunnelID, fqdn, verifyToken, projectID)
 	if errors.Is(err, store.ErrHostnameTaken) {
 		writeJSONError(w, http.StatusConflict, "hostname_taken", fqdn+" zaten alinmis")
 		return

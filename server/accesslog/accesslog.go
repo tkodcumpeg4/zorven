@@ -30,10 +30,11 @@ const (
 	ReasonSessionRevokedForUser = "session_revoked_user" // tek kimligin oturumlari sonlandirildi
 
 	// Web ile kapi acma (ham TCP/UDP tunelleri).
-	ReasonDoorOpened     = "door_opened"      // giris basarili, IP icin grant olustu
-	ReasonDoorClosed     = "door_closed"      // ziyaretci kapiyi kapatti / sahip grant'i iptal etti
-	ReasonDoorClosedPlan = "door_closed_plan" // plan Pro altina dustu: kapi otomatik kapandi, grant iptal edildi
-	ReasonBlockedNoGrant = "blocked_no_grant" // grant'siz ham baglanti/akis reddedildi (toplulastirilmis)
+	ReasonDoorOpened      = "door_opened"       // giris basarili, IP icin grant olustu
+	ReasonDoorClosed      = "door_closed"       // ziyaretci kapiyi kapatti / sahip grant'i iptal etti
+	ReasonDoorClosedPlan  = "door_closed_plan"  // plan Pro altina dustu: kapi otomatik kapandi, grant iptal edildi
+	ReasonDoorAddrLearned = "door_addr_learned" // grant'e diger IP ailesinden (IPv4/IPv6) ek adres baglandi
+	ReasonBlockedNoGrant  = "blocked_no_grant"  // grant'siz ham baglanti/akis reddedildi (toplulastirilmis)
 )
 
 // MaxUserAgent, saklanan User-Agent uzunlugu siniri.

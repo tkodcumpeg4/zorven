@@ -16,7 +16,7 @@ import (
 )
 
 var (
-	ErrNotFound             = errors.New("kayit bulunamadi")
+	ErrNotFound = errors.New("kayit bulunamadi")
 	// ErrMailAppPasswordLimit: kutu basina aktif uygulama parolasi siniri asildi.
 	ErrMailAppPasswordLimit = errors.New("uygulama parolasi siniri asildi")
 	ErrHostnameTaken        = errors.New("hostname zaten bir tunele bagli")
@@ -216,21 +216,21 @@ type Client struct {
 	CreatedAt time.Time `json:"created_at"`
 
 	// Asagidakiler DB'de tutulmaz; canli baglanti durumundan doldurulur.
-	Status     string            `json:"status"` // online | offline
-	Version    string            `json:"version,omitempty"`
-	RemoteAddr string            `json:"remote_addr,omitempty"`
-	LastSeenAt *time.Time        `json:"last_seen_at,omitempty"`
-	IsService  bool              `json:"is_service,omitempty"`
-	AppKind    string            `json:"app_kind,omitempty"` // "desktop" | ""
+	Status     string     `json:"status"` // online | offline
+	Version    string     `json:"version,omitempty"`
+	RemoteAddr string     `json:"remote_addr,omitempty"`
+	LastSeenAt *time.Time `json:"last_seen_at,omitempty"`
+	IsService  bool       `json:"is_service,omitempty"`
+	AppKind    string     `json:"app_kind,omitempty"` // "desktop" | ""
 	// Shells / DefaultShell: ajanin bildirdigi uzak terminal kabuklari (yalnizca
 	// canli istemci; eski istemcilerde yok). Panel kabuk secicisi icin.
 	Shells       []protocol.ShellInfo `json:"shells,omitempty"`
-	DefaultShell string              `json:"default_shell,omitempty"`
+	DefaultShell string               `json:"default_shell,omitempty"`
 	// UpdateAvailable/LatestVersion: bagli istemcinin surumu yayinlanan
 	// manifest'ten eskiyse doldurulur (DB'de tutulmaz).
-	UpdateAvailable bool   `json:"update_available,omitempty"`
-	LatestVersion   string `json:"latest_version,omitempty"`
-	Metrics    *protocol.Metrics `json:"metrics,omitempty"`
+	UpdateAvailable bool              `json:"update_available,omitempty"`
+	LatestVersion   string            `json:"latest_version,omitempty"`
+	Metrics         *protocol.Metrics `json:"metrics,omitempty"`
 
 	// Cihaz alanlari (FAZ 3 / F14). Bunlar DB'de TUTULUR: baglanti kopunca
 	// kaybolmasinlar ki cihaz offline iken de tanimlanabilsin.
@@ -282,6 +282,34 @@ type UDPStatMinute struct {
 	DroppedRate  int64     `json:"dropped_rate"`
 	DroppedSize  int64     `json:"dropped_size"`
 	DroppedFlows int64     `json:"dropped_flows"`
+
+	// Olcum (FeatureUDPProbe). nil = o dakikada olcum yok (istemci desteklemiyor
+	// ya da yanki gelmedi); DroppedDatagrams kuyruk tasmasiyla dusen datagramdir.
+	RTTP50Ms         *float64 `json:"rtt_p50_ms"`
+	RTTP95Ms         *float64 `json:"rtt_p95_ms"`
+	ProbeLossPct     *float64 `json:"probe_loss_pct"`
+	DroppedDatagrams int64    `json:"dropped_datagrams"`
+}
+
+// TCPStatMinute, bir ham TCP tunelinin bir dakikalik istatistik ozeti.
+// Ortalama sure DurSumMs/DurCount'tan turetilir (birlestirmede agirlik korunur).
+type TCPStatMinute struct {
+	TunnelID        string    `json:"-"`
+	TenantID        string    `json:"-"`
+	Minute          time.Time `json:"minute"`
+	ConnsNew        int64     `json:"conns_new"`
+	ConnsPeak       int       `json:"conns_peak"`
+	ConnsRejected   int64     `json:"conns_rejected"`
+	RejectedIP      int64     `json:"rejected_ip"`
+	RejectedDoor    int64     `json:"rejected_door"`
+	RejectedOffline int64     `json:"rejected_offline"`
+	RejectedDial    int64     `json:"rejected_dial"`
+	BytesIn         int64     `json:"bytes_in"`
+	BytesOut        int64     `json:"bytes_out"`
+	DurSumMs        int64     `json:"dur_sum_ms"`
+	DurCount        int64     `json:"dur_count"`
+	DurMaxMs        int64     `json:"dur_max_ms"`
+	DurAvgMs        float64   `json:"dur_avg_ms"`
 }
 
 type TunnelLB struct {
@@ -368,8 +396,8 @@ type MailMessage struct {
 
 	// IMAP erisimi (migration 0059). Panel JSON'una cikmaz (Folder haric).
 	Folder   string `json:"folder,omitempty"` // inbox | sent | trash | drafts ("" = yone gore varsayilan)
-	Mailbox  string `json:"-"` // kutu adresi (kucuk harf); "" ise yone gore turetilir
-	UID      uint32 `json:"-"` // klasor ici kalici UID (Insert sonrasi dolar)
+	Mailbox  string `json:"-"`                // kutu adresi (kucuk harf); "" ise yone gore turetilir
+	UID      uint32 `json:"-"`                // klasor ici kalici UID (Insert sonrasi dolar)
 	Flagged  bool   `json:"-"`
 	Answered bool   `json:"-"`
 	Deleted  bool   `json:"-"` // IMAP Deleted bayragi (EXPUNGE bekliyor)
@@ -681,6 +709,8 @@ type DoorGrant struct {
 	ExpiresAt time.Time  `json:"expires_at"`
 	CreatedAt time.Time  `json:"created_at"`
 	RevokedAt *time.Time `json:"revoked_at,omitempty"`
+	// ExtraIPs, ayni grant'e baglanan diger IP ailesindeki (IPv4/IPv6) ek adresler.
+	ExtraIPs []string `json:"extra_ips,omitempty"`
 }
 
 // TunnelAccessPolicy, bir tunelin erişim denetimi politikası (FAZ 1a).
@@ -882,6 +912,10 @@ type Store interface {
 	InsertUDPStats(ctx context.Context, stats []UDPStatMinute) error
 	ListUDPStats(ctx context.Context, tenantID, tunnelID string, since time.Time) ([]UDPStatMinute, error)
 	PruneUDPStats(ctx context.Context, before time.Time) (int64, error)
+	// Ham TCP dakikalik ozetleri (0078).
+	InsertTCPStats(ctx context.Context, stats []TCPStatMinute) error
+	ListTCPStats(ctx context.Context, tenantID, tunnelID string, since time.Time) ([]TCPStatMinute, error)
+	PruneTCPStats(ctx context.Context, before time.Time) (int64, error)
 
 	// Cihaz bilgisi (FAZ 3 / F14). UpdateDeviceInfo el sikismasinda,
 	// TouchDeviceSeen baglanti kopusunda cagrilir.
@@ -967,6 +1001,9 @@ type Store interface {
 	AddHostname(ctx context.Context, tenantID, tunnelID, fqdn, typ string) (Hostname, error)
 	AddHostnameWithProject(ctx context.Context, tenantID, tunnelID, fqdn, typ, projectID string) (Hostname, error)
 	AddCustomHostname(ctx context.Context, tenantID, tunnelID, fqdn, verifyToken string) (Hostname, error)
+	// AddCustomHostnameWithProject, ozel alan adini verilen projeye ekler
+	// (projectID bos ise kiracinin varsayilan projesi).
+	AddCustomHostnameWithProject(ctx context.Context, tenantID, tunnelID, fqdn, verifyToken, projectID string) (Hostname, error)
 	AttachHostname(ctx context.Context, tenantID, hostnameID, tunnelID string) error
 	DetachHostname(ctx context.Context, tenantID, hostnameID string) error
 	VerifyHostname(ctx context.Context, tenantID, id string) (Hostname, error)

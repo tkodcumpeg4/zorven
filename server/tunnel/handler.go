@@ -19,6 +19,7 @@ import (
 	"github.com/tkodcumpeg4/zorven/server/abuse"
 	"github.com/tkodcumpeg4/zorven/server/auth"
 	"github.com/tkodcumpeg4/zorven/server/entitlements"
+	"github.com/tkodcumpeg4/zorven/server/netctl"
 	"github.com/tkodcumpeg4/zorven/server/ratelimit"
 	"github.com/tkodcumpeg4/zorven/server/store"
 	"github.com/tkodcumpeg4/zorven/shared/protocol"
@@ -50,6 +51,9 @@ type Handler struct {
 	// OnClientConnected ve OnClientDisconnected, baglanti yasam dongusu icin istege bagli kancalardir.
 	OnClientConnected    func(ctx context.Context, clientID string)
 	OnClientDisconnected func(ctx context.Context, clientID string)
+
+	// Net, Zorven Net kontrol duzlemi (nil ise wg_net pazarlanmaz).
+	Net *netctl.Manager
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -266,11 +270,17 @@ func (h *Handler) handshake(ctx context.Context, s *Session) error {
 			s.screenFiles = true
 			enabled = append(enabled, protocol.FeatureScreenFiles)
 		}
+		if f == protocol.FeatureUDPProbe {
+			s.SetUDPProbe(true)
+			enabled = append(enabled, protocol.FeatureUDPProbe)
+		}
 		if f == protocol.FeatureScreenClipboard {
 			s.screenClipboard = true
 			enabled = append(enabled, protocol.FeatureScreenClipboard)
 		}
 	}
+
+	enabled = append(enabled, s.negotiateNet(h.Net, hello.Features)...)
 
 	tunnels, err := h.Store.ListTunnelsByClient(ctx, s.ClientID)
 	if err != nil {

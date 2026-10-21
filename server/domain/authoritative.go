@@ -21,6 +21,7 @@ import (
 type authAnswer struct {
 	ips   []net.IP
 	cname string
+	txts  []string
 }
 
 var errNoAuthAnswer = errors.New("yetkili sunucudan cevap alinamadi")
@@ -68,6 +69,11 @@ func lookupAuthoritativeIPs(ctx context.Context, fqdn string) ([]net.IPAddr, err
 
 // queryAuthoritative, tek bir yetkili sunucuya UDP ile A sorgusu atar.
 func queryAuthoritative(ctx context.Context, server net.IP, fqdn string) (authAnswer, error) {
+	return queryAuthoritativeType(ctx, server, fqdn, dnsmessage.TypeA)
+}
+
+// queryAuthoritativeType, tek bir yetkili sunucuya verilen turde UDP sorgusu atar.
+func queryAuthoritativeType(ctx context.Context, server net.IP, fqdn string, qtype dnsmessage.Type) (authAnswer, error) {
 	name, err := dnsmessage.NewName(fqdn + ".")
 	if err != nil {
 		return authAnswer{}, err
@@ -75,7 +81,7 @@ func queryAuthoritative(ctx context.Context, server net.IP, fqdn string) (authAn
 	id := uint16(rand.IntN(1 << 16))
 	msg := dnsmessage.Message{
 		Header:    dnsmessage.Header{ID: id},
-		Questions: []dnsmessage.Question{{Name: name, Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET}},
+		Questions: []dnsmessage.Question{{Name: name, Type: qtype, Class: dnsmessage.ClassINET}},
 	}
 	buf, err := msg.Pack()
 	if err != nil {
@@ -138,6 +144,13 @@ func parseAuthoritative(b []byte, id uint16) (authAnswer, error) {
 				return authAnswer{}, err
 			}
 			ans.cname = strings.TrimSuffix(r.CNAME.String(), ".")
+		case dnsmessage.TypeTXT:
+			r, err := p.TXTResource()
+			if err != nil {
+				return authAnswer{}, err
+			}
+			// Uzun TXT degerleri 255 baytlik parcalara bolunur; birlestir.
+			ans.txts = append(ans.txts, strings.Join(r.TXT, ""))
 		default:
 			if err := p.SkipAnswer(); err != nil {
 				return authAnswer{}, err
@@ -145,4 +158,55 @@ func parseAuthoritative(b []byte, id uint16) (authAnswer, error) {
 		}
 	}
 	return ans, nil
+}
+
+// authoritativeQuery, fqdn'in zone'unun yetkili sunucularina (en fazla 3 ad
+// sunucusu) qtype sorgusu atar ve ilk yetkili cevabi doner. Hic yetkili cevap
+// alinamazsa errNoAuthAnswer: cagiran normal cozumleyiciye duser.
+func authoritativeQuery(ctx context.Context, fqdn string, qtype dnsmessage.Type) (authAnswer, error) {
+	fqdn = strings.ToLower(strings.TrimSuffix(fqdn, "."))
+	zone, err := publicsuffix.EffectiveTLDPlusOne(fqdn)
+	if err != nil {
+		return authAnswer{}, err
+	}
+	nss, err := net.DefaultResolver.LookupNS(ctx, zone)
+	if err != nil || len(nss) == 0 {
+		return authAnswer{}, errNoAuthAnswer
+	}
+	rand.Shuffle(len(nss), func(i, j int) { nss[i], nss[j] = nss[j], nss[i] })
+	for i, ns := range nss {
+		if i >= 3 {
+			break
+		}
+		addrs, err := net.DefaultResolver.LookupIPAddr(ctx, strings.TrimSuffix(ns.Host, "."))
+		if err != nil || len(addrs) == 0 {
+			continue
+		}
+		for _, a := range addrs {
+			if ans, err := queryAuthoritativeType(ctx, a.IP, fqdn, qtype); err == nil {
+				return ans, nil
+			}
+		}
+	}
+	return authAnswer{}, errNoAuthAnswer
+}
+
+// lookupAuthoritativeTXT, TXT kayitlarini yetkili sunuculardan okur (onbellek
+// atlanir: kullanici kaydi yeni degistirdiyse eski deger donmez). Bos liste =
+// yetkili sunucu "kayit yok" dedi.
+func lookupAuthoritativeTXT(ctx context.Context, name string) ([]string, error) {
+	ans, err := authoritativeQuery(ctx, name, dnsmessage.TypeTXT)
+	if err != nil {
+		return nil, err
+	}
+	return ans.txts, nil
+}
+
+// lookupAuthoritativeCNAME, CNAME hedefini yetkili sunuculardan okur ("" = yok).
+func lookupAuthoritativeCNAME(ctx context.Context, name string) (string, error) {
+	ans, err := authoritativeQuery(ctx, name, dnsmessage.TypeCNAME)
+	if err != nil {
+		return "", err
+	}
+	return ans.cname, nil
 }

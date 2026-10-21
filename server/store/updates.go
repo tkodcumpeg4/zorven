@@ -125,6 +125,9 @@ type UpdatesStore interface {
 	// SetAnnouncementPref tercihi yazar; lang bos ise mevcut dil korunur.
 	// source: signup | profile | banner | unsub. subscribed=true ise consented_at yazilir.
 	SetAnnouncementPref(ctx context.Context, userID string, subscribed bool, lang, source string) error
+	// SetAnnouncementLang yalniz e-posta dilini degistirir (panel dili degisince);
+	// abonelik, onay kaynagi ve onay zamani DEGISMEZ. Satir yoksa hicbir sey yapmaz.
+	SetAnnouncementLang(ctx context.Context, userID, lang string) error
 	// IsAnnouncementSubscribed gonderim aninda son kontrol icindir (satir yoksa false: opt-in).
 	IsAnnouncementSubscribed(ctx context.Context, userID string) (bool, error)
 }

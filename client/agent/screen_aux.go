@@ -23,6 +23,10 @@ func (a *Agent) helloFeatures() []string {
 	if !a.NoFileTransfer {
 		f = append(f, protocol.FeatureScreenFiles)
 	}
+	f = append(f, protocol.FeatureUDPProbe)
+	if !a.NoNet {
+		f = append(f, protocol.FeatureWGNet, protocol.FeatureWGRelay)
+	}
 	return f
 }
 

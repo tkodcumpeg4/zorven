@@ -96,7 +96,7 @@ func DecodeBodyFrame(data []byte) (BodyFrame, error) {
 	}
 	ft := data[0]
 	if ft != FrameRequestBody && ft != FrameResponseBody && ft != FrameWSData &&
-		ft != FrameStreamData && ft != FrameDatagram && ft != FrameScreen && ft != FrameFile {
+		ft != FrameStreamData && ft != FrameDatagram && ft != FrameScreen && ft != FrameFile && ft != FrameWG {
 		return BodyFrame{}, fmt.Errorf("%w: %d", ErrUnknownFrame, ft)
 	}
 	return BodyFrame{

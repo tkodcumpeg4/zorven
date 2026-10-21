@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/tkodcumpeg4/zorven/server/reqlog"
+	"github.com/tkodcumpeg4/zorven/server/store"
 )
 
 // FAZ 6.3 — per-tünel metrikler.
@@ -39,7 +40,8 @@ func (s *Server) getTunnelMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 	tunnelID := r.PathValue("id")
 	// Tünel bu kiracıya mı ait? (IDOR önlemi)
-	if _, err := s.Store.GetTunnel(r.Context(), tenantID, tunnelID); err != nil {
+	tun, err := s.Store.GetTunnel(r.Context(), tenantID, tunnelID)
+	if err != nil {
 		writeJSONError(w, http.StatusNotFound, "not_found", "tunel bulunamadi")
 		return
 	}
@@ -49,6 +51,26 @@ func (s *Server) getTunnelMetrics(w http.ResponseWriter, r *http.Request) {
 		spec = metricWindows["1h"]
 	}
 	since := time.Now().Add(-spec.dur)
+
+	// Ham TCP/UDP tunelleri request_logs'a yazmaz: `raw` bolumu dakikalik
+	// ozetlerden gelir, HTTP dilimleri bos kalir.
+	if tun.Proto == store.ProtoTCP || tun.Proto == store.ProtoUDP {
+		raw, rerr := s.rawMetrics(r, tenantID, tun, since, spec.bucketSec)
+		if rerr != nil {
+			s.fail(w, rerr)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"window":     r.URL.Query().Get("window"),
+			"bucket_sec": spec.bucketSec,
+			"buckets":    []reqlog.MetricBucket{},
+			"summary": map[string]any{
+				"total_requests": 0, "error_count": 0, "error_rate_pct": 0.0, "avg_ms": 0.0, "max_ms": 0,
+			},
+			"raw": raw,
+		})
+		return
+	}
 
 	buckets, err := s.Store.TunnelMetrics(r.Context(), tenantID, tunnelID, since, spec.bucketSec)
 	if err != nil {

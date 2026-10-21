@@ -427,6 +427,7 @@ export interface DoorGrant {
   method: 'basic' | 'oauth'
   expires_at: string
   created_at: string
+  extra_ips?: string[]
 }
 
 export interface TunnelAccessInput {
@@ -490,6 +491,10 @@ export interface UDPLiveStats {
   dropped_rate: number
   dropped_size: number
   dropped_flows: number
+  /** Istemci udp_probe destekliyor mu (false: "istemci surumu desteklemiyor"). */
+  probe_supported?: boolean
+  /** Ussel ortalama gecikme (ms); olcum yoksa null. */
+  probe_rtt_ms?: number | null
 }
 export interface UDPStatMinute {
   minute: string
@@ -502,6 +507,11 @@ export interface UDPStatMinute {
   dropped_rate: number
   dropped_size: number
   dropped_flows: number
+  /** Olcum yoksa null (eski istemci veya yanki gelmedi). */
+  rtt_p50_ms?: number | null
+  rtt_p95_ms?: number | null
+  probe_loss_pct?: number | null
+  dropped_datagrams?: number
 }
 export interface TunnelUDPResp {
   config: TunnelUDPConfig
@@ -573,11 +583,80 @@ export interface TunnelMetricsSummary {
   avg_ms: number
   max_ms: number
 }
+/** Ham TCP/UDP tunellerinde GET /tunnels/{id}/metrics `raw` bolumu. */
+export interface RawMetricBucket {
+  bucket: string
+  conns_new: number
+  conns_peak: number
+  conns_rejected: number
+  dur_avg_ms: number
+  dur_max_ms: number
+  packets_in: number
+  packets_out: number
+  flows_new: number
+  flows_peak: number
+  dropped: number
+  bytes_in: number
+  bytes_out: number
+}
+export interface RawMetricsSummary {
+  conns_new: number
+  conns_peak: number
+  conns_rejected: number
+  dur_avg_ms: number
+  dur_max_ms: number
+  packets_in: number
+  packets_out: number
+  flows_new: number
+  flows_peak: number
+  dropped: number
+  bytes_in: number
+  bytes_out: number
+}
+export interface RawMetrics {
+  proto: 'tcp' | 'udp'
+  buckets: RawMetricBucket[]
+  summary: RawMetricsSummary
+}
 export interface TunnelMetricsResp {
   window: string
   bucket_sec: number
   buckets: MetricBucket[]
   summary: TunnelMetricsSummary
+  raw?: RawMetrics
+}
+
+// Ham TCP tunel istatistikleri (GET /tunnels/{id}/tcp).
+export interface TCPLiveStats {
+  tunnel_id: string
+  port: number
+  since: string
+  active_conns: number
+  conns_total: number
+  conns_rejected: number
+  rejected_reasons: Record<string, number>
+  bytes_in: number
+  bytes_out: number
+  dur_avg_ms: number
+  dur_max_ms: number
+}
+export interface TCPStatMinute {
+  minute: string
+  conns_new: number
+  conns_peak: number
+  conns_rejected: number
+  rejected_ip: number
+  rejected_door: number
+  rejected_offline: number
+  rejected_dial: number
+  bytes_in: number
+  bytes_out: number
+  dur_avg_ms: number
+  dur_max_ms: number
+}
+export interface TunnelTCPResp {
+  live: TCPLiveStats | null
+  series: TCPStatMinute[]
 }
 
 // FAZ 6.6 — mTLS / istemci sertifikası.
@@ -848,4 +927,33 @@ export interface AccessEventsPage {
   items: AccessEvent[]
   nextCursor: string
   hasMore: boolean
+}
+
+// --- Zorven Net (WireGuard port paylaşımı) ---
+export interface NetGrantee { type: 'user' | 'group' | 'device', id: string }
+export interface NetNode {
+  id: string
+  kind: 'device' | 'session'
+  client_id?: string
+  user_id?: string
+  name: string
+  ip: string
+  online: boolean
+  relayed_bytes: number
+}
+export interface NetShare {
+  id: string
+  name: string
+  proto: 'tcp' | 'udp'
+  port: number
+  owner_client_id: string
+  owner_name: string
+  owner_ip?: string
+  owner_online: boolean
+  grantees: NetGrantee[] | null
+  expires_at?: string
+  ephemeral: boolean
+  can_manage: boolean
+  relation: 'owner' | 'grantee' | 'admin'
+  connected: NetNode[]
 }

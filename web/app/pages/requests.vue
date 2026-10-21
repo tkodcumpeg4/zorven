@@ -2,6 +2,15 @@
 import { dateLocale } from '~/plugins/i18n'
 import type { RequestLog, Tunnel, LogFilter, RequestDetail, ReplayResult, ReplayOverrides } from '~/types/api'
 
+// Ayri pencere (popout): ?popout=1 ise sidebar'siz "bare" yerlesim kullanilir.
+// Yetki kapisi yerlesimdeki AdminKeyGate'tir (normal sayfayla ayni), atlama yok.
+definePageMeta({
+  middleware: (to) => { if (to.query.popout === '1') setPageLayout('bare') },
+})
+const route = useRoute()
+const isPopout = route.query.popout === '1'
+useHead({ title: isPopout ? 'Zorven — Loglar' : undefined })
+
 const api = useApi()
 const toast = useToast()
 const { duration, bytes, clock } = useFormat()
@@ -151,6 +160,34 @@ const fQ = ref('')
 const fMinDur = ref<number | ''>('')
 const fRejected = ref(false)
 
+// Popout acilirken opener'in filtreleri URL sorgusundan gelir.
+const qs = (k: string) => (typeof route.query[k] === 'string' ? (route.query[k] as string) : '')
+if (isPopout) {
+  fMethod.value = qs('method'); fStatus.value = qs('status'); fHost.value = qs('hostname'); fQ.value = qs('q')
+  const md = Number(qs('min_dur'))
+  fMinDur.value = md > 0 ? md : ''
+  fRejected.value = qs('rejected') === 'true'
+}
+
+const popupBlockedUrl = ref('')
+function openPopout() {
+  const p = new URLSearchParams({ popout: '1' })
+  if (fMethod.value) p.set('method', fMethod.value)
+  if (fStatus.value) p.set('status', fStatus.value)
+  if (fHost.value) p.set('hostname', fHost.value)
+  if (fQ.value.trim()) p.set('q', fQ.value.trim())
+  if (fMinDur.value !== '' && Number(fMinDur.value) > 0) p.set('min_dur', String(fMinDur.value))
+  if (fRejected.value) p.set('rejected', 'true')
+  const url = `/requests?${p.toString()}`
+  const w = window.open(url, 'zorven-logs', 'width=1200,height=800,noopener')
+  if (!w) {
+    popupBlockedUrl.value = url
+    toast.warn(t('requests.popoutBlocked'))
+  } else {
+    popupBlockedUrl.value = ''
+  }
+}
+
 const methods = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD']
 const statusOpts = [
   { v: '', l: t('requests.statusAll') },
@@ -256,7 +293,19 @@ function exportData(fmt: 'csv' | 'json') {
         <h1 class="text-xl font-semibold tracking-tight">{{ t('requests.title') }}</h1>
         <p class="mt-0.5 text-sm text-fg-muted">{{ t('requests.subtitle') }}</p>
       </div>
-      <div class="flex items-center gap-2">
+      <div class="flex flex-wrap items-center gap-2">
+        <NuxtLink v-if="isPopout" to="/" class="flex items-center gap-1.5 rounded border border-line px-2.5 py-1.5 font-mono text-[11px] text-fg-muted transition-colors hover:bg-surface-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">
+          <Icon name="lucide:arrow-left" class="size-3" />
+          {{ t('requests.backToPanel') }}
+        </NuxtLink>
+        <button
+          v-else
+          class="flex cursor-pointer items-center gap-1.5 rounded border border-line px-2.5 py-1.5 font-mono text-[11px] text-fg-muted transition-colors hover:bg-surface-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+          @click="openPopout"
+        >
+          <Icon name="lucide:external-link" class="size-3" />
+          {{ t('requests.popout') }}
+        </button>
         <button
           class="flex cursor-pointer items-center gap-1.5 rounded border px-2.5 py-1.5 font-mono text-[11px] transition-colors disabled:opacity-50"
           :class="captureEnabled ? 'border-accent/40 bg-accent/10 text-accent' : 'border-line text-fg-muted hover:bg-surface-2'"
@@ -276,6 +325,11 @@ function exportData(fmt: 'csv' | 'json') {
         <button class="cursor-pointer rounded border border-line px-2.5 py-1.5 font-mono text-[11px] text-fg-muted transition-colors hover:bg-surface-2" @click="exportData('json')">JSON</button>
       </div>
     </header>
+
+    <div v-if="popupBlockedUrl" class="rounded-lg border border-warn/40 bg-surface p-3 text-xs text-fg" role="status">
+      {{ t('requests.popoutBlocked') }}
+      <a :href="popupBlockedUrl" target="zorven-logs" class="ml-1 text-accent underline">{{ t('requests.popoutOpenLink') }}</a>
+    </div>
 
     <!-- Gelişmiş filtre çubuğu -->
     <div class="flex flex-wrap items-end gap-2 rounded-lg border border-line bg-surface p-3">

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/tkodcumpeg4/zorven/server/netctl"
 	"github.com/tkodcumpeg4/zorven/shared/protocol"
 )
 
@@ -127,6 +128,18 @@ type Session struct {
 	// Aktif ham TCP/UDP tunel akislari: req_id -> koprü (FAZ 3 / D2).
 	rawMu      sync.Mutex
 	rawBridges map[uint64]*rawBridge
+
+	// UDP tunel olcumu (FeatureUDPProbe; bkz. udpprobe.go). udpProbe yalnizca
+	// el sikismada yazilir.
+	udpProbe  bool
+	probes    *ProbeTracker
+	probeOnce sync.Once
+
+	// Zorven Net (FeatureWGNet + FeatureWGRelay; bkz. net.go). netMgr yalnizca
+	// el sikismada yazilir; netConn ilk net_register ile kurulur.
+	netMgr  *netctl.Manager
+	netMu   sync.Mutex
+	netConn *netctl.NodeConn
 }
 
 func NewSession(id, clientID, clientName, remoteAddr string, conn *websocket.Conn, log *slog.Logger) *Session {
@@ -169,9 +182,25 @@ func (s *Session) Send(ctx context.Context, v any, t protocol.MessageType) error
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
-	ctx, cancel := context.WithTimeout(ctx, writeTimeout)
+	ctx, cancel, err := writeCtx(ctx)
+	if err != nil {
+		return err
+	}
 	defer cancel()
 	return s.conn.Write(ctx, websocket.MessageText, data)
+}
+
+// writeCtx, ajan baglantisina yazim icin baglam uretir. Cagiranin baglami
+// (tarayici istegi, aktarim) YAZIM SIRASINDA iptal edilirse coder/websocket
+// TUM baglantiyi kapatir; bu da tek bir istegin iptaliyle ajanin oturumunu
+// dusurur. Bu yuzden zaten iptal edilmisse yazmadan doner, aksi halde iptali
+// yazima tasimaz (yalniz writeTimeout uygulanir).
+func writeCtx(ctx context.Context) (context.Context, context.CancelFunc, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	c, cancel := context.WithTimeout(context.WithoutCancel(ctx), writeTimeout)
+	return c, cancel, nil
 }
 
 // windowUpdateThreshold, biriken kredinin hangi noktada gonderilecegi.
@@ -211,7 +240,10 @@ func (s *Session) SendBinary(ctx context.Context, frame protocol.BodyFrame) erro
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
-	ctx, cancel := context.WithTimeout(ctx, writeTimeout)
+	ctx, cancel, err := writeCtx(ctx)
+	if err != nil {
+		return err
+	}
 	defer cancel()
 	return s.conn.Write(ctx, websocket.MessageBinary, frame.Encode())
 }
@@ -228,6 +260,7 @@ func (s *Session) Run(ctx context.Context) error {
 	defer s.closeAllWS()
 	defer s.closeAllRaw()
 	defer s.closeAllFiles()
+	defer s.closeNet()
 
 	go s.heartbeat(ctx, cancel)
 
@@ -278,6 +311,10 @@ func (s *Session) Run(ctx context.Context) error {
 				s.routeFileData(frame)
 				continue
 			}
+			if frame.FrameType == protocol.FrameWG {
+				s.routeNetFrame(frame)
+				continue
+			}
 			s.routeBodyFrame(frame)
 		}
 	}
@@ -299,6 +336,24 @@ func (s *Session) handleControl(ctx context.Context, data []byte) error {
 		if err := json.Unmarshal(data, &pong); err == nil && pong.Metrics != nil {
 			s.SetMetrics(pong.Metrics)
 		}
+
+	case protocol.TypeUDPProbeEcho:
+		now := time.Now()
+		var m protocol.UDPProbeEcho
+		if err := json.Unmarshal(data, &m); err != nil {
+			return err
+		}
+		s.handleUDPProbeEcho(m, now)
+
+	case protocol.TypeUDPAgentStats:
+		var m protocol.UDPAgentStats
+		if err := json.Unmarshal(data, &m); err != nil {
+			return err
+		}
+		s.handleUDPAgentStats(m)
+
+	case protocol.TypeNetRegister, protocol.TypeNetResync, protocol.TypeNetShareCreate, protocol.TypeNetShareDelete:
+		return s.handleNet(ctx, t, data)
 
 	case protocol.TypeBye:
 		var msg protocol.Bye

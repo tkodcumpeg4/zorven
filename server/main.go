@@ -30,8 +30,11 @@ import (
 	"github.com/tkodcumpeg4/zorven/server/entitlements"
 	"github.com/tkodcumpeg4/zorven/server/events"
 	"github.com/tkodcumpeg4/zorven/server/ingress"
+	"github.com/tkodcumpeg4/zorven/server/mcpserver"
+	"github.com/tkodcumpeg4/zorven/server/oauthas"
 	"github.com/tkodcumpeg4/zorven/server/ipfilter"
 	"github.com/tkodcumpeg4/zorven/server/mail"
+	"github.com/tkodcumpeg4/zorven/server/netctl"
 	"github.com/tkodcumpeg4/zorven/server/ratelimit"
 	"github.com/tkodcumpeg4/zorven/server/rawproxy"
 	"github.com/tkodcumpeg4/zorven/server/reqlog"
@@ -246,7 +249,18 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 			// Asagida kurulur; OnTunnelChange closure'i nil-guard ile tazeler.
 			var rawMgr *rawproxy.Manager
 
+			// Zorven Net (WireGuard Mod A) kontrol duzlemi. Kalicilik Postgres'te
+			// (migration 0077); baska depoda bellek ici calisir.
+			var netStore netctl.Store = netctl.NewMemStore()
+			if pgSt, ok := st.(*pgstore.Store); ok {
+				netStore = pgSt.Net()
+			}
+			netMgr := netctl.New(netStore, api.NewNetDirectory(st), nil, log)
+			netMgr.Usage = bandwidthRecorder
+			go netMgr.Run(ctx)
+
 			apiSrv := &api.Server{
+				Net:   netMgr,
 				Store: st, Hub: hub, Log: requests, Events: broker,
 				Logger: log, Version: protocol.Version,
 				GitHub: github, Sessions: sessions,
@@ -276,6 +290,12 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 						return rawproxy.UDPLiveStats{}, false
 					}
 					return rawMgr.UDPStats(tunnelID)
+				},
+				TCPStats: func(tunnelID string) (rawproxy.TCPLiveStats, bool) {
+					if rawMgr == nil {
+						return rawproxy.TCPLiveStats{}, false
+					}
+					return rawMgr.TCPStats(tunnelID)
 				},
 			}
 
@@ -341,6 +361,7 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				PlatformDomain: apiSrv.PlatformDomain,
 				Entitlements:   entitlementSvc,
 				OnTunnelChange: apiSrv.OnTunnelChange,
+				Net:            netMgr,
 			}
 
 			// Kontrol duzlemi: yalnizca control_hostname uzerinden.
@@ -454,6 +475,11 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				}
 			}
 			go doorSvc.Run(ctx)
+			// Diger IP ailesi yan kanali (door4/door6): tokeni imzalama anahtari asagida
+			// (visitorSecret cozuldukten sonra) verilir; hostlar env ile ayarlanir.
+			doorV4Host, doorV6Host := doorAddrHosts(apiSrv.PlatformDomain,
+				os.Getenv("ZORVEN_DOOR_V4_HOST"), os.Getenv("ZORVEN_DOOR_V6_HOST"))
+			doorSvc.V4Host, doorSvc.V6Host = doorV4Host, doorV6Host
 			apiSrv.Door = doorSvc
 			proxy.Door = doorSvc
 
@@ -504,6 +530,7 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 			)
 			proxy.Visitor = visitorMgr
 			proxy.BasicSecret = deriveKey([]byte(visitorSecret), keyPurposeBasicAuth)
+			doorSvc.TokenKey = deriveKey([]byte(visitorSecret), keyPurposeDoorAddr)
 			proxy.AccessEvents = accessPersister
 			visitorMgr.OnEvent = proxy.RecordVisitorEvent
 			if visitorMgr.Enabled() {
@@ -552,6 +579,7 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				return out, nil
 			})
 			rawMgr.Door = doorSvc
+			rawMgr.Usage = bandwidthRecorder
 			rawMgr.Start(ctx)
 
 			// Gecici tunel supurucusu (FAZ 2 / F07): suresi dolan tunelleri
@@ -584,6 +612,7 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 			}()
 
 			// UDP istatistikleri (F24): dakikalik ozet yaz, 7 gunden eskiyi sil.
+			go rawMgr.RunUDPProbes(ctx)
 			go rawMgr.RunUDPStats(ctx, func(sctx context.Context, rows []rawproxy.UDPMinute) {
 				out := make([]store.UDPStatMinute, 0, len(rows))
 				for _, r := range rows {
@@ -592,6 +621,8 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 						PacketsIn: r.PacketsIn, PacketsOut: r.PacketsOut, BytesIn: r.BytesIn, BytesOut: r.BytesOut,
 						FlowsNew: r.FlowsNew, FlowsPeak: r.FlowsPeak,
 						DroppedRate: r.DroppedRate, DroppedSize: r.DroppedSize, DroppedFlows: r.DroppedFlows,
+						RTTP50Ms: r.RTTP50Ms, RTTP95Ms: r.RTTP95Ms, ProbeLossPct: r.ProbeLossPct,
+						DroppedDatagrams: r.DroppedDatagrams,
 					})
 				}
 				if err := st.InsertUDPStats(sctx, out); err != nil {
@@ -600,6 +631,29 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				if time.Now().Minute() == 0 {
 					if _, err := st.PruneUDPStats(sctx, time.Now().Add(-7*24*time.Hour)); err != nil {
 						log.Warn("eski UDP istatistikleri silinemedi", "hata", err)
+					}
+				}
+			})
+
+			// TCP istatistikleri: dakikalik ozet yaz, 7 gunden eskiyi sil.
+			go rawMgr.RunTCPStats(ctx, func(sctx context.Context, rows []rawproxy.TCPMinute) {
+				out := make([]store.TCPStatMinute, 0, len(rows))
+				for _, r := range rows {
+					out = append(out, store.TCPStatMinute{
+						TunnelID: r.TunnelID, TenantID: r.TenantID, Minute: r.Minute,
+						ConnsNew: r.ConnsNew, ConnsPeak: int(r.ConnsPeak), ConnsRejected: r.Rejected,
+						RejectedIP: r.RejectedIP, RejectedDoor: r.RejectedDoor,
+						RejectedOffline: r.RejectedOffline, RejectedDial: r.RejectedDial,
+						BytesIn: r.BytesIn, BytesOut: r.BytesOut,
+						DurSumMs: r.DurSumMs, DurCount: r.DurCount, DurMaxMs: r.DurMaxMs,
+					})
+				}
+				if err := st.InsertTCPStats(sctx, out); err != nil {
+					log.Warn("TCP istatistikleri yazilamadi", "hata", err)
+				}
+				if time.Now().Minute() == 0 {
+					if _, err := st.PruneTCPStats(sctx, time.Now().Add(-7*24*time.Hour)); err != nil {
+						log.Warn("eski TCP istatistikleri silinemedi", "hata", err)
 					}
 				}
 			})
@@ -712,6 +766,12 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 			if visitorHost != "" {
 				platformHostList = append(platformHostList, visitorHost)
 			}
+			// door4/door6 yan kanal hostlari platformundur; kiraci tuneline gitmez.
+			for _, dh := range []string{doorV4Host, doorV6Host} {
+				if dh != "" {
+					platformHostList = append(platformHostList, dh)
+				}
+			}
 			isPlatformHost := func(host string) bool {
 				return ingress.HostMatchesAny(host, platformHostList) || ingress.IsIPHost(host)
 			}
@@ -724,6 +784,85 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 						"host", ph, "kiraci", rt.TenantID, "tunel", rt.TunnelID)
 				}
 			}
+
+			// MCP (streamable HTTP, /mcp): API token ile; arac cagrilari api.Middleware
+			// zincirine surec-ici gider (kapsam/kota/denetim REST ile ayni).
+			// OAuth 2.1 yetkilendirme sunucusu (Claude ozel baglayici): yalniz
+			// Postgres'te (istemci/grant/refresh kaliciligi icin) etkin.
+			var oauthSrv *oauthas.Server
+			var oauthVerifier mcpserver.TokenVerifier
+			if pgSt, ok := st.(*pgstore.Store); ok && pgSt.Pool() != nil {
+				issuer := strings.TrimRight(strings.TrimSpace(os.Getenv("ZORVEN_OAUTH_ISSUER")), "/")
+				consentBase := strings.TrimRight(strings.TrimSpace(os.Getenv("ZORVEN_OAUTH_CONSENT_BASE")), "/")
+				if isProductionDomain(apiSrv.PlatformDomain) {
+					issuer = firstNonEmpty(issuer, "https://"+apiSrv.PlatformDomain)
+					consentBase = firstNonEmpty(consentBase, "https://panel."+apiSrv.PlatformDomain)
+				}
+				registerLimiter := ratelimit.New(0.1, 5) // IP basina dakikada ~6 kayit
+				defer registerLimiter.Close()
+				tokenLimiter := ratelimit.New(2, 30)
+				defer tokenLimiter.Close()
+				srv, oerr := oauthas.New(oauthas.Config{
+					Store:       pgSt.OAuth(),
+					SigningSeed: deriveKey([]byte(visitorSecret), keyPurposeOAuth),
+					Issuer:      issuer,
+					ConsentBase: consentBase,
+					Session: func(r *http.Request) (oauthas.Session, bool) {
+						if betterAuthVerifier == nil {
+							return oauthas.Session{}, false
+						}
+						token := ""
+						if c, err := r.Cookie("better-auth.session_token"); err == nil && c.Value != "" {
+							token = c.Value
+						} else if c, err := r.Cookie("__Secure-better-auth.session_token"); err == nil && c.Value != "" {
+							token = c.Value
+						}
+						if token == "" {
+							return oauthas.Session{}, false
+						}
+						sess, err := betterAuthVerifier.VerifySession(r.Context(), betterAuthVerifier.CookieToken(token))
+						if err != nil || sess == nil {
+							return oauthas.Session{}, false
+						}
+						return oauthas.Session{UserID: sess.UserID, Email: sess.Email, Name: sess.Name}, true
+					},
+					Orgs:            pgSt.ListUserOrgs,
+					OriginTrusted:   guarded.OriginTrusted,
+					ClientIP:        ipOf,
+					Audit:           apiSrv.AuditExternal,
+					RegisterLimiter: registerLimiter,
+					TokenLimiter:    tokenLimiter,
+				})
+				if oerr != nil {
+					return fmt.Errorf("oauth yetkilendirme sunucusu kurulamadi: %w", oerr)
+				}
+				oauthSrv, oauthVerifier = srv, srv
+				go func() {
+					t := time.NewTicker(time.Hour)
+					defer t.Stop()
+					for {
+						select {
+						case <-ctx.Done():
+							return
+						case <-t.C:
+							if err := srv.Prune(ctx); err != nil {
+								log.Warn("oauth temizligi basarisiz", "hata", err)
+							}
+						}
+					}
+				}()
+				log.Info("OAuth yetkilendirme sunucusu etkin (MCP ozel baglayici)", "issuer", issuer, "consent", consentBase)
+			}
+			mcpHandler := mcpserver.New(mcpserver.Config{
+				API:           guarded,
+				OriginTrusted: guarded.OriginTrusted,
+				Audit:         apiSrv.AuditExternal,
+				FailLimiter:   adminLimiter,
+				ClientIP:      ipOf,
+				Version:       protocol.Version,
+				Logger:        log,
+				OAuth:         oauthVerifier,
+			})
 
 			cspMode := cspModeFromEnv(os.Getenv("ZORVEN_CSP_MODE"))
 			mux := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -741,6 +880,15 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				// yonlendirmesinden ONCE, kendi host'unda calisir.
 				if analyticsProxy != nil && ingress.HostMatchesAny(r.Host, analyticsHosts) {
 					analyticsProxy.ServeHTTP(w, r)
+					return
+				}
+				// door4/door6: diger IP ailesini ogrenen yan kanal (IP basina hiz sinirli).
+				if doorSvc.AddrEnabled() && ingress.HostMatchesAny(r.Host, []string{doorV4Host, doorV6Host}) {
+					if !publicLimiter.Allow(ipOf(r)) {
+						tooManyRequests(w)
+						return
+					}
+					doorSvc.AddrHandler(ipOf).ServeHTTP(w, r)
 					return
 				}
 				if ingress.HostMatchesAny(r.Host, controlHosts) || ingress.IsIPHost(r.Host) {
@@ -792,6 +940,17 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 							return
 						}
 						apiRoutes.ServeHTTP(w, r)
+					case oauthSrv != nil && oauthas.Match(r.URL.Path):
+						// OAuth AS: metadata, DCR, authorize/token/revoke, onay + grant uclari.
+						// Kimliksiz uclar IP basina hiz sinirli (token/register kendi
+						// sinirlayicisina da sahip).
+						if !publicLimiter.Allow(ipOf(r)) {
+							tooManyRequests(w)
+							return
+						}
+						oauthSrv.ServeHTTP(w, r)
+					case r.URL.Path == mcpserver.Path || r.URL.Path == mcpserver.Path+"/":
+						mcpHandler.ServeHTTP(w, r)
 					case strings.HasPrefix(r.URL.Path, "/api/v1/"):
 						guarded.ServeHTTP(w, r)
 					case strings.HasPrefix(r.URL.Path, "/api/auth/") && authProxy != nil:

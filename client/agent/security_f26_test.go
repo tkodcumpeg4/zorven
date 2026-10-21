@@ -9,12 +9,12 @@ import (
 )
 
 func TestValidLocalPath(t *testing.T) {
-	for _, p := range []string{"/", "/a/b", "/a%40b", "//x/y"} {
+	for _, p := range []string{"/", "/a/b", "/a%40b", "//x/y", "/u/@kullanici", "/@scope/paket", "/@evil.com"} {
 		if !validLocalPath(p) {
 			t.Errorf("%q kabul edilmeliydi", p)
 		}
 	}
-	bad := []string{"", "x", "@evil.com/x", "/@evil.com", "/a\\b", "http://evil.com/", "/a://b", "/a b", "/a\nb", "/a\x00b", "evil.com/x", ".evil.com"}
+	bad := []string{"", "x", "@evil.com/x", "/a\\b", "http://evil.com/", "/a://b", "/a b", "/a\nb", "/a\x00b", "evil.com/x", ".evil.com"}
 	for _, p := range bad {
 		if validLocalPath(p) {
 			t.Errorf("%q reddedilmeliydi", p)

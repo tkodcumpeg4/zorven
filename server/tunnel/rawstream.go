@@ -12,6 +12,7 @@ import (
 // fromLocal'dan yerel servisten gelen baytlari/datagrami okuyup ziyaretciye yazar.
 type rawBridge struct {
 	reqID     uint64
+	tunnelID  string
 	proto     string // tcp | udp — gonderilecek cerceve tipini belirler
 	accept    chan protocol.StreamAck
 	fromLocal chan []byte
@@ -58,6 +59,7 @@ func (s *Session) OpenStreamTo(ctx context.Context, tunnelID, proto, remoteAddr,
 	reqID := s.nextReqID.Add(1)
 	b := &rawBridge{
 		reqID:     reqID,
+		tunnelID:  tunnelID,
 		proto:     proto,
 		accept:    make(chan protocol.StreamAck, 1),
 		fromLocal: make(chan []byte, rawFromLocalBuffer),
@@ -136,6 +138,9 @@ func (s *Session) routeStreamData(reqID uint64, payload []byte) {
 	case b.fromLocal <- cp:
 	case <-b.closed:
 	default:
+		if b.proto == protocol.ProtoUDP {
+			s.UDPProbes().AddDropped(b.tunnelID, 1) // kuyruk tasmasi: datagram dusuruldu
+		}
 		b.close() // tampon doldu: ziyaretci cok yavas — akisi kes
 	}
 }

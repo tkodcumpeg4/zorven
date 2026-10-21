@@ -78,9 +78,11 @@ func (s *Store) InsertUDPStats(ctx context.Context, stats []store.UDPStatMinute)
 	b := &pgx.Batch{}
 	for _, st := range stats {
 		b.Queue(`INSERT INTO udp_stats_minute (tunnel_id, tenant_id, minute, packets_in, packets_out,
-		    bytes_in, bytes_out, flows_new, flows_peak, dropped_rate, dropped_size, dropped_flows)
+		    bytes_in, bytes_out, flows_new, flows_peak, dropped_rate, dropped_size, dropped_flows,
+		    rtt_p50_ms, rtt_p95_ms, probe_loss_pct, dropped_datagrams)
 		 SELECT $1::text, $2::text, $3::timestamptz, $4::bigint, $5::bigint, $6::bigint, $7::bigint,
-		        $8::bigint, $9::int, $10::bigint, $11::bigint, $12::bigint
+		        $8::bigint, $9::int, $10::bigint, $11::bigint, $12::bigint,
+		        $13::double precision, $14::double precision, $15::double precision, $16::bigint
 		 WHERE EXISTS (SELECT 1 FROM tunnels WHERE id = $1::text)
 		 ON CONFLICT (tunnel_id, minute) DO UPDATE SET
 		    packets_in = udp_stats_minute.packets_in + EXCLUDED.packets_in,
@@ -91,9 +93,14 @@ func (s *Store) InsertUDPStats(ctx context.Context, stats []store.UDPStatMinute)
 		    flows_peak = GREATEST(udp_stats_minute.flows_peak, EXCLUDED.flows_peak),
 		    dropped_rate = udp_stats_minute.dropped_rate + EXCLUDED.dropped_rate,
 		    dropped_size = udp_stats_minute.dropped_size + EXCLUDED.dropped_size,
-		    dropped_flows = udp_stats_minute.dropped_flows + EXCLUDED.dropped_flows`,
+		    dropped_flows = udp_stats_minute.dropped_flows + EXCLUDED.dropped_flows,
+		    rtt_p50_ms = COALESCE(EXCLUDED.rtt_p50_ms, udp_stats_minute.rtt_p50_ms),
+		    rtt_p95_ms = COALESCE(EXCLUDED.rtt_p95_ms, udp_stats_minute.rtt_p95_ms),
+		    probe_loss_pct = COALESCE(EXCLUDED.probe_loss_pct, udp_stats_minute.probe_loss_pct),
+		    dropped_datagrams = udp_stats_minute.dropped_datagrams + EXCLUDED.dropped_datagrams`,
 			st.TunnelID, st.TenantID, st.Minute.UTC().Truncate(time.Minute), st.PacketsIn, st.PacketsOut,
-			st.BytesIn, st.BytesOut, st.FlowsNew, st.FlowsPeak, st.DroppedRate, st.DroppedSize, st.DroppedFlows)
+			st.BytesIn, st.BytesOut, st.FlowsNew, st.FlowsPeak, st.DroppedRate, st.DroppedSize, st.DroppedFlows,
+			st.RTTP50Ms, st.RTTP95Ms, st.ProbeLossPct, st.DroppedDatagrams)
 	}
 	br := s.pool.SendBatch(ctx, b)
 	defer br.Close()
@@ -109,7 +116,8 @@ func (s *Store) InsertUDPStats(ctx context.Context, stats []store.UDPStatMinute)
 func (s *Store) ListUDPStats(ctx context.Context, tenantID, tunnelID string, since time.Time) ([]store.UDPStatMinute, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT minute, packets_in, packets_out, bytes_in, bytes_out, flows_new, flows_peak,
-		        dropped_rate, dropped_size, dropped_flows
+		        dropped_rate, dropped_size, dropped_flows,
+		        rtt_p50_ms, rtt_p95_ms, probe_loss_pct, dropped_datagrams
 		   FROM udp_stats_minute
 		  WHERE tunnel_id = $1 AND tenant_id = $2 AND minute >= $3
 		  ORDER BY minute`, tunnelID, tenantID, since)
@@ -121,7 +129,8 @@ func (s *Store) ListUDPStats(ctx context.Context, tenantID, tunnelID string, sin
 	for rows.Next() {
 		st := store.UDPStatMinute{TunnelID: tunnelID, TenantID: tenantID}
 		if err := rows.Scan(&st.Minute, &st.PacketsIn, &st.PacketsOut, &st.BytesIn, &st.BytesOut,
-			&st.FlowsNew, &st.FlowsPeak, &st.DroppedRate, &st.DroppedSize, &st.DroppedFlows); err != nil {
+			&st.FlowsNew, &st.FlowsPeak, &st.DroppedRate, &st.DroppedSize, &st.DroppedFlows,
+			&st.RTTP50Ms, &st.RTTP95Ms, &st.ProbeLossPct, &st.DroppedDatagrams); err != nil {
 			return nil, err
 		}
 		out = append(out, st)

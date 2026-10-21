@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { dateLocale } from '~/plugins/i18n'
-import type { Tunnel, Client, Hostname, TunnelAccessMode, TunnelAccessInput, IPAllowlistRule, TunnelProto, TunnelExposure, TunnelReplica, TunnelMetricsResp, TunnelLBConfig, LBBackendStatus, LBStrategy, TunnelUDPConfig, UDPLiveStats, UDPStatMinute, GameStatus, TunnelDoor, DoorGrant, AccessEvent, AccessEventSummary } from '~/types/api'
+import type { Tunnel, Client, Hostname, TunnelAccessMode, TunnelAccessInput, IPAllowlistRule, TunnelProto, TunnelExposure, TunnelReplica, TunnelMetricsResp, TCPLiveStats, TCPStatMinute, TunnelLBConfig, LBBackendStatus, LBStrategy, TunnelUDPConfig, UDPLiveStats, UDPStatMinute, GameStatus, TunnelDoor, DoorGrant, AccessEvent, AccessEventSummary } from '~/types/api'
 // TrafficPolicy/TrafficConfig useApi üzerinden kullanılıyor; burada form state yerel tiptir.
 
 const api = useApi()
@@ -178,6 +178,10 @@ const udpLive = ref<UDPLiveStats | null>(null)
 const udpSeries = ref<UDPStatMinute[]>([])
 const udpDefaults = ref<TunnelUDPConfig | null>(null)
 const udpForm = reactive<TunnelUDPConfig>({ idle_timeout_sec: 90, max_packet_bytes: 65507, max_pps: 0, max_flow_pps: 0, max_flows: 1024 })
+// Ham TCP istatistikleri (canli + son 60 dk)
+const tcpLoading = ref(false)
+const tcpLive = ref<TCPLiveStats | null>(null)
+const tcpSeries = ref<TCPStatMinute[]>([])
 const gameLoading = ref(false)
 const gameStatus = ref<GameStatus | null>(null)
 
@@ -202,6 +206,92 @@ const udpLiveCards = computed(() => {
     { key: 'packets', value: l ? fmtCount(l.packets_in + l.packets_out) : '-' },
   ]
 })
+
+// Baglanti kalitesi (UDP olcumu): olcumlu son dakikalar, yeniden eskiye.
+const udpQualityRows = computed(() => udpSeries.value
+  .filter(p => p.rtt_p50_ms != null || p.probe_loss_pct != null || (p.dropped_datagrams ?? 0) > 0)
+  .slice(-12).reverse())
+const udpQualitySupported = computed(() => udpLive.value?.probe_supported !== false)
+const udpQualityMax = computed(() => Math.max(1, ...udpSeries.value.map(p => p.rtt_p95_ms ?? 0)))
+function fmtMs(v: number | null | undefined) {
+  return v == null ? '-' : (v >= 100 ? Math.round(v) : Math.round(v * 10) / 10) + ' ms'
+}
+function fmtPct(v: number | null | undefined) {
+  return v == null ? '-' : (Math.round(v * 10) / 10) + '%'
+}
+// Esikler: gecikme p95 <100 ms iyi, <250 ms orta; kayip <%1 iyi, <%5 orta.
+function latencyTone(v: number | null | undefined) {
+  if (v == null) return 'text-fg-subtle'
+  return v < 100 ? 'text-emerald-700 dark:text-emerald-400' : v < 250 ? 'text-amber-700 dark:text-amber-400' : 'text-red-700 dark:text-red-400'
+}
+function lossTone(v: number | null | undefined) {
+  if (v == null) return 'text-fg-subtle'
+  return v < 1 ? 'text-emerald-700 dark:text-emerald-400' : v < 5 ? 'text-amber-700 dark:text-amber-400' : 'text-red-700 dark:text-red-400'
+}
+function latencyBar(v: number | null | undefined) {
+  if (v == null) return 'bg-line'
+  return v < 100 ? 'bg-emerald-500/70' : v < 250 ? 'bg-amber-500/70' : 'bg-red-500/70'
+}
+
+const tcpLiveCards = computed(() => {
+  const l = tcpLive.value
+  return [
+    { key: 'active', value: l ? String(l.active_conns) : '-' },
+    { key: 'total', value: l ? fmtCount(l.conns_total) : '-' },
+    { key: 'rejected', value: l ? fmtCount(l.conns_rejected) : '-' },
+    { key: 'bytesIn', value: l ? fmtCount(l.bytes_in) + 'B' : '-' },
+    { key: 'bytesOut', value: l ? fmtCount(l.bytes_out) + 'B' : '-' },
+    { key: 'durAvg', value: l ? fmtDur(l.dur_avg_ms) : '-' },
+    { key: 'durMax', value: l ? fmtDur(l.dur_max_ms) : '-' },
+  ]
+})
+const tcpRejectRows = computed(() => {
+  const r = tcpLive.value?.rejected_reasons || {}
+  return ['ip_denied', 'door_denied', 'offline', 'dial_failed'].map(k => ({ key: k, value: r[k] || 0 }))
+})
+const tcpSeriesMax = computed(() => Math.max(1, ...tcpSeries.value.map(p => p.conns_new + p.conns_rejected)))
+const tcpTableRows = computed(() => tcpSeries.value.slice(-12).reverse())
+function fmtDur(ms: number | null | undefined) {
+  if (ms == null) return '-'
+  if (ms < 1000) return Math.round(ms) + ' ms'
+  const s = ms / 1000
+  if (s < 60) return (Math.round(s * 10) / 10) + ' s'
+  const m = Math.floor(s / 60)
+  return m < 60 ? m + ' m ' + Math.round(s - m * 60) + ' s' : Math.floor(m / 60) + ' h ' + (m % 60) + ' m'
+}
+async function loadTCP(tunnelId: string, quiet = false) {
+  if (!quiet) tcpLoading.value = true
+  try {
+    const r = await api.getTunnelTCP(tunnelId)
+    tcpLive.value = r.live
+    tcpSeries.value = r.series || []
+  } catch { /* sekme boş kalır */ } finally {
+    tcpLoading.value = false
+  }
+}
+// UDP otomatik yenilemede yalniz canli + seri (form girdisi ezilmesin).
+async function refreshUDPStats(tunnelId: string) {
+  try {
+    const r = await api.getTunnelUDP(tunnelId)
+    udpLive.value = r.live
+    udpSeries.value = r.series || []
+  } catch { /* bir sonraki turda tekrar */ }
+}
+let rawTimer: ReturnType<typeof setInterval> | undefined
+onMounted(() => {
+  rawTimer = setInterval(() => {
+    if (document.hidden || !accessTunnel.value) return
+    const tn = accessTunnel.value
+    if (tn.proto !== 'tcp' && tn.proto !== 'udp') return
+    if (settingsTab.value === 'raw') {
+      if (tn.proto === 'tcp') void loadTCP(tn.id, true)
+      else void refreshUDPStats(tn.id)
+    } else if (settingsTab.value === 'metrics') {
+      void loadMetrics(tn.id, true)
+    }
+  }, 10000)
+})
+onBeforeUnmount(() => { if (rawTimer) clearInterval(rawTimer) })
 
 const udpSeriesMax = computed(() => Math.max(1, ...udpSeries.value.map(p => p.packets_in + p.packets_out)))
 
@@ -320,8 +410,11 @@ async function openSettings(tn: Tunnel, tab: SettingsTab = 'general') {
   void loadLB(tn.id)
   udpLive.value = null
   udpSeries.value = []
+  tcpLive.value = null
+  tcpSeries.value = []
   gameStatus.value = null
   if (tn.proto === 'udp') void loadUDP(tn.id)
+  if (tn.proto === 'tcp') void loadTCP(tn.id)
   void loadTraffic(tn.id)
   void loadMetrics(tn.id)
   void loadAlert(tn.id)
@@ -637,17 +730,51 @@ function shortUA(ua: string): string {
 }
 
 // --- Metrikler (FAZ 6.3) ---
-async function loadMetrics(tunnelId: string) {
-  metricsLoading.value = true
+async function loadMetrics(tunnelId: string, quiet = false) {
+  if (!quiet) metricsLoading.value = true
   try {
     metricsData.value = await api.getTunnelMetrics(tunnelId, metricsWindow.value)
-  } catch { metricsData.value = null } finally {
+  } catch { if (!quiet) metricsData.value = null } finally {
     metricsLoading.value = false
   }
 }
 function onMetricsWindowChange() {
   if (accessTunnel.value) void loadMetrics(accessTunnel.value.id)
 }
+// Ham (tcp/udp) tünellerde HTTP istek grafiği yerine `raw` bölümü gösterilir.
+const rawMetrics = computed(() => metricsData.value?.raw ?? null)
+const rawMetricsMax = computed(() => {
+  const r = rawMetrics.value
+  if (!r) return { count: 1, bytes: 1 }
+  const tcp = r.proto === 'tcp'
+  return {
+    count: Math.max(1, ...r.buckets.map(b => tcp ? b.conns_new + b.conns_rejected : b.packets_in + b.packets_out)),
+    bytes: Math.max(1, ...r.buckets.map(b => b.bytes_in + b.bytes_out)),
+  }
+})
+const rawMetricCards = computed(() => {
+  const r = rawMetrics.value
+  if (!r) return []
+  const s = r.summary
+  if (r.proto === 'tcp') {
+    return [
+      { key: 'conns', value: fmtCount(s.conns_new) },
+      { key: 'rejected', value: fmtCount(s.conns_rejected), bad: s.conns_rejected > 0 },
+      { key: 'peak', value: String(s.conns_peak) },
+      { key: 'bytesIn', value: fmtCount(s.bytes_in) + 'B' },
+      { key: 'bytesOut', value: fmtCount(s.bytes_out) + 'B' },
+      { key: 'durAvg', value: fmtDur(s.dur_avg_ms) },
+    ]
+  }
+  return [
+    { key: 'packets', value: fmtCount(s.packets_in + s.packets_out) },
+    { key: 'flows', value: fmtCount(s.flows_new) },
+    { key: 'flowsPeak', value: String(s.flows_peak) },
+    { key: 'bytesIn', value: fmtCount(s.bytes_in) + 'B' },
+    { key: 'bytesOut', value: fmtCount(s.bytes_out) + 'B' },
+    { key: 'dropped', value: fmtCount(s.dropped), bad: s.dropped > 0 },
+  ]
+})
 // Grafik için ölçekleme: en yüksek bucket count'u (min 1).
 const metricsMaxCount = computed(() => {
   const bs = metricsData.value?.buckets || []
@@ -858,6 +985,14 @@ async function refreshDoorGrants() {
   try {
     doorGrants.value = await api.listDoorGrants(tn.id)
   } catch { /* sessizce */ }
+}
+
+// Grant'in tum adresleri: "IPv4: x / IPv6: y (izinli)"; ek adres yoksa yalniz ana IP.
+function grantAddrLine(g: DoorGrant): string {
+  const all = [g.ip, ...(g.extra_ips || [])]
+  if (all.length < 2) return g.ip
+  const lbl = (ip: string) => (ip.includes(':') ? 'IPv6' : 'IPv4')
+  return all.map(ip => `${lbl(ip)}: ${ip}`).join(' / ') + ` (${t('tunnels.doorGrantAllowed')})`
 }
 
 async function revokeGrant(g: DoorGrant) {
@@ -1529,6 +1664,45 @@ async function remove(tn: Tunnel) {
                 </div>
               </div>
 
+              <!-- Baglanti kalitesi: gecikme + kayip (FeatureUDPProbe) -->
+              <div v-if="udpLive || udpSeries.length" class="space-y-2">
+                <span class="label-sys block">{{ t('tunnels.rawQualityTitle') }}</span>
+                <p v-if="!udpQualitySupported" class="rounded border border-line px-3 py-2 text-xs text-amber-700 dark:text-amber-400">{{ t('tunnels.rawQualityUnsupported') }}</p>
+                <template v-else>
+                  <p v-if="!udpQualityRows.length && udpLive?.probe_rtt_ms == null" class="text-[11px] text-fg-subtle">{{ t('tunnels.rawQualityNone') }}</p>
+                  <div v-else class="space-y-2">
+                    <div class="flex items-center gap-3 text-xs">
+                      <span class="text-fg-muted">{{ t('tunnels.rawQualityAvg') }}</span>
+                      <span class="font-mono" :class="latencyTone(udpLive?.probe_rtt_ms)">{{ fmtMs(udpLive?.probe_rtt_ms) }}</span>
+                    </div>
+                    <div class="flex h-10 items-end gap-px rounded border border-line p-1">
+                      <div v-for="p in udpSeries" :key="p.minute" class="flex-1 rounded-sm" :class="latencyBar(p.rtt_p95_ms)"
+                           :style="{ height: p.rtt_p95_ms == null ? '4%' : Math.max(8, Math.round(p.rtt_p95_ms / udpQualityMax * 100)) + '%' }"
+                           :title="new Date(p.minute).toLocaleTimeString() + ' · ' + fmtMs(p.rtt_p50_ms) + ' / ' + fmtMs(p.rtt_p95_ms) + ' · ' + fmtPct(p.probe_loss_pct)" />
+                    </div>
+                    <table class="w-full text-left text-xs">
+                      <thead>
+                        <tr class="text-fg-muted">
+                          <th class="py-1 font-normal">{{ t('tunnels.rawQualityMinute') }}</th>
+                          <th class="py-1 font-normal">{{ t('tunnels.rawQualityLatency') }}</th>
+                          <th class="py-1 font-normal">{{ t('tunnels.rawQualityLoss') }}</th>
+                          <th class="py-1 font-normal">{{ t('tunnels.rawQualityDropped') }}</th>
+                        </tr>
+                      </thead>
+                      <tbody class="font-mono">
+                        <tr v-for="p in udpQualityRows" :key="p.minute" class="border-t border-line">
+                          <td class="py-1 text-fg-muted">{{ new Date(p.minute).toLocaleTimeString() }}</td>
+                          <td class="py-1" :class="latencyTone(p.rtt_p95_ms)">{{ fmtMs(p.rtt_p50_ms) }} / {{ fmtMs(p.rtt_p95_ms) }}</td>
+                          <td class="py-1" :class="lossTone(p.probe_loss_pct)">{{ fmtPct(p.probe_loss_pct) }}</td>
+                          <td class="py-1" :class="(p.dropped_datagrams ?? 0) > 0 ? 'text-amber-700 dark:text-amber-400' : 'text-fg-subtle'">{{ p.dropped_datagrams ?? 0 }}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                  <p class="text-[11px] text-fg-subtle">{{ t('tunnels.rawQualityHint') }}</p>
+                </template>
+              </div>
+
               <!-- Sınırlar -->
               <div class="space-y-2 border-t border-line pt-3">
                 <span class="label-sys block">{{ t('tunnels.rawLimitsTitle') }}</span>
@@ -1546,6 +1720,68 @@ async function remove(tn: Tunnel) {
                     {{ udpSaving ? t('common.saving') : t('common.save') }}
                   </button>
                 </div>
+              </div>
+            </template>
+          </template>
+
+          <!-- Ham TCP: canlı + son 60 dakika -->
+          <template v-else-if="accessTunnel?.proto === 'tcp'">
+            <p class="text-xs text-fg-muted">{{ t('tunnels.tcpIntro') }}</p>
+            <p v-if="tcpLoading" class="py-2 text-center text-xs text-fg-muted">{{ t('common.loading') }}</p>
+            <template v-else>
+              <div class="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                <div v-for="m in tcpLiveCards" :key="m.key" class="rounded border border-line px-3 py-2">
+                  <span class="label-sys block">{{ t('tunnels.tcpStat_' + m.key) }}</span>
+                  <span class="mt-0.5 block font-mono text-sm text-fg">{{ m.value }}</span>
+                </div>
+              </div>
+              <p v-if="!tcpLive" class="text-[11px] text-fg-subtle">{{ t('tunnels.tcpNoListener') }}</p>
+
+              <!-- Red nedenleri -->
+              <div v-if="tcpLive" class="space-y-1">
+                <span class="label-sys block">{{ t('tunnels.tcpRejTitle') }}</span>
+                <div class="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                  <div v-for="r in tcpRejectRows" :key="r.key" class="rounded border border-line px-3 py-2">
+                    <span class="label-sys block">{{ t('tunnels.tcpRej_' + r.key) }}</span>
+                    <span class="mt-0.5 block font-mono text-sm" :class="r.value > 0 ? 'text-amber-700 dark:text-amber-400' : 'text-fg-subtle'">{{ r.value }}</span>
+                  </div>
+                </div>
+              </div>
+
+              <div v-if="tcpSeries.length" class="space-y-1">
+                <span class="label-sys block">{{ t('tunnels.tcpSeriesTitle') }}</span>
+                <div class="flex h-16 items-end gap-px rounded border border-line p-1">
+                  <div v-for="p in tcpSeries" :key="p.minute" class="flex-1 rounded-sm" :class="p.conns_rejected > 0 ? 'bg-danger/70' : 'bg-accent/60'"
+                       :style="{ height: Math.max(4, Math.round((p.conns_new + p.conns_rejected) / tcpSeriesMax * 100)) + '%' }"
+                       :title="new Date(p.minute).toLocaleTimeString() + ' · ' + p.conns_new + ' ' + t('tunnels.tcpConns') + (p.conns_rejected ? ' · ' + p.conns_rejected + ' ' + t('tunnels.tcpRejected') : '')" />
+                </div>
+                <div class="overflow-x-auto">
+                  <table class="w-full text-left text-[11px]">
+                    <thead class="text-fg-subtle">
+                      <tr>
+                        <th class="py-1 font-normal">{{ t('tunnels.tcpCol_time') }}</th>
+                        <th class="py-1 font-normal">{{ t('tunnels.tcpCol_conns') }}</th>
+                        <th class="py-1 font-normal">{{ t('tunnels.tcpCol_peak') }}</th>
+                        <th class="py-1 font-normal">{{ t('tunnels.tcpCol_rejected') }}</th>
+                        <th class="py-1 font-normal">{{ t('tunnels.tcpCol_traffic') }}</th>
+                        <th class="py-1 font-normal">{{ t('tunnels.tcpCol_dur') }}</th>
+                      </tr>
+                    </thead>
+                    <tbody class="font-mono">
+                      <tr v-for="p in tcpTableRows" :key="p.minute" class="border-t border-line">
+                        <td class="py-1 text-fg-muted">{{ new Date(p.minute).toLocaleTimeString() }}</td>
+                        <td class="py-1">{{ p.conns_new }}</td>
+                        <td class="py-1">{{ p.conns_peak }}</td>
+                        <td class="py-1" :class="p.conns_rejected > 0 ? 'text-amber-700 dark:text-amber-400' : 'text-fg-subtle'">{{ p.conns_rejected }}</td>
+                        <td class="py-1">{{ fmtCount(p.bytes_in) }}B / {{ fmtCount(p.bytes_out) }}B</td>
+                        <td class="py-1">{{ fmtDur(p.dur_avg_ms) }} / {{ fmtDur(p.dur_max_ms) }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+              <div class="flex justify-end">
+                <button class="rounded border border-line px-3 py-1.5 text-xs text-fg-muted hover:bg-surface-2" @click="accessTunnel && loadTCP(accessTunnel.id)">{{ t('tunnels.lbRefresh') }}</button>
               </div>
             </template>
           </template>
@@ -1599,6 +1835,50 @@ async function remove(tn: Tunnel) {
           </div>
 
           <p v-if="metricsLoading" class="py-6 text-center text-xs text-fg-muted">{{ t('common.loading') }}</p>
+          <template v-else-if="metricsData && rawMetrics">
+            <p class="text-[11px] text-fg-subtle">{{ t('tunnels.metricsRawIntro') }}</p>
+            <div class="grid grid-cols-2 gap-2 sm:grid-cols-3">
+              <div v-for="c in rawMetricCards" :key="c.key" class="rounded border border-line p-3">
+                <div class="text-lg font-bold" :class="c.bad ? 'text-danger' : 'text-fg'">{{ c.value }}</div>
+                <div class="text-[11px] text-fg-muted">{{ t('tunnels.metricsRaw_' + rawMetrics.proto + '_' + c.key) }}</div>
+              </div>
+            </div>
+            <div v-if="rawMetrics.buckets.length" class="space-y-3">
+              <div class="rounded border border-line p-3">
+                <div class="mb-2 text-[11px] text-fg-muted">{{ t(rawMetrics.proto === 'tcp' ? 'tunnels.metricsRawConnsChart' : 'tunnels.metricsRawPacketsChart') }}</div>
+                <div class="flex h-24 items-end gap-px">
+                  <div
+                    v-for="(b, i) in rawMetrics.buckets"
+                    :key="i"
+                    class="flex-1 rounded-t"
+                    :class="(rawMetrics.proto === 'tcp' ? b.conns_rejected : b.dropped) > 0 ? 'bg-danger/70' : 'bg-accent/60'"
+                    :style="{ height: Math.max(2, Math.round((rawMetrics.proto === 'tcp' ? b.conns_new + b.conns_rejected : b.packets_in + b.packets_out) / rawMetricsMax.count * 100)) + '%' }"
+                    :title="new Date(b.bucket).toLocaleString(dateLocale()) + ' · ' + (rawMetrics.proto === 'tcp' ? b.conns_new + ' / ' + b.conns_rejected : b.packets_in + b.packets_out)"
+                  />
+                </div>
+              </div>
+              <div class="rounded border border-line p-3">
+                <div class="mb-2 text-[11px] text-fg-muted">{{ t('tunnels.metricsRawBytesChart') }}</div>
+                <div class="flex h-24 items-end gap-px">
+                  <div
+                    v-for="(b, i) in rawMetrics.buckets"
+                    :key="i"
+                    class="flex w-full flex-col justify-end"
+                    :style="{ height: Math.max(2, Math.round((b.bytes_in + b.bytes_out) / rawMetricsMax.bytes * 100)) + '%' }"
+                    :title="new Date(b.bucket).toLocaleString(dateLocale()) + ' · ' + fmtCount(b.bytes_in) + 'B / ' + fmtCount(b.bytes_out) + 'B'"
+                  >
+                    <div class="w-full bg-accent/60" :style="{ height: Math.round(b.bytes_in / Math.max(1, b.bytes_in + b.bytes_out) * 100) + '%' }" />
+                    <div class="w-full rounded-t bg-accent/30" :style="{ height: Math.round(b.bytes_out / Math.max(1, b.bytes_in + b.bytes_out) * 100) + '%' }" />
+                  </div>
+                </div>
+                <div class="mt-2 flex items-center gap-3 text-[10px] text-fg-subtle">
+                  <span class="flex items-center gap-1"><span class="inline-block size-2 rounded-sm bg-accent/60" />{{ t('tunnels.metricsRawLegendIn') }}</span>
+                  <span class="flex items-center gap-1"><span class="inline-block size-2 rounded-sm bg-accent/30" />{{ t('tunnels.metricsRawLegendOut') }}</span>
+                </div>
+              </div>
+            </div>
+            <p v-else class="rounded border border-dashed border-line py-8 text-center text-xs text-fg-muted">{{ t('tunnels.metricsRawEmpty') }}</p>
+          </template>
           <template v-else-if="metricsData">
             <!-- Özet -->
             <div class="grid grid-cols-3 gap-2">
@@ -1958,7 +2238,7 @@ async function remove(tn: Tunnel) {
                 <ul v-else class="divide-y divide-line rounded border border-line">
                   <li v-for="g in doorGrants" :key="g.id" class="flex items-center justify-between gap-2 px-3 py-2">
                     <div class="min-w-0">
-                      <span class="font-mono text-xs text-fg">{{ g.ip }}</span>
+                      <span class="break-all font-mono text-xs text-fg">{{ grantAddrLine(g) }}</span>
                       <span v-if="g.identity" class="ml-2 truncate text-[11px] text-fg-muted">{{ g.identity }}</span>
                       <p class="text-[11px] text-fg-subtle">{{ t('tunnels.doorGrantUntil') }}: {{ new Date(g.expires_at).toLocaleString() }}</p>
                     </div>
