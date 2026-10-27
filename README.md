@@ -1,108 +1,153 @@
 # Zorven
 
-**Self-hosted, open-source reverse proxy and secure tunneling platform — a Cloudflare Tunnel / ngrok alternative you fully control.**
+**Zorven publishes a service running on your computer or server at a secure public HTTPS address with one command.** It is a self-hostable, open-source alternative to ngrok and Cloudflare Tunnel, with a built-in security layer, private networking and remote access.
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
-[![Go](https://img.shields.io/badge/Go-1.25+-00ADD8.svg)](https://go.dev)
+[![Go](https://img.shields.io/badge/Go-1.26+-00ADD8.svg)](https://go.dev)
 
-Zorven exposes a local service (`localhost:8000`) on a stable public domain
-(`https://api.yourdomain.com`) without port forwarding, a static IP, or opening
-firewall ports. The client opens a single **outbound**, encrypted tunnel to the
-server; inbound public requests are routed back through it to your local service.
+No port forwarding, no static IP, no firewall changes: the client only makes an
+outbound connection, so it works behind CGNAT, home routers and corporate firewalls.
 
-It works behind CGNAT, dynamic IPs, and restrictive firewalls — anywhere a plain
-outbound HTTPS connection is allowed.
+## 30-second example
 
----
+```bash
+# 1. Install the client (from your Zorven server)
+curl -fsSL https://<your-server>/install.sh | sh
 
-## Why Zorven
+# 2. Save your token once (create it in the dashboard)
+zorven authtoken zrv_live_...
 
-- **You own the whole stack.** Run the server on your own VPS; no third party sees your traffic.
-- **Outbound-only client.** No inbound ports, no NAT/firewall changes on the client side.
-- **Stable public URLs.** Automatic per-tunnel hostnames plus your own custom domains.
-- **More than HTTP.** Raw TCP, UDP, SNI passthrough, live request logs, remote terminal (PTY), and screen sharing over the same tunnel.
-- **Edge gateway built in.** Policy engine, WAF, webhook signature verification, mTLS, and load balancing in the tunnel server itself.
-- **Batteries included.** Multi-tenant dashboard, projects, team invitations, self-hosted webmail (SPF/DKIM/DMARC), API tokens, IP allow-lists.
-- **One-command client.** `zorven 8080` — ngrok-style.
+# 3. Publish the app running on port 3000
+zorven 3000
+```
+
+The client prints the public address, for example:
+
+```text
+Forwarding  https://myapp--acme.yourdomain.com  ->  http://localhost:3000
+```
+
+Other shapes of the same idea:
+
+```bash
+# Raw TCP (database, game server, SSH): define a TCP tunnel in the dashboard, then
+zorven --local localhost:25565
+# Share a port privately with one person, end-to-end encrypted (no public address)
+zorven share 5432 --to ali@company.com --name db     # recipient: zorven access db --local 5432
+```
+
+A temporary tunnel that removes itself: `zorven ephemeral 3000`.
+
+## How it works
+
+```mermaid
+flowchart LR
+    V[Visitors] -->|HTTPS / TCP / UDP| S
+    subgraph srv [Your Zorven server]
+      S[Ingress: TLS, policies, WAF, bot protection] --> H[Tunnel hub]
+    end
+    H <-->|"one outbound encrypted tunnel"| C[zorven client]
+    C --> L[localhost:3000]
+```
+
+The client dials the server (`wss://<server>/_tunnel/v1/connect`), authenticates with
+a token and keeps one multiplexed connection open. The server terminates public TLS,
+maps the hostname to a tunnel, applies your security rules, and sends the request down
+that connection to your local service. Because the connection is always opened from
+the inside, nothing needs to be forwarded or opened on your router or firewall.
+
+## What you can use it for
+
+- **Demo and preview URLs.** Show a work-in-progress app to a client with a real HTTPS link.
+- **Webhook testing.** Receive Stripe, GitHub or Slack callbacks on your laptop, inspect and replay them, and drop forged ones with signature verification.
+- **Self-hosting from home.** Serve a site or API from a machine behind CGNAT or a dynamic IP, on your own domain.
+- **Remote support.** Open a browser terminal or share a screen (with file transfer) on a machine you are helping.
+- **Team private network.** Give colleagues access to a database or internal service without exposing it to the internet (`zorven share`, `zorven connect`, Zorven Net).
+- **MCP servers and AI agents.** Publish your own MCP server, or run `zorven mcp` so an AI assistant gets controlled access to your tunnels.
+- **Protecting a public app.** Put a WAF, bot protection, rate limits, geo rules and CAPTCHA in front of an app that has none.
+- **Game servers and raw ports.** Reserved TCP/UDP ports and SNI passthrough for non-HTTP traffic.
 
 ## Features
 
 **Tunneling**
+- HTTP, WebSocket and SSE with streaming bodies; raw TCP and UDP tunnels; SNI-based TLS passthrough on :443
+- Automatic hostnames and custom domains with ACME TLS and authoritative DNS verification
+- Path-based routing, load balancing with health checks, ephemeral tunnels
 
-- HTTP, WebSocket, and SSE tunneling with streaming request/response bodies
-- Raw TCP and UDP tunnels (reserved public ports, including advanced UDP options), SNI-based TLS passthrough on :443
-- Automatic scoped hostnames (`myapp--tenant.yourdomain.com`) and custom domains with ACME TLS
-- Path-based routing: send different URL prefixes of one hostname to different tunnels
-- Ephemeral tunnels with an automatic time-to-live (`zorven ephemeral 8080`)
-- Mutual TLS (client-certificate) per tunnel, per-tunnel IP allow-lists, visitor access control (Basic auth / Google & GitHub OAuth)
-- Branded visitor sign-in pages for protected tunnels (password form and "Sign in with Google/GitHub"), with the Zorven session cookies never forwarded to your service
-- Web door for raw TCP/UDP tunnels: visitors sign in on a web page and their IP is temporarily allowed to reach the port; grants can be revoked at any time
+**Security at the edge**
+- Policy engine (deny, redirect, set header, rate limit, require mTLS) with path, method, geo and IP-list conditions
+- Visitor login (Basic, Google, GitHub) with branded sign-in pages; per-tunnel IP allow-lists
+- WAF (OWASP-lite rules, log or block), country (Geo) rules from a local database
+- Bot protection (challenge page, TLS fingerprint scoring, verified-bot allowlist) and per-tunnel rate limiting
+- Zorven CAPTCHA: an embeddable, Turnstile-style widget with proof-of-work and a compatible `siteverify`
+- Mutual TLS, webhook signature verification (GitHub, Stripe, GitLab, Shopify, Slack), Secret Vault (AES-256-GCM)
+- Web door: visitors sign in on a web page to temporarily unlock a raw TCP/UDP port
 
-**Edge gateway**
+**Private network (Zorven Net)**
+- WireGuard-based port sharing with chosen users, groups or devices (`zorven share` / `zorven access`)
+- Direct peer-to-peer paths (STUN and hole punching) with relay fallback
+- Full network layer (OS TUN device: `zorven net up`), SOCKS5 gateway (`zorven connect`), `zorven forward`
 
-- Policy engine: `deny`, `redirect`, `set_header`, `rate_limit`, `require_mtls` rules with match conditions (path, method, geo/IP-list conditions)
-- Built-in WAF (OWASP-lite ruleset, bring-your-own patterns)
-- Webhook signature verification (GitHub, Stripe, GitLab, Shopify, Slack) so forged callbacks never reach your service
-- Secret Vault: AES-256-GCM encrypted secrets referenced from policies and webhook configs
-- Load balancing across replicas (round-robin, weighted, least-connections, latency) with active health checks and automatic failover
+**Remote access**
+- Browser terminal (PTY) and screen sharing with multi-viewer sessions, H.264 video mode, clipboard and file transfer
+- Off by default; enabled per client with `--enable-terminal` / `--enable-screen`
 
-**Private network**
-
-- Zorven Network: publish private resources (`db.internal:5432`, whole subnets) without exposing them to the internet
-- `zorven connect` (local SOCKS5 gateway, optional site-to-site gateway mode) and `zorven forward` (port-forward to a private or reserved-port tunnel)
+**AI / MCP**
+- MCP server (remote endpoint and `zorven mcp` over stdio), OAuth 2.1 for custom connectors, per-tunnel MCP mode with keys and call log
 
 **Observability**
+- Live request log, request inspector with replay and replay diff, per-tunnel and TCP/UDP metrics
+- Rejected-request log with reasons, access statistics, error-rate alerts, abuse reports
 
-- Live request log, request inspector with replay and replay diff, per-tunnel metrics
-- Rejected-request log: requests the ingress turned away (IP filter, policy, WAF, rate limit, offline client ...) are recorded with a reason, with a badge and filter in the panel
-- Access statistics per tunnel: sign-in successes/failures by method and provider, unique identities and IPs, web-door grants
-- Alerts on error-rate thresholds with e-mail notification, abuse reporting for visitors
+**Teams and mail**
+- Organizations, projects, members, e-mail invitations, scoped API tokens
+- Self-hosted webmail (inbound and outbound, DKIM/SPF/DMARC) plus IMAP/SMTP access for Gmail, Outlook, Apple Mail and Thunderbird
 
-**Platform**
+**Clients**
+- CLI with background service, self-update and an interactive `zorven settings` screen; desktop app (Windows, macOS, Linux)
+- Dashboard in English and Turkish; REST API with OpenAPI spec; SDKs for Go, Node.js and Python (`sdk/`)
 
-- Web dashboard (Vue/Nuxt, English + Turkish) with tunnels, clients, devices, domains, policies, secrets, tokens, projects, and team management
-- Multi-tenant data model: organizations, projects, members, e-mail invitations, API tokens (scoped, rotatable)
-- REST API with OpenAPI spec; SDKs for Go, Node.js, and Python
-- CLI client, background service install (`zorven service ...`), self-updating binaries, and a cross-platform desktop app (Windows/macOS/Linux)
-- Remote terminal and screen sharing (off by default; opt-in per client for security)
-- Self-hosted webmail: inbound receiver + outbound sender with DKIM signing, folders, and external sending for every tenant
-- Mail apps: use your Zorven mailbox from Gmail, Outlook, Apple Mail, or Thunderbird over IMAP (993) and authenticated SMTP submission (587/465) with revocable app passwords and autoconfig / Autodiscover / `.mobileconfig`
-- Client version reporting: clients report their real version and the panel flags outdated ones
-- Configurable log retention (`ZORVEN_LOG_RETENTION_DAYS`, default 30)
-- Postgres-backed; ships with a Docker Compose stack for one-command self-hosting
+## Self-host in 5 minutes
 
-## Architecture
+You need a VPS with a public IP, a domain, and Docker with the Compose plugin.
 
-```
-                       Internet
-                          |
-                   (public HTTPS)
-                          v
-   +------------------------------------------+
-   |            Zorven Server (VPS)            |
-   |  ingress proxy  -  tunnel hub  -  API     |
-   |  dashboard  -  webmail  -  Postgres       |
-   +------------------------------------------+
-                          ^
-                (outbound WSS tunnel)
-                          |
-   +------------------------------------------+
-   |        Zorven Client (your machine)       |
-   |     forwards to http://localhost:8000     |
-   +------------------------------------------+
-```
+**1. DNS.** Point two A records at the server: `yourdomain.com` and `*.yourdomain.com`.
+For webmail also add an MX record for `mail.yourdomain.com` plus SPF, DKIM and DMARC TXT records.
 
-The client dials `wss://<server>/_tunnel/v1/connect`, authenticates with a client
-token, and keeps a persistent multiplexed connection. The server terminates
-public TLS, resolves the hostname to a tunnel, and forwards the request down the
-tunnel to the client's local target.
+**2. Ports.** Open 80 and 443. Optional: 25 (inbound mail), 993/587/465 (mail apps),
+10000-10099 TCP and UDP (reserved ports for raw tunnels), 3478/udp (STUN for direct P2P).
 
-## Quick start
-
-### Use the client (against your own server)
+**3. Configure and start.**
 
 ```bash
-# Linux/macOS
+git clone https://github.com/tkodcumpeg4/zorven.git
+cd zorven/deploy
+cp .env.example .env     # set PLATFORM_DOMAIN, ADMIN_KEY, ACME_EMAIL,
+                         # POSTGRES_PASSWORD, BETTER_AUTH_SECRET (openssl rand -hex 32)
+mkdir -p certs           # bootstrap certificate; ACME takes over for real domains
+openssl req -x509 -newkey rsa:2048 -nodes -days 365 -subj "/CN=yourdomain.com" \
+  -keyout certs/server.key -out certs/server.crt
+docker compose up -d
+```
+
+**4. First admin and first tunnel.** Open `https://panel.yourdomain.com`, sign up, create a
+client token in the dashboard, then connect a client:
+
+```bash
+zorven authtoken zrv_live_... && zorven config set-server yourdomain.com:443
+zorven 3000
+```
+
+Optional settings (Secret Vault key `ZORVEN_SECRET_KEY`, OAuth logins, Geo database via
+`scripts/geo-update.sh`, IP lists) are documented inline in
+[deploy/.env.example](deploy/.env.example). Back up the database with `deploy/backup.sh`.
+Protocol and transport details: [docs/protokol-uyumluluk.md](docs/protokol-uyumluluk.md),
+[docs/zorven-network-transport.md](docs/zorven-network-transport.md).
+
+## Clients
+
+```bash
+# Linux / macOS
 curl -fsSL https://<your-server>/install.sh | sh
 ```
 
@@ -111,75 +156,52 @@ curl -fsSL https://<your-server>/install.sh | sh
 irm https://<your-server>/install.ps1 | iex
 ```
 
-Then expose a local port:
+Handy commands: `zorven status`, `zorven up` (run as a background service, start at boot),
+`zorven update`, `zorven settings`. The desktop app (Wails) lives in `desktop/` and offers
+the same tunnels, private network and remote access with a graphical interface.
+Build the client yourself with `cd client && go build -o zorven .`
 
-```bash
-zorven authtoken zrv_live_...   # one-time, token from the dashboard
-zorven 8080                     # exposes http://localhost:8080
-```
+## Comparison
 
-Check status any time:
+| | Zorven | ngrok | Cloudflare Tunnel | Tailscale |
+|---|---|---|---|---|
+| Self-hostable server | Yes | No | No | - |
+| Server and clients open source | Yes (AGPLv3) | - | - | - |
+| Custom domains | Yes | Yes | Yes | - |
+| Raw TCP / UDP tunnels | Yes | - | - | - |
+| Private network between devices | Yes | - | - | Yes |
+| WAF / bot protection | Built in | - | Yes (Cloudflare edge) | - |
+| Remote terminal / screen sharing | Yes | - | - | - |
 
-```bash
-zorven status
-```
-
-Remote terminal and screen sharing are **disabled by default**. Enable per run:
-
-```bash
-zorven 8080 --enable-terminal --enable-screen
-```
-
-### Self-host the server
-
-Requirements: a VPS with a public IP, a domain with wildcard DNS
-(`yourdomain.com` and `*.yourdomain.com`) pointing to it, and Docker.
-
-```bash
-git clone https://github.com/tkodcumpeg4/zorven.git
-cd zorven/deploy
-cp .env.example .env      # fill in PLATFORM_DOMAIN, secrets, ACME_EMAIL, ...
-docker compose up -d
-```
-
-The server obtains TLS certificates via ACME automatically and serves the
-dashboard, API, and tunnel endpoint on the same origin. See `deploy/` for the
-full Compose stack (server, Postgres, dashboard auth service, mail relay).
+Competitor cells are a conservative summary and change over time; check their docs.
+A dash means we are not claiming anything for that cell (not offered, or not verified).
 
 ## Build from source
 
-Zorven is a Go workspace (`go.work`) with four modules plus a Nuxt dashboard, and SDKs under `sdk/`.
+Zorven is a Go workspace (`go.work`) with a Nuxt dashboard and SDKs under `sdk/`.
 
 ```bash
-# Server + client + shared
 cd server && go build ./...
 cd ../client && go build -o zorven .
-
-# Dashboard (embedded into the server binary)
-cd web && npm install && npm run build
-bash scripts/build-dashboard.sh    # copies build output into server/webdist
+cd ../web && npm install && npm run build && cd .. && bash scripts/build-dashboard.sh
 ```
-
-Go 1.25+ and Node 20+ are required.
-
-## Project structure
 
 | Path | What |
 |------|------|
 | `server/` | Tunnel server, ingress proxy, policy/WAF engine, HTTP API, webmail, Postgres store |
 | `client/` | CLI tunnel agent (`zorven`) |
-| `desktop/` | Cross-platform desktop app (Wails) |
+| `desktop/` | Desktop app (Wails) |
 | `shared/` | Wire protocol shared by client and server |
-| `sdk/` | Node.js and Python SDKs (the Go SDK lives in `client/sdk`) |
-| `web/` | Nuxt dashboard (embedded into the server via `go:embed`) |
+| `sdk/` | Go, Node.js and Python SDKs |
+| `web/` | Nuxt dashboard (embedded into the server) |
 | `deploy/` | Docker Compose self-hosting stack |
 
 ## Open core
 
-Zorven is **open core**. This repository contains the complete tunneling
-product under the **AGPL-3.0** license: server, clients, SDKs, dashboard, webmail,
-remote access — fully functional and unlimited for self-hosting, with no feature
-gates or quotas. See [docs/OPEN-CORE.md](docs/OPEN-CORE.md) for the exact split.
+This repository contains the complete tunneling product under the **AGPL-3.0**: server,
+clients, SDKs, dashboard, webmail and remote access, fully functional and unlimited for
+self-hosting, with no feature gates or quotas. See [docs/OPEN-CORE.md](docs/OPEN-CORE.md)
+for the exact split.
 
 ## Enterprise
 
@@ -221,6 +243,10 @@ IP Geolocation by DB-IP (https://db-ip.com), licensed under CC BY 4.0.
 Issues and pull requests are welcome. By contributing you agree that your
 contributions are licensed under the AGPL-3.0. Please open an issue to discuss
 substantial changes before starting.
+
+## Security
+
+Please report vulnerabilities privately; see [SECURITY.md](SECURITY.md).
 
 ## License
 
