@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/tkodcumpeg4/zorven/client/i18n"
 	"io"
 	"net/http"
 	"os"
@@ -42,6 +43,23 @@ func (a *Agent) CheckUpdateNow(ctx context.Context) error {
 	defer a.forceUpdate.Store(false)
 	a.maybeUpdate(ctx, "elle")
 	return a.lastUpdateErr
+}
+
+// CheckUpdateQuiet, CheckUpdateNow gibidir ama stdout'a yazmaz; sonucu metin
+// olarak doner (zorven settings arayuzu ham kipteyken ekran bozulmasin).
+func (a *Agent) CheckUpdateQuiet(ctx context.Context) (string, error) {
+	a.quietUpdate.Store(true)
+	defer a.quietUpdate.Store(false)
+	err := a.CheckUpdateNow(ctx)
+	return a.lastUpdateMsg, err
+}
+
+// reportUpdate, elle guncellemenin sonucunu kaydeder; sessiz kipte yazmaz.
+func (a *Agent) reportUpdate(msg string) {
+	a.lastUpdateMsg = msg
+	if !a.quietUpdate.Load() {
+		fmt.Println(msg)
+	}
 }
 
 func (a *Agent) httpBase() string {
@@ -95,6 +113,7 @@ func (a *Agent) maybeUpdate(ctx context.Context, reason string) {
 	// Gelistirme ikilisi (surum yok/"dev") veya kapaliysa hicbir sey yapma.
 	forced := a.forceUpdate.Load()
 	a.lastUpdateErr = nil
+	a.lastUpdateMsg = ""
 	// Masaustu uygulamasinin gomulu ajani ASLA kendini guncellemez: calisan exe
 	// masaustu uygulamasidir; CLI ikilisini onun uzerine yazmak uygulamayi CLI'ye
 	// cevirir (2026-10-09 olayi). Masaustunun kendi guncelleyicisi var (desktop.json).
@@ -148,7 +167,7 @@ func (a *Agent) maybeUpdate(ctx context.Context, reason string) {
 				"mevcut", a.Version, "manifest", m.Version)
 		}
 		if forced {
-			fmt.Printf("Zaten guncel: %s\n", a.Version)
+			a.reportUpdate(i18n.T("upd.uptodate", a.Version))
 		}
 		return // zaten guncel
 	}
@@ -196,7 +215,7 @@ func (a *Agent) maybeUpdate(ctx context.Context, reason string) {
 	}
 	a.Log.Info("guncelleme uygulandi, yeniden baslatiliyor", "surum", m.Version)
 	if forced {
-		fmt.Printf("Guncellendi: %s -> %s\n", a.Version, m.Version)
+		a.reportUpdate(i18n.T("upd.updated", a.Version, m.Version))
 		return // elle: komut biter, yeni ikili bir sonraki calistirmada kullanilir
 	}
 	a.restartSelf(exePath)
@@ -246,6 +265,11 @@ func (a *Agent) fetchBody(ctx context.Context, path string) ([]byte, error) {
 }
 
 func (a *Agent) download(ctx context.Context, path string) ([]byte, error) {
+	return a.downloadMax(ctx, path, 200<<20) // 200 MB tavan
+}
+
+// downloadMax, path'i en fazla max bayt olacak sekilde indirir (asimda hata).
+func (a *Agent) downloadMax(ctx context.Context, path string, max int64) ([]byte, error) {
 	cctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 	req, err := http.NewRequestWithContext(cctx, http.MethodGet, a.httpBase()+path, nil)
@@ -260,5 +284,12 @@ func (a *Agent) download(ctx context.Context, path string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("indirme http %d", resp.StatusCode)
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, 200<<20)) // 200 MB tavan
+	data, err := io.ReadAll(io.LimitReader(resp.Body, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > max {
+		return nil, fmt.Errorf("indirme boyut siniri asildi (%d bayt)", max)
+	}
+	return data, nil
 }

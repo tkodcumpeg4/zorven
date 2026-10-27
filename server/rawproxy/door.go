@@ -2,6 +2,7 @@ package rawproxy
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 
@@ -31,30 +32,47 @@ type DoorGate interface {
 // soyler. grantExp sifir degilse kabul YALNIZCA grant sayesindedir ve baglanti
 // bu ana kadar yasayabilir (sure dolunca kesilmelidir).
 func (m *Manager) admit(ctx context.Context, ti TunnelInfo, ip string) (ok bool, grantExp time.Time) {
+	ok, grantExp, why := m.admitCheck(ctx, ti, ip, true)
+	if !ok && strings.HasPrefix(why, "geo:") && m.Log != nil {
+		m.Log.Warn("rawproxy: ulke kurali nedeniyle engellendi", "ip", ip, "tunnel", ti.TunnelID, "ulke", strings.TrimPrefix(why, "geo:"))
+	}
+	return ok, grantExp
+}
+
+// admitCheck, admit'in ret nedeni de donen hali. note=true ise grant'siz ret kapi
+// sayacina yazilir (yeniden degerlendirmede false: sayac sismesin).
+func (m *Manager) admitCheck(ctx context.Context, ti TunnelInfo, ip string, note bool) (ok bool, grantExp time.Time, reason string) {
+	// ZTNA Z3: tunel ulke kurali, IP filtresi ve kapi grant'inden ONCE.
+	if gok, country := m.geoAllowed(ti.TunnelID, ip); !gok {
+		return false, time.Time{}, geoReason(country)
+	}
+
 	doorOn := m.Door != nil && m.Door.DoorEnabled(ti.TunnelID)
 
 	if !doorOn {
 		// Eski davranis: statik liste varsa ve IP listede degilse reddet.
 		if m.IPFilter != nil && ti.TenantID != "" {
-			if allowed, err := m.IPFilter.CheckAllowed(ctx, ti.TenantID, ti.TunnelID, ip); err == nil && !allowed {
-				return false, time.Time{}
+			if allowed, err := m.IPFilter.CheckAllowed(ctx, ti.TenantID, ti.TunnelID, ip); err != nil || !allowed { // hata = ret (fail-closed)
+				return false, time.Time{}, "ip_denied"
 			}
 		}
-		return true, time.Time{}
+		return true, time.Time{}, ""
 	}
 
 	// Kapi etkin: statik liste izin veriyorsa gec.
 	if m.IPFilter != nil && ti.TenantID != "" && m.IPFilter.HasRules(ctx, ti.TenantID, ti.TunnelID) {
 		if allowed, err := m.IPFilter.CheckAllowed(ctx, ti.TenantID, ti.TunnelID, ip); err == nil && allowed {
-			return true, time.Time{}
+			return true, time.Time{}, ""
 		}
 	}
 	// Aksi halde grant sart.
 	if exp, has := m.Door.HasGrant(ti.TunnelID, ip); has {
-		return true, exp
+		return true, exp, ""
 	}
-	m.Door.NoteBlocked(ti.TenantID, ti.TunnelID, ip)
-	return false, time.Time{}
+	if note {
+		m.Door.NoteBlocked(ti.TenantID, ti.TunnelID, ip)
+	}
+	return false, time.Time{}, "door_denied"
 }
 
 // connRegistry, grant ile kabul edilmis acik baglanti/akislarin kapatici

@@ -4,16 +4,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strings"
 
 	"github.com/kardianos/service"
 	"github.com/spf13/cobra"
 	"github.com/tkodcumpeg4/zorven/client/agent"
 	"github.com/tkodcumpeg4/zorven/client/config"
+	"github.com/tkodcumpeg4/zorven/client/i18n"
 	"github.com/tkodcumpeg4/zorven/client/localctl"
 )
 
@@ -44,7 +48,10 @@ func (p *serviceProgram) run(ctx context.Context) {
 	// tunelleri (hello_ack / config_update) isler. RequestedTarget de bos
 	// kalir; boylece sunucu bu istemci icin kendiliginden tunel acmaz.
 
-	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
+	// Servis modunda stderr hicbir yere gitmez (Windows servisi): kayitlar ayrica
+	// dosyaya yazilir ve Go cokme ciktisi (panic/fatal yigini) ayni dosyaya duser.
+	logOut := openServiceLog()
+	logger := slog.New(slog.NewJSONHandler(logOut, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	}))
 
@@ -63,6 +70,8 @@ func (p *serviceProgram) run(ctx context.Context) {
 		// Servis modunda varsayilan guvenlik: uzaktan shell ve ekran kapali
 		NoTerminal: !sysCfg.EnableTerminal,
 		NoScreen:   !sysCfg.EnableScreen,
+		// Mod B (TUN) servis modunda acilabilir; ZORVEN_NO_TUN=1 ile kapatilir.
+		NoTUN: os.Getenv("ZORVEN_NO_TUN") == "1",
 	}
 	ag.OnReady = func(c context.Context) { startLocalCtl(c, ag, localctl.ServiceEndpoint()) }
 
@@ -96,6 +105,9 @@ func getService() (service.Service, error) {
 			"OnFailureResetPeriod":   10,
 		},
 	}
+	for k, v := range platformServiceOptions() {
+		svcConfig.Option[k] = v
+	}
 	prog := &serviceProgram{}
 	return service.New(prog, svcConfig)
 }
@@ -103,7 +115,7 @@ func getService() (service.Service, error) {
 func newServiceCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "service",
-		Short: "Zorven arka plan sistem servisini (Windows Service / systemd) yonetir",
+		Short: i18n.T("svc.cmd.service"),
 	}
 
 	var (
@@ -113,26 +125,44 @@ func newServiceCmd() *cobra.Command {
 		instScreen bool
 	)
 
+	var tokenFileFlag string
 	installCmd := &cobra.Command{
-		Use:   "install",
-		Short: "Zorven servisini sisteme kaydeder (Windows Service veya systemd)",
+		PreRunE: requireAdmin,
+		Use:     "install",
+		Short:   i18n.T("svc.cmd.install"),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := installService(installOpts{token: tokenFlag, server: serverFlag, terminal: instTerm, screen: instScreen}); err != nil {
+			if tokenFileFlag != "" {
+				t, err := readTokenFile(tokenFileFlag)
+				if err != nil {
+					return err
+				}
+				tokenFlag = t
+			}
+			o := installOpts{token: tokenFlag, server: serverFlag, terminal: instTerm, screen: instScreen}
+			if lu, ok := detectLegacyUnit(); ok {
+				if err := migrateLegacyUnit(lu, o, true); err != nil {
+					return err
+				}
+				return nil
+			}
+			if err := installService(o); err != nil {
 				return err
 			}
-			fmt.Println("Zorven servisi kuruldu (sistem acilisinda otomatik baslar).")
-			fmt.Println("  Baslatmak icin: zorven service start   (ya da tek adimda: zorven up)")
+			fmt.Println(i18n.T("svc.installed"))
+			fmt.Println(i18n.T("svc.installed.hint"))
 			return nil
 		},
 	}
-	installCmd.Flags().StringVarP(&tokenFlag, "token", "t", "", "servise atanacak token (sistem ayarlarina yazilir)")
-	installCmd.Flags().BoolVar(&instTerm, "enable-terminal", false, "servis icin uzaktan terminali kalici olarak ac (varsayilan kapali)")
-	installCmd.Flags().BoolVar(&instScreen, "enable-screen", false, "servis icin ekran paylasimini kalici olarak ac (varsayilan kapali)")
-	installCmd.Flags().StringVarP(&serverFlag, "server", "s", "", "sunucu adresi (or. zorven.app:8443)")
+	installCmd.Flags().StringVarP(&tokenFlag, "token", "t", "", i18n.T("svc.flag.token"))
+	installCmd.Flags().StringVar(&tokenFileFlag, "token-file", "", i18n.T("svc.flag.tokenfile"))
+	installCmd.Flags().BoolVar(&instTerm, "enable-terminal", false, i18n.T("svc.flag.terminal.p"))
+	installCmd.Flags().BoolVar(&instScreen, "enable-screen", false, i18n.T("svc.flag.screen.p"))
+	installCmd.Flags().StringVarP(&serverFlag, "server", "s", "", i18n.T("svc.flag.server"))
 
 	uninstallCmd := &cobra.Command{
-		Use:   "uninstall",
-		Short: "Zorven servisini sistemden kaldirir",
+		PreRunE: requireAdmin,
+		Use:     "uninstall",
+		Short:   i18n.T("svc.cmd.uninstall"),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			s, err := getService()
 			if err != nil {
@@ -140,64 +170,67 @@ func newServiceCmd() *cobra.Command {
 			}
 			_ = s.Stop()
 			if err := s.Uninstall(); err != nil {
-				return fmt.Errorf("servis kaldirilamadi: %w", err)
+				return fmt.Errorf("%s: %w", i18n.T("svc.err.uninstall"), err)
 			}
-			fmt.Println("✓ Zorven servisi sistemden kaldirildi.")
+			fmt.Println(i18n.T("svc.uninstalled"))
 			return nil
 		},
 	}
 
 	startCmd := &cobra.Command{
-		Use:   "start",
-		Short: "Zorven servisini baslatir",
+		PreRunE: requireAdmin,
+		Use:     "start",
+		Short:   i18n.T("svc.cmd.start"),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			s, err := getService()
 			if err != nil {
 				return err
 			}
 			if err := s.Start(); err != nil {
-				return fmt.Errorf("servis baslatilamadi: %w", err)
+				return fmt.Errorf("%s: %w", i18n.T("svc.err.start"), err)
 			}
-			fmt.Println("✓ Zorven servisi baslatildi.")
+			fmt.Println(i18n.T("svc.started"))
 			return nil
 		},
 	}
 
 	stopCmd := &cobra.Command{
-		Use:   "stop",
-		Short: "Zorven servisini durdurur",
+		PreRunE: requireAdmin,
+		Use:     "stop",
+		Short:   i18n.T("svc.cmd.stop"),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			s, err := getService()
 			if err != nil {
 				return err
 			}
 			if err := s.Stop(); err != nil {
-				return fmt.Errorf("servis durdurulamadi: %w", err)
+				return fmt.Errorf("%s: %w", i18n.T("svc.err.stop"), err)
 			}
-			fmt.Println("✓ Zorven servisi durduruldu.")
+			fmt.Println(i18n.T("svc.stopped"))
 			return nil
 		},
 	}
 
 	restartCmd := &cobra.Command{
-		Use:   "restart",
-		Short: "Zorven servisini yeniden baslatir",
+		PreRunE: requireAdmin,
+		Use:     "restart",
+		Short:   i18n.T("svc.cmd.restart"),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			s, err := getService()
 			if err != nil {
 				return err
 			}
 			if err := s.Restart(); err != nil {
-				return fmt.Errorf("servis yeniden baslatilamadi: %w", err)
+				return fmt.Errorf("%s: %w", i18n.T("svc.err.restart"), err)
 			}
-			fmt.Println("✓ Zorven servisi yeniden baslatildi.")
+			fmt.Println(i18n.T("svc.restarted"))
 			return nil
 		},
 	}
 
 	statusCmd := &cobra.Command{
 		Use:   "status",
-		Short: "Zorven servisinin aktif durumunu gosterir",
+		Short: i18n.T("svc.cmd.status"),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			s, err := getService()
 			if err != nil {
@@ -205,17 +238,18 @@ func newServiceCmd() *cobra.Command {
 			}
 			st, err := s.Status()
 			if err != nil {
-				fmt.Printf("Servis Durumu: Bilinmiyor / Kurulu degil (%v)\n", err)
+				fmt.Println(i18n.T("svc.st.unknown", err))
 				return nil
 			}
 			switch st {
 			case service.StatusRunning:
-				fmt.Println("Servis Durumu: Calisiyor (Running)")
+				fmt.Println(i18n.T("svc.st.running"))
 			case service.StatusStopped:
-				fmt.Println("Servis Durumu: Durduruldu (Stopped)")
+				fmt.Println(i18n.T("svc.st.stopped"))
 			default:
-				fmt.Printf("Servis Durumu: %d\n", st)
+				fmt.Println(i18n.T("svc.st.other", int(st)))
 			}
+			printLegacyHint()
 			return nil
 		},
 	}
@@ -250,16 +284,35 @@ func installService(o installOpts) error {
 	}
 	cfg, _ := config.Load()
 	if cfg.Token == "" {
-		return fmt.Errorf("istemci token'i bulunamadi. Lutfen --token bayragini verin veya once 'zorven authtoken <TOKEN>' calistirin")
+		return errors.New(i18n.T("svc.err.notoken"))
 	}
 	s, err := getService()
 	if err != nil {
 		return err
 	}
 	if err := s.Install(); err != nil {
-		return fmt.Errorf("servis kurulamadi (yonetici/root yetkisi gereklidir: sudo / Yonetici olarak calistir): %w", err)
+		return fmt.Errorf("%s: %w", i18n.T("svc.err.install"), err)
 	}
+	ensureWintunBestEffort(cfg)
 	return nil
+}
+
+// ensureWintunBestEffort, Windows'ta Mod B icin wintun.dll'i (imzali manifest
+// dogrulamasiyla) zorven.exe'nin yanina indirir. Basarisizlik kurulumu bozmaz
+// (Mod A etkilenmez); `zorven net up` sirasinda yeniden denenir.
+func ensureWintunBestEffort(cfg config.Config) {
+	if runtime.GOOS != "windows" {
+		return
+	}
+	srv := cfg.ServerAddr
+	if sc, err := config.LoadFile(config.SystemPath()); err == nil && sc.ServerAddr != "" {
+		srv = sc.ServerAddr
+	}
+	ag := &agent.Agent{ServerAddr: srv, Insecure: cfg.Insecure, CACertPath: cfg.CACertPath,
+		Log: slog.New(slog.NewTextHandler(os.Stderr, nil)), Version: version}
+	if err := ag.EnsureWintun(context.Background()); err != nil {
+		fmt.Print(i18n.T("svc.warn.wintun", err))
+	}
 }
 
 // saveServiceOpts, verilen kalici ayarlari sistem ayar dosyasina yazar.
@@ -279,7 +332,7 @@ func saveServiceOpts(o installOpts) error {
 			sysCfg.ServerAddr = strings.TrimSpace(o.server)
 		}
 		if err := config.SaveSystem(sysCfg); err != nil {
-			return fmt.Errorf("sistem ayarlari kaydedilemedi: %w", err)
+			return fmt.Errorf("%s: %w", i18n.T("svc.err.savecfg"), err)
 		}
 	}
 	return nil
@@ -324,7 +377,7 @@ func setAutostart(on bool) error {
 		}
 		return nil
 	}
-	return fmt.Errorf("bu isletim sisteminde acilista baslatma ayari desteklenmiyor: %s", runtime.GOOS)
+	return errors.New(i18n.T("svc.err.autostart.os", runtime.GOOS))
 }
 
 // newShortcutCmds, sik kullanilan servis islemleri icin kisa komutlar:
@@ -332,15 +385,21 @@ func setAutostart(on bool) error {
 func newShortcutCmds() []*cobra.Command {
 	var o installOpts
 	up := &cobra.Command{
-		Use:   "up",
-		Short: "Arka plan servisi olarak calistir: gerekirse kur, acilista baslat ve simdi baslat",
-		Args:  cobra.NoArgs,
+		Use:     "up",
+		PreRunE: requireAdmin,
+		Short:   i18n.T("svc.cmd.up"),
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			s, err := getService()
 			if err != nil {
 				return err
 			}
-			if serviceInstalled(s) {
+			if lu, ok := detectLegacyUnit(); ok && serviceInstalled(s) {
+				// Eski birim: yeni bicimle yeniden kur; baslatma asagidaki akista.
+				if err := migrateLegacyUnit(lu, o, false); err != nil {
+					return err
+				}
+			} else if serviceInstalled(s) {
 				// Kurulu serviste yalniz kalici ayarlari guncelle; yeniden baslatinca gecerli olur.
 				if err := saveServiceOpts(o); err != nil {
 					return err
@@ -349,33 +408,34 @@ func newShortcutCmds() []*cobra.Command {
 				return err
 			}
 			if err := setAutostart(true); err != nil {
-				fmt.Println("Uyari: acilista baslatma ayarlanamadi:", err)
+				fmt.Println(i18n.T("svc.warn.autostart"), err)
 			}
 			if st, _ := s.Status(); st == service.StatusRunning {
 				if err := s.Restart(); err != nil {
-					return fmt.Errorf("servis yeniden baslatilamadi: %w", err)
+					return fmt.Errorf("%s: %w", i18n.T("svc.err.restart"), err)
 				}
-				fmt.Println("Zorven servisi yeniden baslatildi; sistem acilisinda otomatik baslar.")
+				fmt.Println(i18n.T("svc.up.restarted"))
 				return nil
 			}
 			if err := s.Start(); err != nil {
-				return fmt.Errorf("servis baslatilamadi (yonetici/root yetkisi gerekebilir): %w", err)
+				return fmt.Errorf("%s: %w", i18n.T("svc.err.start.priv"), err)
 			}
-			fmt.Println("Zorven arka plan servisi calisiyor; sistem acilisinda otomatik baslar.")
-			fmt.Println("  Durum: zorven status   Durdur: zorven down")
+			fmt.Println(i18n.T("svc.up.running"))
+			fmt.Println(i18n.T("svc.up.hint"))
 			return nil
 		},
 	}
-	up.Flags().StringVarP(&o.token, "token", "t", "", "servise atanacak token (sistem ayarlarina yazilir)")
-	up.Flags().StringVarP(&o.server, "server", "s", "", "sunucu adresi (or. zorven.app:443)")
-	up.Flags().BoolVar(&o.terminal, "enable-terminal", false, "servis icin uzaktan terminali kalici olarak ac")
-	up.Flags().BoolVar(&o.screen, "enable-screen", false, "servis icin ekran paylasimini kalici olarak ac")
+	up.Flags().StringVarP(&o.token, "token", "t", "", i18n.T("svc.flag.token"))
+	up.Flags().StringVarP(&o.server, "server", "s", "", i18n.T("svc.flag.server443"))
+	up.Flags().BoolVar(&o.terminal, "enable-terminal", false, i18n.T("svc.flag.terminal"))
+	up.Flags().BoolVar(&o.screen, "enable-screen", false, i18n.T("svc.flag.screen"))
 
 	var remove bool
 	down := &cobra.Command{
-		Use:   "down",
-		Short: "Arka plan servisini durdur (--remove ile sistemden de kaldir)",
-		Args:  cobra.NoArgs,
+		Use:     "down",
+		PreRunE: requireAdmin,
+		Short:   i18n.T("svc.cmd.down"),
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			s, err := getService()
 			if err != nil {
@@ -384,20 +444,21 @@ func newShortcutCmds() []*cobra.Command {
 			_ = s.Stop()
 			if remove {
 				if err := s.Uninstall(); err != nil {
-					return fmt.Errorf("servis kaldirilamadi: %w", err)
+					return fmt.Errorf("%s: %w", i18n.T("svc.err.uninstall"), err)
 				}
-				fmt.Println("Zorven servisi durduruldu ve sistemden kaldirildi.")
+				fmt.Println(i18n.T("svc.down.removed"))
 				return nil
 			}
-			fmt.Println("Zorven servisi durduruldu. (Acilista yine baslar; kapatmak icin: zorven autostart off)")
+			fmt.Println(i18n.T("svc.down.stopped"))
 			return nil
 		},
 	}
-	down.Flags().BoolVar(&remove, "remove", false, "servisi sistemden tamamen kaldir")
+	down.Flags().BoolVar(&remove, "remove", false, i18n.T("svc.flag.remove"))
 
 	autostart := &cobra.Command{
 		Use:       "autostart on|off",
-		Short:     "Servisin sistem acilisinda otomatik baslamasini ac/kapat",
+		PreRunE:   requireAdmin,
+		Short:     i18n.T("svc.cmd.autostart"),
 		Args:      cobra.ExactValidArgs(1),
 		ValidArgs: []string{"on", "off"},
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -406,12 +467,96 @@ func newShortcutCmds() []*cobra.Command {
 				return err
 			}
 			if on {
-				fmt.Println("Acilista otomatik baslatma ACIK.")
+				fmt.Println(i18n.T("svc.autostart.on"))
 			} else {
-				fmt.Println("Acilista otomatik baslatma KAPALI. (Servis kurulu kalir; elle: zorven up)")
+				fmt.Println(i18n.T("svc.autostart.off"))
 			}
 			return nil
 		},
 	}
 	return []*cobra.Command{up, down, autostart}
+}
+
+// readTokenFile, --token-file ile verilen dosyadan token'i okur ve dosyayi
+// siler (tek kullanimlik). Token komut satirina hic yazilmaz: diger yerel
+// islemler komut satirlarini gorebilir.
+func readTokenFile(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", i18n.T("svc.err.tokenfile.read"), err)
+	}
+	_ = os.Remove(path)
+	t := strings.TrimSpace(string(b))
+	if t == "" || len(t) > 512 || strings.ContainsAny(t, " \t\r\n") {
+		return "", errors.New(i18n.T("svc.err.tokenfile.invalid"))
+	}
+	return t, nil
+}
+
+// openServiceLog, <sistem ayar dizini>/logs/agent.log dosyasini acar (5 MB'i
+// gecerse agent.log.1'e dondurur) ve Go cokme ciktisini oraya yonlendirir.
+// Acilamazsa stderr doner.
+func openServiceLog() io.Writer {
+	dir := localctl.LogDir()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return os.Stderr
+	}
+	p := filepath.Join(dir, "agent.log")
+	if fi, err := os.Stat(p); err == nil && fi.Size() > 5<<20 {
+		_ = os.Rename(p, p+".1")
+	}
+	f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return os.Stderr
+	}
+	_ = debug.SetCrashOutput(f, debug.CrashOptions{})
+	return io.MultiWriter(os.Stderr, f)
+}
+
+// printLegacyHint, eski bicimli systemd birimi varsa yenileme ipucunu yazar.
+func printLegacyHint() {
+	if _, ok := detectLegacyUnit(); ok {
+		fmt.Println(i18n.T("svc.legacy.hint"))
+	}
+}
+
+// migrateLegacyUnit, eski bicimli birimi (service run argumani yok) guncel
+// bicimle yeniden kurar: eski ExecStart'taki --enable-terminal/--enable-screen
+// niyeti kalici sistem ayarina tasinir, acilis durumu korunur. startAfter true
+// ise servis eskiden calisiyorsa yeniden baslatilir.
+func migrateLegacyUnit(lu legacyUnit, o installOpts, startAfter bool) error {
+	o.terminal = o.terminal || lu.terminal
+	o.screen = o.screen || lu.screen
+	if err := saveServiceOpts(o); err != nil {
+		return err
+	}
+	// Kaldirmadan once token'in bulundugundan emin ol: yoksa mevcut birime dokunma.
+	if cfg, _ := config.Load(); cfg.Token == "" {
+		return errors.New(i18n.T("svc.err.notoken"))
+	}
+	s, err := getService()
+	if err != nil {
+		return err
+	}
+	st, _ := s.Status()
+	wasRunning := st == service.StatusRunning
+	wasEnabled := autostartEnabled()
+	_ = s.Stop()
+	if err := s.Uninstall(); err != nil {
+		return fmt.Errorf("%s: %w", i18n.T("svc.err.uninstall"), err)
+	}
+	if err := s.Install(); err != nil {
+		return fmt.Errorf("%s: %w", i18n.T("svc.err.install"), err)
+	}
+	if err := setAutostart(wasEnabled); err != nil {
+		fmt.Println(i18n.T("svc.warn.autostart"), err)
+	}
+	fmt.Println(i18n.T("svc.legacy.upgraded"))
+	if startAfter && wasRunning {
+		if err := s.Start(); err != nil {
+			return fmt.Errorf("%s: %w", i18n.T("svc.err.start"), err)
+		}
+		fmt.Println(i18n.T("svc.started"))
+	}
+	return nil
 }

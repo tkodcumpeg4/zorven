@@ -55,6 +55,10 @@ services:
       - "${TCP_BIND_IP1:-0.0.0.0}:10000-10099:10000-10099/udp"
       - "${TCP_BIND_IP2:-127.0.0.1}:10000-10099:20000-20099"
       - "${TCP_BIND_IP2:-127.0.0.1}:10000-10099:20000-20099/udp"
+      # Zorven Net W2: STUN (istemciler arasi dogrudan P2P icin NAT adres
+      # yansimasi; ZORVEN_STUN_ADDR, vars. :3478). Kapali/erisilemezse esler
+      # relay (WSS) uzerinden calismaya devam eder. Firewall'da UDP 3478 acik olmali.
+      - "3478:3478/udp"
     environment:
       - ZORVEN_DB_DSN=postgres://${POSTGRES_USER:-rpshell}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD gerekli (deploy/.env)}@postgres:5432/${POSTGRES_DB:-rpshell}?sslmode=disable
       - ZORVEN_PLATFORM_DOMAIN=${PLATFORM_DOMAIN:-localhost}
@@ -78,6 +82,10 @@ services:
       # Secret Vault (FAZ 1 / F06) sifreleme anahtari (base64 32 bayt). Bos ise
       # secret olusturma 503 doner; policy motoru bundan bagimsiz calisir.
       - ZORVEN_SECRET_KEY=${ZORVEN_SECRET_KEY:-}
+      # Zorven CAPTCHA platform sitesi (kayit formu). Ikisi de bossa platform sitesi yok.
+      - ZORVEN_CAPTCHA_PLATFORM_SITEKEY=${ZORVEN_CAPTCHA_PLATFORM_SITEKEY:-}
+      - ZORVEN_CAPTCHA_PLATFORM_SECRET=${ZORVEN_CAPTCHA_PLATFORM_SECRET:-}
+      - ZORVEN_CAPTCHA_PLATFORM_DOMAINS=${ZORVEN_CAPTCHA_PLATFORM_DOMAINS:-}
       # Sosyal giris butonlarinin gorunurlugu icin (asil OAuth Better Auth/web'de).
       # Ziyaretci OAuth (tunel erisim denetimi) icin secret da gerekir; yoksa oauth modu fail-closed.
       - GITHUB_CLIENT_ID=${GITHUB_CLIENT_ID:-}
@@ -96,6 +104,10 @@ services:
       # dev sertifikası üretir, doğrulanmış custom domain'ler için ACME kullanır.
       - ./certs:/app/certs
       - client_bins:/app/server/bin
+      # Z3 Geo: ulke veritabani (MMDB, salt-okunur). Dosya: ${ZORVEN_DATA_DIR:-./data}/
+      # GeoLite2-Country.mmdb (veya ZORVEN_GEOIP_DB ile baska ad). Yoksa ulke
+      # "unknown" sayilir; dosya atomik degistirilmeli (gecici dosya + mv).
+      - ${ZORVEN_DATA_DIR:-./data}:/app/data:ro
     command: >
       serve
       --addr :443
@@ -139,6 +151,10 @@ services:
       - SMTP_PORT=587
       - SMTP_FROM=${SMTP_FROM:-Zorven <no-reply@${PLATFORM_DOMAIN:-localhost}>}
       - SMTP_ALLOW_SELF_SIGNED=true
+      # Kayit CAPTCHA (platform sitesi gizli anahtari bos ise kapali).
+      - ZORVEN_CAPTCHA_PLATFORM_SECRET=${ZORVEN_CAPTCHA_PLATFORM_SECRET:-}
+      # Go API tabani (siteverify). Bos = https://PLATFORM_DOMAIN.
+      - ZORVEN_API_INTERNAL_URL=${ZORVEN_API_INTERNAL_URL:-}
     expose:
       - "3000"
 

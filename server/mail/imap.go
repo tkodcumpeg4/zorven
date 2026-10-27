@@ -219,6 +219,9 @@ type imapSession struct {
 	ip   string
 	acct *Account
 	sel  *selectedBox
+	// selMu, sel'i IDLE goroutine'i (Idle/sync) ile baglanti goroutine'i
+	// (Close/Select/Unselect) arasinda korur; Close IDLE suruyorken calisabilir.
+	selMu sync.Mutex
 
 	cache      map[string][]byte
 	cacheOrder []string
@@ -244,12 +247,20 @@ func (s *imapSession) Close() error {
 }
 
 func (s *imapSession) closeSelected() {
-	if s.sel != nil {
-		if s.sel.cancel != nil {
-			s.sel.cancel()
-		}
-		s.sel = nil
+	s.selMu.Lock()
+	sel := s.sel
+	s.sel = nil
+	s.selMu.Unlock()
+	if sel != nil && sel.cancel != nil {
+		sel.cancel()
 	}
+}
+
+// selected, secili kutuyu kilit altinda okur (IDLE goroutine'i icin).
+func (s *imapSession) selected() *selectedBox {
+	s.selMu.Lock()
+	defer s.selMu.Unlock()
+	return s.sel
 }
 
 func (s *imapSession) Login(username, password string) error {
@@ -397,8 +408,10 @@ func (s *imapSession) Select(name string, options *imap.SelectOptions) (*imap.Se
 		unsub()
 		return nil, imapNo("", "Internal error")
 	}
+	s.selMu.Lock()
 	s.sel = &selectedBox{f: f, readOnly: options != nil && options.ReadOnly, msgs: msgs,
 		loaded: time.Now(), notify: notify, cancel: unsub}
+	s.selMu.Unlock()
 
 	var first uint32
 	for i, m := range msgs {
@@ -692,7 +705,9 @@ func (s *imapSession) Poll(w *imapserver.UpdateWriter, allowExpunge bool) error 
 }
 
 func (s *imapSession) Idle(w *imapserver.UpdateWriter, stop <-chan struct{}) error {
-	if s.sel == nil {
+	// Secili kutu BIR KEZ alinir: Close (baska goroutine) s.sel'i sifirlayabilir.
+	sel := s.selected()
+	if sel == nil {
 		<-stop
 		return nil
 	}
@@ -702,7 +717,7 @@ func (s *imapSession) Idle(w *imapserver.UpdateWriter, stop <-chan struct{}) err
 		select {
 		case <-stop:
 			return nil
-		case <-s.sel.notify:
+		case <-sel.notify:
 			// Hub bildirimi: hemen yeniden yukle.
 			if err := s.syncReload(w, true); err != nil {
 				return err
@@ -720,7 +735,7 @@ func (s *imapSession) syncReload(w *imapserver.UpdateWriter, allowExpunge bool) 
 }
 
 func (s *imapSession) sync(w *imapserver.UpdateWriter, allowExpunge, force bool) error {
-	sel := s.sel
+	sel := s.selected()
 	if sel == nil {
 		return nil
 	}

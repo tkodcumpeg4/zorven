@@ -2,8 +2,8 @@ package api
 
 import (
 	"errors"
-	"regexp"
 	"net/http"
+	"regexp"
 	"strings"
 
 	"github.com/tkodcumpeg4/zorven/server/entitlements"

@@ -124,6 +124,12 @@ func macDisplayIDs() []uint32 {
 	return append([]uint32(nil), ids[:n]...)
 }
 
+// platMethod, yakalama yontemi adi (canli olcum panelinde gosterilir).
+func platMethod() string { return "darwin" }
+
+// newPlatCapturer, oturum icin yakalayici olusturur.
+func newPlatCapturer() Capturer { return goCapturer{} }
+
 func platNumDisplays() int {
 	// CGDisplayCreateImage yoksa 0 bildir: ust katman acik "desteklenmiyor" hatasi verir.
 	if macLoadCapture() != nil {

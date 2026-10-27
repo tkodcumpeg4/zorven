@@ -11,6 +11,9 @@ interface Grant {
   scopes: string[]
   created_at: string
   last_used_at?: string
+  // Tam erisim (full) grant'i ve onayin dayandigi taze giris zamani.
+  full?: boolean
+  step_up_at?: string
 }
 
 const { t } = useI18n()
@@ -115,6 +118,12 @@ onMounted(load)
               <span class="rounded-full border border-line px-2 py-0.5 text-[10px] text-fg-muted">
                 {{ g.own ? t('oauth.apps.you') : t('oauth.apps.member') }}
               </span>
+              <span
+                v-if="g.full"
+                class="inline-flex items-center gap-1 rounded-full border border-danger/40 bg-danger/10 px-2 py-0.5 text-[10px] font-medium text-danger"
+              >
+                <Icon name="lucide:shield-alert" class="size-3" />{{ t('oauth.apps.fullBadge') }}
+              </span>
             </div>
             <div class="text-xs text-fg-muted">
               {{ t('oauth.apps.organization') }}: <span class="text-fg">{{ g.tenant_name || g.tenant_id }}</span>
@@ -124,6 +133,9 @@ onMounted(load)
                 <Icon name="lucide:check" class="size-3 text-accent" />{{ scopeLabel(s) }}
               </li>
             </ul>
+            <div v-if="g.full && g.step_up_at" class="text-[11px] text-fg-subtle">
+              {{ t('oauth.apps.fullSince', { when: relativeTime(g.step_up_at) }) }}
+            </div>
             <div class="text-[11px] text-fg-subtle">
               {{ t('oauth.apps.connected') }}: {{ relativeTime(g.created_at) }}
               <span class="mx-1">·</span>

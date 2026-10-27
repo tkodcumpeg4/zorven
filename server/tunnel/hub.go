@@ -60,14 +60,14 @@ func (h *Hub) Get(clientID string) (*Session, bool) {
 // Status, istemcinin canli durumunu ozetler. API katmani DB kaydini
 // bu bilgiyle zenginlestirir (status/version/last_seen DB'de tutulmaz).
 type Status struct {
-	Online     bool
-	Version    string
-	AppKind    string
-	Shells     []protocol.ShellInfo
+	Online       bool
+	Version      string
+	AppKind      string
+	Shells       []protocol.ShellInfo
 	DefaultShell string
-	Platform   string
-	RemoteAddr string
-	LastSeen   time.Time
+	Platform     string
+	RemoteAddr   string
+	LastSeen     time.Time
 }
 
 // Statuses, tum bagli istemcilerin durumunu doner.
@@ -78,14 +78,14 @@ func (h *Hub) Statuses() map[string]Status {
 	out := make(map[string]Status, len(h.sessions))
 	for id, s := range h.sessions {
 		out[id] = Status{
-			Online:     true,
-			Version:    s.Version,
-			AppKind:    s.AppKind,
-			Shells:     s.Shells,
+			Online:       true,
+			Version:      s.Version,
+			AppKind:      s.AppKind,
+			Shells:       s.Shells,
 			DefaultShell: s.DefaultShell,
-			Platform:   s.Platform,
-			RemoteAddr: s.RemoteAddr,
-			LastSeen:   s.LastSeen(),
+			Platform:     s.Platform,
+			RemoteAddr:   s.RemoteAddr,
+			LastSeen:     s.LastSeen(),
 		}
 	}
 	return out

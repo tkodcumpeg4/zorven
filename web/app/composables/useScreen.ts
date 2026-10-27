@@ -9,6 +9,11 @@
  * Girdi: fare/klavye olaylari 0..1 normalize koordinatla sunucuya, oradan
  * istemciye gider (istemci gercek ekranina olcekler).
  */
+import type { AgentStats, BrowserPerf } from '~/lib/screenPerf'
+import { parseAgentStats } from '~/lib/screenPerf'
+import type { VideoInfo, VideoPref } from '~/lib/screenVideo'
+import { ScreenVideoDecoder, detectVideoSupport, emptyVideoInfo, isVideoFrame } from '~/lib/screenVideo'
+
 export interface ScreenHandle {
   ws: WebSocket
   close: () => void
@@ -22,6 +27,8 @@ export interface ScreenHandle {
   sendViewOnly: (value: boolean) => void
   /** screen2: metni uzak makinenin panosuna gonder (yalniz kontrolcu; sunucu zorlar). */
   sendClipboard: (text: string) => void
+  /** screen2_video: karo/video tercihini (auto|tiles|video) sunucuya bildir. */
+  sendVideoMode: (mode: VideoPref) => void
 }
 
 /** Uzak imlec konumu: x/y tuval (olceklenmis kare) pikselinde, w/h o andaki tuval boyutu. */
@@ -91,6 +98,10 @@ type FrameMsg = {
   text?: string
   ok?: boolean
   reason?: string
+  /** caps mesaji: ajan H.264 video modunu pazarladi mi. video_policy: etkin mod / desteksiz izleyici sayisi. */
+  video?: boolean
+  effective?: string
+  unsupported?: number
 }
 
 /** Paylasimli yayinin izleyici sayilari. */
@@ -136,7 +147,13 @@ export interface ScreenStats {
   maxIntervalMs: number
   /** Son tamamlanan karenin toplam bayti (screen2: tum dikdortgenler). */
   lastFrameBytes: number
+  /** screen2 tarayici tarafi: son penceredeki CIZILEN kare sayisi, ortalama cozme suresi (ms), en derin kuyruk. */
+  drawFps: number
+  decodeMs: number
+  queueDepth: number
 }
+
+export type { AgentStats, BrowserPerf }
 
 export function useScreen() {
   const { key } = useAdminKey()
@@ -169,6 +186,8 @@ export function useScreen() {
        * varsayilan bir sinir uygular (4K ekran 1600x900 gorunurdu).
        */
       onScreenSize?: (w: number, h: number) => void
+      /** Ajanin saniyelik olcum ozeti (screen2_stats; eski ajan/sunucuda hic gelmez). */
+      onAgentStats?: (a: AgentStats) => void
       /** Akis metrikleri; saniyede bir cagrilir. */
       onStats?: (s: ScreenStats) => void
       /** Girdi durumu (ilk girdide ve degisince gelir; eski istemcide "unknown"). */
@@ -197,6 +216,10 @@ export function useScreen() {
       onClipboard?: (text: string) => void
       /** Pano gonderiminin sonucu: ok=false iken reason: view_only|unsupported|too_large|invalid. */
       onClipboardStatus?: (ok: boolean, reason: string) => void
+      /** screen2_video: karo/video tercihi (baglantida okunur; sonradan sendVideoMode ile degisir). */
+      videoMode?: () => VideoPref
+      /** screen2_video: video durumu ozeti (durum degisince ve saniyede bir). */
+      onVideoInfo?: (i: VideoInfo) => void
     },
   ): Promise<ScreenHandle> {
     const headers: Record<string, string> = {}
@@ -243,6 +266,12 @@ export function useScreen() {
     let lastCaptureMs = 0
     let lastEncodeMs = 0
     let lastFrameBytes = 0
+    // screen2 tarayici tarafi: cizilen kare, cozme suresi, kuyruk derinligi (pencere).
+    let winDrawn = 0
+    let winDecodeSum = 0
+    let winDecodeN = 0
+    let inflight = 0
+    let winQueueMax = 0
 
     const statsTimer = opts.onStats
       ? setInterval(() => {
@@ -256,7 +285,14 @@ export function useScreen() {
             intervalMs: winFrames > 1 ? Math.round(winIntervalSum / (winFrames - 1)) : 0,
             maxIntervalMs: Math.round(winIntervalMax),
             lastFrameBytes,
+            drawFps: winDrawn,
+            decodeMs: winDecodeN ? Math.round((winDecodeSum / winDecodeN) * 10) / 10 : 0,
+            queueDepth: Math.max(winQueueMax, inflight),
           })
+          winDrawn = 0
+          winDecodeSum = 0
+          winDecodeN = 0
+          winQueueMax = inflight
           winFrames = 0
           winBytes = 0
           winIntervalSum = 0
@@ -310,6 +346,36 @@ export function useScreen() {
       opts.video.hidden = true
     }
 
+    // --- screen2_video (H.264, WebCodecs): bkz. lib/screenVideo.ts ---
+    const vinfo = emptyVideoInfo()
+    let vdec: ScreenVideoDecoder | null = null
+    const emitVideo = () => {
+      vinfo.active = !!vdec?.live
+      if (vdec) { vinfo.codec = vdec.codec; vinfo.w = vdec.w; vinfo.h = vdec.h }
+      opts.onVideoInfo?.({ ...vinfo })
+    }
+    const sendVideoMode = (mode: VideoPref) => {
+      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'video', supported: vinfo.supported, mode }))
+    }
+    const sendVideoPrefs = () => sendVideoMode(opts.videoMode?.() ?? 'auto')
+    void detectVideoSupport().then((ok) => {
+      vinfo.supported = ok
+      if (ws.readyState === WebSocket.OPEN) sendVideoPrefs()
+      else ws.addEventListener('open', sendVideoPrefs, { once: true })
+      emitVideo()
+    })
+    const videoTimer = opts.onVideoInfo
+      ? setInterval(() => {
+          if (vdec) {
+            const w = vdec.drainWindow()
+            vinfo.fps = w.fps
+            vinfo.kbps = w.kbps
+            vinfo.decodeMs = w.decodeMs
+          }
+          emitVideo()
+        }, 1000)
+      : null
+
     ws.addEventListener('open', () => opts.onOpen())
     ws.addEventListener('close', (ev) => {
       const cev = ev as CloseEvent
@@ -353,6 +419,17 @@ export function useScreen() {
     }
 
     function startScreen2() {
+      vdec ??= new ScreenVideoDecoder({
+        canvas: () => opts.canvas,
+        enqueue: (task) => { chain = chain.then(task) },
+        requestKey: requestKeyframe,
+        canvasReady: () => haveKey,
+        onSize: (w, h) => { opts.onFrameSize?.(w, h); if (curLayer === 'high') opts.onScreenSize?.(w, h) },
+        onRecv: (bytes, isChunk) => { winBytes += bytes; if (isChunk) { frames++; winFrames++ } },
+        onDecoded: (ms) => { winDecodeSum += ms; winDecodeN++ },
+        onDrawn: () => { winDrawn++ },
+        onState: emitVideo,
+      })
       opts.img.hidden = true
       opts.video.hidden = true
       if (opts.canvas) opts.canvas.hidden = false
@@ -360,8 +437,15 @@ export function useScreen() {
 
     function onBinary(buf: ArrayBuffer) {
       if (activeMode !== 'screen2' || !opts.canvas) return
+      if (isVideoFrame(buf)) { vdec?.handle(buf); return }
       const m = parseScreen2(buf)
       if (!m) { requestKeyframe(); return }
+      // Video akarken eski/gecikmis karo mesaji videonun ustune cizilmez; karo
+      // anahtar karesi gelmesi videonun bittigini gosterir.
+      if (vdec?.live) {
+        if (m.keyframe && m.first) vdec.stop()
+        else return
+      }
 
       // Boyut degisimi her zaman anahtar karedir.
       const sizeChanged = m.screenW !== cw || m.screenH !== ch
@@ -400,13 +484,28 @@ export function useScreen() {
 
       const canvas = opts.canvas
       // Kod cozmeyi hemen baslat (paralel), cizimi zincire sirala.
+      const t0 = performance.now()
+      inflight++
+      if (inflight > winQueueMax) winQueueMax = inflight
       const decoded = m.rects.map((r) => {
         if (r.enc === ENC_SOLID) return Promise.resolve(null)
         const type = r.enc === ENC_PNG ? 'image/png' : 'image/jpeg'
         return createImageBitmap(new Blob([r.payload as unknown as BlobPart], { type })).catch(() => undefined)
       })
+      const decodeDone = Promise.all(decoded).then((r) => {
+        winDecodeSum += performance.now() - t0
+        winDecodeN++
+        return r
+      })
       chain = chain.then(async () => {
-        const bitmaps = await Promise.all(decoded)
+        try {
+          await drawMsg(m)
+        } finally {
+          inflight--
+        }
+      })
+      async function drawMsg(m: NonNullable<ReturnType<typeof parseScreen2>>) {
+        const bitmaps = await decodeDone
         if (closed) { for (const b of bitmaps) if (b) b.close(); return }
         if (isKeyStart) {
           if (canvas.width !== m.screenW || canvas.height !== m.screenH) {
@@ -434,7 +533,8 @@ export function useScreen() {
           bmp.close()
         })
         if (failed) requestKeyframe()
-      })
+        if (m.eof) winDrawn++
+      }
     }
 
     ws.onmessage = (ev) => {
@@ -444,6 +544,12 @@ export function useScreen() {
       }
       let msg: FrameMsg
       try { msg = JSON.parse(ev.data) } catch { return }
+
+      if (msg.type === 'stats') {
+        const a = parseAgentStats(msg)
+        if (a) opts.onAgentStats?.(a)
+        return
+      }
 
       if (msg.type === 'mode') {
         activeMode = msg.mode || ''
@@ -478,7 +584,15 @@ export function useScreen() {
         })
         return
       }
+      if (msg.type === 'video_policy') {
+        vinfo.effective = msg.effective || 'tiles'
+        vinfo.unsupported = msg.unsupported || 0
+        emitVideo()
+        return
+      }
       if (msg.type === 'caps') {
+        vinfo.available = !!msg.video
+        emitVideo()
         opts.onCaps?.({ cursor: !!msg.cursor, clipboard: !!msg.clipboard, files: !!msg.files })
         return
       }
@@ -570,6 +684,8 @@ export function useScreen() {
     function close() {
       closed = true
       if (statsTimer) clearInterval(statsTimer)
+      if (videoTimer) clearInterval(videoTimer)
+      vdec?.close()
       try { ws.close() } catch { /* yok say */ }
       if (mediaSource && mediaSource.readyState === 'open') {
         try { mediaSource.endOfStream() } catch { /* yok say */ }
@@ -578,7 +694,7 @@ export function useScreen() {
       if (prev) URL.revokeObjectURL(prev)
     }
 
-    return { ws, close, mode: () => activeMode, requestKeyframe, sendSettings, sendViewOnly, sendClipboard }
+    return { ws, close, mode: () => activeMode, requestKeyframe, sendSettings, sendViewOnly, sendClipboard, sendVideoMode }
   }
 
   /** sendInput, normalize (0..1) koordinatli fare/klavye olayini gonderir. */

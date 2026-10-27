@@ -60,12 +60,12 @@ func (s *Server) consentInfo(w http.ResponseWriter, r *http.Request) {
 		oauthErr(w, http.StatusBadRequest, aerr.code, aerr.desc)
 		return
 	}
-	orgs, ok := s.orgs(w, r, sess.UserID)
-	if !ok {
-		return
-	}
+	// "full" ayri bir bolumde sunulur (varsayilan KAPALI); normal kapsam listesinde yer almaz.
 	scopes := make([]ScopeInfo, 0, len(req.Scopes))
 	for _, id := range req.Scopes {
+		if id == ScopeFull {
+			continue
+		}
 		si, _ := scopeInfo(id)
 		scopes = append(scopes, si)
 	}
@@ -73,16 +73,38 @@ func (s *Server) consentInfo(w http.ResponseWriter, r *http.Request) {
 	if u, err := url.Parse(req.RedirectURI); err == nil {
 		host = u.Host
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	out := map[string]any{
 		"client_id":     req.Client.ID,
 		"client_name":   req.Client.Name,
 		"redirect_host": host,
 		"verified":      false, // DCR ile kayitli istemciler dogrulanmis sayilmaz
 		"scopes":        scopes,
 		"resource":      req.Resource,
-		"orgs":          orgs,
 		"user_email":    sess.Email,
-	})
+	}
+	if req.Tunnel != nil {
+		// MCP tunel kaynagi: kiraci sabit (tunel sahibi); kullanici secim yapmaz.
+		allowed, _, err := s.userAllowed(r.Context(), *req.Tunnel, sess.UserID)
+		out["resource_kind"] = "tunnel"
+		out["resource_host"] = req.Tunnel.Host
+		out["allowed"] = allowed && err == nil
+		out["orgs"] = []Org{}
+		writeJSON(w, http.StatusOK, out)
+		return
+	}
+	orgs, ok := s.orgs(w, r, sess.UserID)
+	if !ok {
+		return
+	}
+	out["resource_kind"] = "management"
+	out["orgs"] = orgs
+	// Tam erisim: istemci istemese de kullanici onay ekraninda acikca isaretleyerek
+	// verebilir; istediyse yalnizca "onerilir". Taze giris durumu sunucuca bildirilir.
+	out["full_available"] = true
+	out["full_requested"] = HasFull(req.Scopes)
+	out["fresh_auth"] = sess.fresh(s.cfg.Now())
+	out["step_up_seconds"] = int(StepUpMaxAge.Seconds())
+	writeJSON(w, http.StatusOK, out)
 }
 
 // POST /oauth/consent/decision
@@ -146,22 +168,42 @@ func (s *Server) consentDecision(w http.ResponseWriter, r *http.Request) {
 		redirect(map[string]string{"error": "access_denied", "error_description": "kullanici reddetti"})
 		return
 	}
-	orgs, ok := s.orgs(w, r, sess.UserID)
-	if !ok {
-		return
-	}
-	member := false
-	for _, o := range orgs {
-		if o.ID == body.TenantID {
-			member = true
-			break
+	tenantID := body.TenantID
+	if req.Tunnel != nil {
+		// MCP tunel kaynagi: kiraci tunel sahibidir; erisim e-posta/uyelik politikasina baglidir.
+		allowed, _, err := s.userAllowed(r.Context(), *req.Tunnel, sess.UserID)
+		if err != nil || !allowed {
+			oauthErr(w, http.StatusForbidden, "access_denied", "bu MCP kaynagina erisim izniniz yok")
+			return
+		}
+		tenantID = req.Tunnel.TenantID
+	} else {
+		orgs, ok := s.orgs(w, r, sess.UserID)
+		if !ok {
+			return
+		}
+		member := false
+		for _, o := range orgs {
+			if o.ID == body.TenantID {
+				member = true
+				break
+			}
+		}
+		if !member {
+			oauthErr(w, http.StatusForbidden, "access_denied", "bu organizasyonun uyesi degilsiniz")
+			return
 		}
 	}
-	if !member {
-		oauthErr(w, http.StatusForbidden, "access_denied", "bu organizasyonun uyesi degilsiniz")
-		return
+	// Yikici kapsamlar (silme) acikca secilmedikce VERILMEZ: istemci `scopes` listesi
+	// gondermediyse yalnizca yikici olmayanlar onaylanir.
+	granted := make([]string, 0, len(req.Scopes))
+	for _, sc := range req.Scopes {
+		if si, _ := scopeInfo(sc); !si.Destructive {
+			granted = append(granted, sc)
+		}
 	}
-	granted := req.Scopes
+	// Istemci "full" istediyse varsayilan olarak YINE verilmez: kullanici acikca isaretlemeli.
+	granted = withoutScope(granted, ScopeFull)
 	if body.Scopes != nil {
 		for _, sc := range body.Scopes {
 			if _, ok := scopeInfo(sc); !ok {
@@ -169,11 +211,30 @@ func (s *Server) consentDecision(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		if !subsetOf(body.Scopes, req.Scopes) {
+		// "full" istemci istemese de kullanici onay ekraninda isaretleyerek verebilir
+		// (yalniz yonetim kaynaginda); digerleri istenenin alt kumesi olmali.
+		if !subsetOf(withoutScope(body.Scopes, ScopeFull), withoutScope(req.Scopes, ScopeFull)) && !HasFull(req.Scopes) {
 			oauthErr(w, http.StatusBadRequest, "invalid_scope", "istenenden fazla kapsam verilemez")
 			return
 		}
 		granted = body.Scopes
+	}
+	var stepUp *time.Time
+	if HasFull(granted) {
+		if req.Tunnel != nil {
+			oauthErr(w, http.StatusBadRequest, "invalid_scope", "'full' kapsami MCP tunel kaynaklarinda verilemez")
+			return
+		}
+		// Step-up: panel oturumu son StepUpMaxAge icinde (parola/2FA ile) acilmis olmali.
+		now := s.cfg.Now()
+		if !sess.fresh(now) {
+			s.audit(tenantID, "user:"+sess.UserID, s.ip(r), "oauth.full_denied", req.Client.ID, "reason=stale_login")
+			oauthErr(w, http.StatusForbidden, "reauth_required", "tam erisim icin son 5 dakika icinde yeniden giris yapmalisiniz")
+			return
+		}
+		at := sess.AuthTime.UTC()
+		stepUp = &at
+		granted = uniqueScopes(granted)
 	}
 	if len(granted) == 0 {
 		oauthErr(w, http.StatusBadRequest, "invalid_scope", "en az bir kapsam secilmeli")
@@ -181,9 +242,9 @@ func (s *Server) consentDecision(w http.ResponseWriter, r *http.Request) {
 	}
 	code := randToken(32)
 	err := s.cfg.Store.CreateCode(r.Context(), hashToken(code), Code{
-		ClientID: req.Client.ID, UserID: sess.UserID, TenantID: body.TenantID, RedirectURI: req.RedirectURI,
+		ClientID: req.Client.ID, UserID: sess.UserID, TenantID: tenantID, RedirectURI: req.RedirectURI,
 		Scope: strings.Join(granted, " "), Resource: req.Resource, CodeChallenge: req.Challenge,
-		ExpiresAt: s.cfg.Now().Add(codeTTL),
+		ExpiresAt: s.cfg.Now().Add(codeTTL), StepUpAt: stepUp,
 	})
 	if err != nil {
 		oauthErr(w, http.StatusInternalServerError, "server_error", "kod uretilemedi")
@@ -205,6 +266,9 @@ type grantView struct {
 	Resource   string     `json:"resource"`
 	CreatedAt  time.Time  `json:"created_at"`
 	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
+	// Full, grant tam erisim (full) kapsamini tasiyor; StepUpAt onayin dayandigi taze giris.
+	Full     bool       `json:"full"`
+	StepUpAt *time.Time `json:"step_up_at,omitempty"`
 }
 
 // GET /oauth/grants[?tenant=<id>]  ve  DELETE /oauth/grants/{id}
@@ -249,7 +313,8 @@ func (s *Server) grants(w http.ResponseWriter, r *http.Request) {
 			sc, _ := ParseScopes(g.Scope)
 			out = append(out, grantView{ID: g.ID, ClientID: g.ClientID, ClientName: g.ClientName, TenantID: g.TenantID,
 				TenantName: name[g.TenantID], UserID: g.UserID, Own: g.UserID == sess.UserID, Scopes: sc,
-				Resource: g.Resource, CreatedAt: g.CreatedAt, LastUsedAt: g.LastUsedAt})
+				Resource: g.Resource, CreatedAt: g.CreatedAt, LastUsedAt: g.LastUsedAt,
+				Full: HasFull(sc), StepUpAt: g.StepUpAt})
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"grants": out})
 		return
@@ -277,4 +342,28 @@ func (s *Server) grants(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	oauthErr(w, http.StatusMethodNotAllowed, "invalid_request", "desteklenmeyen istek")
+}
+
+// withoutScope, listeden bir kapsami cikarir (yeni dilim doner).
+func withoutScope(list []string, drop string) []string {
+	out := make([]string, 0, len(list))
+	for _, s := range list {
+		if s != drop {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// uniqueScopes tekrarlari atar (sirayi korur).
+func uniqueScopes(list []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(list))
+	for _, s := range list {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
 }

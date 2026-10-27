@@ -66,6 +66,11 @@ func (a *Agent) startNet(ctx context.Context, cs *clientSession) *wgnet.Node {
 		return nil
 	}
 	n := wgnet.NewNode(a.Log, csTransport{cs}, key, deviceHostname())
+	if h, _, err := net.SplitHostPort(a.ServerAddr); err == nil {
+		n.ServerHost = h
+	}
+	n.DisableDirect = n.DisableDirect || a.NoP2P
+	n.ALogInterval = a.NetALogInterval
 	if err := n.Register(ctx); err != nil {
 		a.Log.Warn("net_register gonderilemedi", "hata", err)
 		n.Close()
@@ -90,6 +95,7 @@ func (a *Agent) netBootstrap(ctx context.Context, n *wgnet.Node) {
 	}
 	st := n.State()
 	a.netEvent("zorven net hazir: " + st.Self.Name + " (" + st.Self.IP + ")")
+	a.resumeTun(n)
 	for _, sp := range a.NetShares {
 		proto := sp.Proto
 		if proto == "" {

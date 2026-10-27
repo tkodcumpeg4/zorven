@@ -24,6 +24,12 @@ const localTimeout = 25 * time.Second
 
 // clientSession, tek bir WSS baglantisinin durumunu tutar.
 type clientSession struct {
+	// Z4: cihaz sertifikasi (bkz. devicecert.go).
+	devCert         *deviceCertManager
+	deviceChallenge string
+	certReply       chan protocol.DeviceCert
+	postureKick     chan struct{}
+
 	conn     *websocket.Conn
 	log      *slog.Logger
 	localURL string
@@ -55,6 +61,12 @@ type clientSession struct {
 	screen2 bool
 	// screen2Layers, katmanli screen2 pazarlandiysa true (conn.go).
 	screen2Layers bool
+	// screen2Stats, saniyelik canli olcum ozeti pazarlandiysa true (conn.go).
+	screen2Stats bool
+	// screen2Video, H.264 video modu pazarlandiysa true (conn.go).
+	screen2Video bool
+	// screen2Feedback, sunucu izleyici geri bildirimi pazarlandiysa true (conn.go).
+	screen2Feedback bool
 	// screenCursor / screenClipboard, imlec katmani / pano pazarlandiysa true (conn.go).
 	screenCursor    bool
 	screenClipboard bool
@@ -123,6 +135,8 @@ func (i *inflight) closeBody(err error) {
 
 func newClientSession(conn *websocket.Conn, localURL string, log *slog.Logger) *clientSession {
 	return &clientSession{
+		certReply:     make(chan protocol.DeviceCert, 1),
+		postureKick:   make(chan struct{}, 1),
 		conn:          conn,
 		log:           log,
 		localURL:      strings.TrimSuffix(localURL, "/"),

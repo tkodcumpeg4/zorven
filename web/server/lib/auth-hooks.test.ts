@@ -6,7 +6,7 @@ import { betterAuth } from "better-auth"
 import { memoryAdapter } from "better-auth/adapters/memory"
 import { twoFactor } from "better-auth/plugins"
 import { createOTP } from "@better-auth/utils/otp"
-import { authHooks, _resetTotpReplayStore } from "./auth-hooks.ts"
+import { authHooks, createAuthHooks, _resetTotpReplayStore } from "./auth-hooks.ts"
 
 const ORIGIN = "http://localhost:3000"
 
@@ -20,14 +20,14 @@ function base32ToText(b32: string): string {
   return Buffer.from(bytes).toString("utf8")
 }
 
-function makeAuth() {
+function makeAuth(hooks: any = authHooks) {
   return betterAuth({
     database: memoryAdapter({ user: [], session: [], account: [], verification: [], twoFactor: [] }),
     secret: "test-secret-test-secret-test-secret-1234",
     baseURL: ORIGIN,
     trustedOrigins: [ORIGIN],
     emailAndPassword: { enabled: true, requireEmailVerification: false },
-    hooks: authHooks,
+    hooks,
     plugins: [twoFactor({ issuer: "t" })],
   })
 }
@@ -49,11 +49,18 @@ class Jar {
   }
 }
 
-async function call(auth: any, jar: Jar, method: string, path: string, body?: unknown) {
+async function call(
+  auth: any,
+  jar: Jar,
+  method: string,
+  path: string,
+  body?: unknown,
+  extraHeaders: Record<string, string> = {},
+) {
   const res: Response = await auth.handler(
     new Request(ORIGIN + "/api/auth" + path, {
       method,
-      headers: { "content-type": "application/json", origin: ORIGIN, cookie: jar.header() },
+      headers: { "content-type": "application/json", origin: ORIGIN, cookie: jar.header(), ...extraHeaders },
       body: body === undefined ? undefined : JSON.stringify(body),
     }),
   )

@@ -52,6 +52,7 @@ const nav = computed(() => {
     { to: '/network',  label: t('nav.network'),  icon: 'lucide:network' },
     { to: '/shares',   label: t('nav.shares'),   icon: 'lucide:share-2' },
     { to: '/secrets',  label: t('nav.secrets'),  icon: 'lucide:key-round' },
+    { to: '/captcha',  label: t('captcha.nav'),  icon: 'lucide:bot' },
     { to: '/organization', label: t('nav.organization'), icon: 'lucide:building-2' },
     { to: '/team',     label: t('nav.team'),     icon: 'lucide:users' },
     { to: '/requests', label: t('nav.logs'),     icon: 'lucide:list' },

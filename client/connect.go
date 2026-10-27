@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/tkodcumpeg4/zorven/client/config"
+	"github.com/tkodcumpeg4/zorven/client/i18n"
 	"github.com/tkodcumpeg4/zorven/client/netconnect"
 )
 
@@ -31,25 +33,21 @@ func newConnectCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "connect",
-		Short: "Ozel aga baglanir: yerel SOCKS5 proxy acar (Zorven Network)",
-		Long: "Kurumun ozel kaynaklarina (or. db.internal:5432) yerel bir SOCKS5 proxy\n" +
-			"uzerinden erisim saglar. Kaynaklar internete acik degildir.\n\n" +
-			"API token gerekir (panel > API & Guvenlik, en az tunnels:read kapsami):\n" +
-			"  ZORVEN_API_TOKEN=... zorven connect\n\n" +
-			"Ardindan uygulamanizda SOCKS5 proxy olarak 127.0.0.1:1080 kullanin.",
-		Args: cobra.NoArgs,
+		Short: i18n.T("conn2.short"),
+		Long:  i18n.T("conn2.long"),
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			token := strings.TrimSpace(apiToken)
 			if token == "" {
 				token = strings.TrimSpace(os.Getenv("ZORVEN_API_TOKEN"))
 			}
 			if token == "" {
-				return fmt.Errorf("API token gerekli: --api-token veya ZORVEN_API_TOKEN")
+				return errors.New(i18n.T("conn2.err.token"))
 			}
 			// Istemci (ajan) token'i burada ise yaramaz: o bir cihazin kimligidir,
 			// kullanicinin degil. Erken ve acik hata, sunucudan 401 almaktan iyi.
 			if strings.HasPrefix(token, "zrv_live_") || strings.HasPrefix(token, "rpsh_live_") {
-				return fmt.Errorf("bu bir istemci (ajan) token'i; zorven connect bir API token ister")
+				return errors.New(i18n.T("conn2.err.agenttoken"))
 			}
 
 			cfg, _ := config.Load()
@@ -72,10 +70,10 @@ func newConnectCmd() *cobra.Command {
 				return err
 			}
 			if !isLoopbackListen(listen) && !gateway {
-				return fmt.Errorf("%s loopback degil: LAN'a acmak icin --gateway ve --allow-from kullanin", listen)
+				return errors.New(i18n.T("conn2.err.loopback", listen))
 			}
 			if gateway && len(prefixes) == 0 {
-				return fmt.Errorf("--gateway icin --allow-from zorunlu (or. --allow-from 192.168.2.0/24)")
+				return errors.New(i18n.T("conn2.err.gateway"))
 			}
 
 			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -96,17 +94,17 @@ func newConnectCmd() *cobra.Command {
 					fmt.Printf("  > %s\n", target)
 				},
 			}
-			fmt.Printf("Zorven Network: SOCKS5 proxy %s adresinde (sunucu: %s)\n", listen, srv)
-			fmt.Println("Cikmak icin Ctrl+C.")
+			fmt.Println(i18n.T("conn2.running", listen, srv))
+			fmt.Println(i18n.T("net.access.quit"))
 			return s.ListenAndServe(ctx)
 		},
 	}
-	cmd.Flags().StringVar(&listen, "listen", "127.0.0.1:1080", "yerel SOCKS5 dinleme adresi")
-	cmd.Flags().StringVar(&apiToken, "api-token", "", "API token (ZORVEN_API_TOKEN ile de verilebilir)")
-	cmd.Flags().StringVar(&cServer, "server", "", "Zorven sunucusu (host:port)")
-	cmd.Flags().BoolVar(&insecureFlag, "insecure", false, "TLS yerine ws:// (yalnizca lokal gelistirme)")
-	cmd.Flags().BoolVar(&gateway, "gateway", false, "ag gecidi modu (site-to-site): LAN'daki makinelere proxy ac")
-	cmd.Flags().StringVar(&allowFrom, "allow-from", "", "ag gecidi modunda izinli istemci araliklari, virgulle (or. 192.168.2.0/24)")
+	cmd.Flags().StringVar(&listen, "listen", "127.0.0.1:1080", i18n.T("conn2.flag.listen"))
+	cmd.Flags().StringVar(&apiToken, "api-token", "", i18n.T("net.flag.apitoken"))
+	cmd.Flags().StringVar(&cServer, "server", "", i18n.T("net.flag.server"))
+	cmd.Flags().BoolVar(&insecureFlag, "insecure", false, i18n.T("net.flag.insecure"))
+	cmd.Flags().BoolVar(&gateway, "gateway", false, i18n.T("conn2.flag.gateway"))
+	cmd.Flags().StringVar(&allowFrom, "allow-from", "", i18n.T("conn2.flag.allow"))
 	return cmd
 }
 
@@ -120,7 +118,7 @@ func parseAllowFrom(v string) ([]netip.Prefix, error) {
 		}
 		p, err := netip.ParsePrefix(part)
 		if err != nil {
-			return nil, fmt.Errorf("gecersiz --allow-from araligi %q (or. 192.168.2.0/24)", part)
+			return nil, errors.New(i18n.T("conn2.err.allow", part))
 		}
 		out = append(out, p.Masked())
 	}

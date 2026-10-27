@@ -6,10 +6,10 @@ import (
 	"io"
 	"os"
 	"strings"
-	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/tkodcumpeg4/zorven/client/i18n"
 	"github.com/tkodcumpeg4/zorven/client/localctl"
 )
 
@@ -31,11 +31,11 @@ func mapAgentErr(err error) error {
 	}
 	switch {
 	case localctl.IsUnsupported(err):
-		return errors.New("calisan istemci bu islemi desteklemiyor (eski surum); 'zorven update' ile guncelleyip yeniden baslatin")
+		return errors.New(i18n.T("share.err.old"))
 	case strings.Contains(err.Error(), localctl.ErrNoNet.Error()):
-		return errors.New("calisan istemcide Zorven Net etkin degil (sunucu wg_net sunmuyor veya istemci --no-net ile basladi)")
+		return errors.New(i18n.T("share.err.nonet"))
 	case strings.Contains(err.Error(), "yetkisiz"):
-		return fmt.Errorf("calisan istemci bu kullaniciya yerel erisim vermedi (%v); istemciyle ayni kullanici/sudo ile deneyin", err)
+		return errors.New(i18n.T("share.err.denied", err))
 	}
 	return err
 }
@@ -46,7 +46,7 @@ func findRunning() (*localctl.Endpoint, bool) {
 	ep, _, err := findAgent()
 	if ep == nil {
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Uyari: calisan istemciye erisilemedi (%v); yerel kontrol kanali atlandi.\n", err)
+			fmt.Fprintln(os.Stderr, i18n.T("share.warn.unreach", err))
 		}
 		return nil, false
 	}
@@ -54,29 +54,32 @@ func findRunning() (*localctl.Endpoint, bool) {
 }
 
 func printShare(si localctl.ShareInfo, ep *localctl.Endpoint) {
-	fmt.Fprintf(outW, "Paylasim olusturuldu: %s\n", si.Name)
-	fmt.Fprintf(outW, "  id:      %s\n", si.ID)
-	fmt.Fprintf(outW, "  port:    %d/%s\n", si.Port, si.Proto)
+	kv := func(key, val string) {
+		fmt.Fprintln(outW, "  "+padLabel(i18n.T(key), 12)+val)
+	}
+	fmt.Fprintln(outW, i18n.T("share.created", si.Name))
+	kv("share.l.id", si.ID)
+	kv("share.l.port", fmt.Sprintf("%d/%s", si.Port, si.Proto))
 	if len(si.To) > 0 {
 		var g []string
 		for _, t := range si.To {
 			g = append(g, t.Type+":"+t.ID)
 		}
-		fmt.Fprintf(outW, "  alicilar: %s\n", strings.Join(g, ", "))
+		kv("share.l.to", strings.Join(g, ", "))
 	}
 	if si.ExpiresUnix > 0 {
-		fmt.Fprintf(outW, "  bitis:   %s\n", time.Unix(si.ExpiresUnix, 0).Format("2006-01-02 15:04"))
+		kv("share.l.expires", time.Unix(si.ExpiresUnix, 0).Format("2006-01-02 15:04"))
 	}
-	kind := "on plan istemci"
+	kind := i18n.T("share.kind.fg")
 	if ep.Service {
-		kind = "arka plan servisi"
+		kind = i18n.T("share.kind.service")
 	}
 	if si.Persistent {
-		fmt.Fprintf(outW, "  kalicilik: kalici (%s yeniden baslasa da surer; silmek icin: zorven share rm %s)\n", kind, si.Name)
+		kv("share.l.persist", i18n.T("share.persistent", kind, si.Name))
 	} else {
-		fmt.Fprintf(outW, "  kalicilik: %s calistigi surece (kalici yapmak icin --persist)\n", kind)
+		kv("share.l.persist", i18n.T("share.temporary", kind))
 	}
-	fmt.Fprintf(outW, "Baglanmak icin (alici): zorven access %s:%d --local %d\n", si.Name, si.Port, si.Port)
+	fmt.Fprintln(outW, i18n.T("share.connect", si.Name, si.Port, si.Port))
 }
 
 // shareViaAgent: calisan ajan varsa paylasimi ona yaptirir. found=false ise
@@ -91,20 +94,20 @@ func shareViaAgent(sp localctl.ShareSpec) (found bool, err error) {
 		return true, mapAgentErr(err)
 	}
 	if len(resp.Shares) == 0 {
-		return true, errors.New("calisan istemci paylasim bilgisi dondurmedi")
+		return true, errors.New(i18n.T("share.err.noinfo"))
 	}
 	printShare(resp.Shares[0], ep)
 	return true, nil
 }
 
 func noAgentErr() error {
-	return errors.New("calisan istemci bulunamadi; paylasimlar yalniz calisan bir istemci (zorven / zorven service start) uzerinden yonetilir veya panelden (Paylasimlar) silinir")
+	return errors.New(i18n.T("share.err.noagent"))
 }
 
 func newShareRmCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "rm <id|ad>",
-		Short: "Calisan istemcinin sundugu bir paylasimi siler",
+		Short: i18n.T("share.rm.short"),
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ep, ok := findRunning()
@@ -119,16 +122,29 @@ func newShareRmCmd() *cobra.Command {
 			if len(resp.Shares) > 0 {
 				name = resp.Shares[0].Name + " (" + resp.Shares[0].ID + ")"
 			}
-			fmt.Fprintf(outW, "Paylasim silindi: %s\n", name)
+			fmt.Fprintln(outW, i18n.T("share.rm.done", name))
 			return nil
 		},
 	}
 }
 
+// pathLabel, yol ozetini kullaniciya gosterilecek metne cevirir.
+func pathLabel(p string) string {
+	switch p {
+	case "direct":
+		return i18n.T("net.path.l.direct")
+	case "relay":
+		return i18n.T("net.path.l.relay")
+	case "mixed":
+		return i18n.T("net.path.l.mixed")
+	}
+	return "-"
+}
+
 func newShareLsCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "ls",
-		Short: "Calisan istemcinin sundugu paylasimlari listeler",
+		Short: i18n.T("share.ls.short"),
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ep, ok := findRunning()
@@ -140,11 +156,11 @@ func newShareLsCmd() *cobra.Command {
 				return mapAgentErr(err)
 			}
 			if len(resp.Shares) == 0 {
-				fmt.Fprintln(outW, "Paylasim yok.")
+				fmt.Fprintln(outW, i18n.T("share.ls.none"))
 				return nil
 			}
-			tw := tabwriter.NewWriter(outW, 0, 4, 2, ' ', 0)
-			fmt.Fprintln(tw, "AD\tID\tPORT\tALICILAR\tBAGLANTI")
+			tw := newTable(outW)
+			fmt.Fprintln(tw, strings.Join([]string{i18n.T("share.tbl.name"), "ID", "PORT", i18n.T("share.tbl.to"), i18n.T("net.tbl.path"), i18n.T("share.tbl.connect")}, "\t"))
 			for _, s := range resp.Shares {
 				var to []string
 				for _, t := range s.To {
@@ -152,9 +168,9 @@ func newShareLsCmd() *cobra.Command {
 				}
 				who := strings.Join(to, ",")
 				if who == "" {
-					who = fmt.Sprintf("%d es", len(s.Allow))
+					who = i18n.T("share.ls.peers", len(s.Allow))
 				}
-				fmt.Fprintf(tw, "%s\t%s\t%d/%s\t%s\tzorven access %s:%d --local %d\n", s.Name, s.ID, s.Port, s.Proto, who, s.Name, s.Port, s.Port)
+				fmt.Fprintf(tw, "%s\t%s\t%d/%s\t%s\t%s\tzorven access %s:%d --local %d\n", s.Name, s.ID, s.Port, s.Proto, who, pathLabel(s.Path), s.Name, s.Port, s.Port)
 			}
 			return tw.Flush()
 		},
@@ -172,7 +188,7 @@ func accessViaAgent(specs []string) (found bool, err error) {
 	for _, spec := range specs {
 		tgt, loc, ok := strings.Cut(spec, "=")
 		if !ok || strings.TrimSpace(tgt) == "" || strings.TrimSpace(loc) == "" {
-			return false, fmt.Errorf("gecersiz --access %q (bicim: paylasim[:port]=yerel_port)", spec)
+			return false, errors.New(i18n.T("share.err.access", spec))
 		}
 		loc = strings.TrimSpace(loc)
 		if !strings.Contains(loc, ":") {
@@ -189,12 +205,10 @@ func accessViaAgent(specs []string) (found bool, err error) {
 		if err != nil {
 			return true, mapAgentErr(err)
 		}
-		fmt.Fprintf(outW, "Calisan istemcide erisim acildi: %s -> %s (istemci calistigi surece)\n", p.tgt, resp.Local)
+		fmt.Fprintln(outW, i18n.T("share.access.open", p.tgt, resp.Local))
 	}
 	return true, nil
 }
 
 // conflictHint, 409 (bu token ile baska istemci bagli) icin ipucu metni.
-const conflictHint = "Bu token ile baska bir istemci bagli ama yerel kontrol kanalindan ulasilamadi " +
-	"(istemci eski surum veya baska kullanicida olabilir). Istemciyi 'zorven update' ile guncelleyip yeniden baslatin, " +
-	"ayni kullanici/sudo ile deneyin ya da paylasimi panelden (Paylasimlar) olusturun."
+func conflictHint() string { return i18n.T("share.conflict") }

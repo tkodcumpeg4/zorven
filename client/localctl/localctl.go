@@ -16,10 +16,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/tkodcumpeg4/zorven/client/config"
 	"net"
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/pprof"
 	"time"
 )
 
@@ -68,6 +70,12 @@ type Response struct {
 
 	Shares []ShareInfo `json:"shares,omitempty"`
 	Local  string      `json:"local,omitempty"` // access_open: gercek dinleme adresi
+	// Paths (net_paths): netmap'teki esler ve her biri icin secili yol.
+	Paths []PathInfo `json:"paths,omitempty"`
+	// Tun (net_up/net_down/net_status): Mod B (OS TUN) durumu.
+	Tun *TunInfo `json:"tun,omitempty"`
+	// File (debug_stacks): yazilan tani dosyasinin yolu.
+	File string `json:"file,omitempty"`
 }
 
 // Endpoint, bir kontrol soketi konumu.
@@ -169,12 +177,28 @@ func handle(c net.Conn, ep Endpoint, ctl Controller, version string, onChange fu
 		}
 		// Yanit once gitsin: ajan guncellenirse kendini yeniden baslatir.
 		defer u.TriggerUpdate()
-	case "share_create", "share_delete", "share_list", "access_open", "access_close":
+	case "net_up", "net_down", "net_status":
+		resp.Caps = ctl.Current()
+		if err := ep.tunOp(ctl, req, &resp); err != nil {
+			resp = Response{Error: err.Error()}
+		} else if onChange != nil && req.Op != "net_status" {
+			onChange(req.Op)
+		}
+	case "share_create", "share_delete", "share_list", "access_open", "access_close", "net_paths":
 		resp.Caps = ctl.Current()
 		if err := ep.netOp(ctl, req, &resp); err != nil {
 			resp = Response{Error: err.Error()}
-		} else if onChange != nil && req.Op != "share_list" {
+		} else if onChange != nil && req.Op != "share_list" && req.Op != "net_paths" {
 			onChange(req.Op)
+		}
+	case "debug_stacks":
+		// Tani: tum goroutine yiginlarini dosyaya yazar (ajan kilitlendiginde
+		// nerede beklendigini gormek icin). Soket ACL'i zaten yonetici/sahip ile sinirli.
+		p, err := writeStackDump()
+		if err != nil {
+			resp = Response{Error: err.Error()}
+		} else {
+			resp.File = p
 		}
 	default:
 		resp = Response{Error: "bilinmeyen islem"}
@@ -232,4 +256,26 @@ func Find() (*Endpoint, *Response, error) {
 		return &e, &r, nil
 	}
 	return nil, nil, firstErr
+}
+
+// LogDir, servis/ajan tani dosyalarinin dizini (sistem ayar dosyasinin yaninda logs/).
+func LogDir() string {
+	return filepath.Join(filepath.Dir(config.SystemPath()), "logs")
+}
+
+func writeStackDump() (string, error) {
+	dir := LogDir()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		dir = os.TempDir()
+	}
+	p := filepath.Join(dir, "stacks-"+time.Now().UTC().Format("20060102-150405")+".txt")
+	f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	if err := pprof.Lookup("goroutine").WriteTo(f, 2); err != nil {
+		return "", err
+	}
+	return p, nil
 }

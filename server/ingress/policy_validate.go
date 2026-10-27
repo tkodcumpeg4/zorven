@@ -48,6 +48,11 @@ func validatePolicyRule(r rawPolicyRule) error {
 			return fmt.Errorf("country ISO 3166-1 alpha-2 olmali: %q", c)
 		}
 	}
+	for _, c := range m.CountryNot {
+		if len(strings.TrimSpace(c)) != 2 {
+			return fmt.Errorf("country_not ISO 3166-1 alpha-2 olmali: %q", c)
+		}
+	}
 	a := r.Action
 	switch strings.ToLower(strings.TrimSpace(a.Type)) {
 	case "deny":
@@ -62,6 +67,7 @@ func validatePolicyRule(r rawPolicyRule) error {
 			return fmt.Errorf("redirect status 300-399 olmali")
 		}
 	case "require_mtls":
+	case "challenge":
 	case "set_header":
 		if len(a.Request.Set) == 0 && len(a.Request.Remove) == 0 &&
 			len(a.Response.Set) == 0 && len(a.Response.Remove) == 0 {

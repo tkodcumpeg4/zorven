@@ -25,6 +25,8 @@ type SessionConfig struct {
 	HTTPClient *http.Client
 	Log        *slog.Logger
 	Name       string
+	// NoDirect true ise dogrudan P2P yol denenmez (yalniz relay).
+	NoDirect bool
 }
 
 // FatalSessionError: yeniden denemenin anlami olmayan hata (401/403/...).
@@ -94,6 +96,10 @@ func RunSession(ctx context.Context, cfg SessionConfig, onReady func(*Node)) err
 	tr := &wsTransport{c: c}
 	node := NewNode(cfg.Log, tr, key, cfg.Name)
 	node.DisableShares = true
+	if h, _, err := net.SplitHostPort(cfg.ServerAddr); err == nil {
+		node.ServerHost = h
+	}
+	node.DisableDirect = node.DisableDirect || cfg.NoDirect
 	defer node.Close()
 	if err := node.Register(ctx); err != nil {
 		return err
@@ -203,6 +209,14 @@ func (a *Accessor) node() *Node {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.cur
+}
+
+// Paths: eslerle secili yol (baglantisizken bos).
+func (a *Accessor) Paths() []PathInfo {
+	if n := a.node(); n != nil {
+		return n.Paths()
+	}
+	return nil
 }
 
 // State: guncel netmap (baglantisizken bos).

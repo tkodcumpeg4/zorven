@@ -203,9 +203,9 @@ onMounted(() => {
         <Icon name="lucide:shield-alert" class="size-3.5" :class="abuseReports.length ? 'text-danger' : ''" />
         <span>{{ t('platform.tabAbuse', { n: abuseReports.length }) }}</span>
       </button>
-
     </div>
 
+    <!-- 1. Kiracılar Tablosu -->
     <PanelFrame v-if="activeTab === 'tenants'" :label="t('platform.allTenants')" :meta="`${tenants.length}`">
       <p v-if="pending" class="px-4 py-6 text-sm text-fg-muted">{{ t('common.loading') }}</p>
       <div v-else class="overflow-x-auto">

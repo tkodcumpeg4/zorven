@@ -5,6 +5,11 @@ const props = defineProps<{ reason?: string }>()
 const { t, te } = useI18n()
 
 const label = computed(() => {
+  const r = props.reason || ''
+  // ZTNA Z3: dinamik nedenler (waf:<kural>, waf_log:<kural>, geo:<ulke>)
+  if (r.startsWith('waf_log:')) return t('tunsec.reasonWafLog', { rule: r.slice(8) })
+  if (r.startsWith('waf:')) return t('tunsec.reasonWaf', { rule: r.slice(4) })
+  if (r.startsWith('geo:')) return t('tunsec.reasonGeo', { country: r.slice(4) })
   const key = `requests.reject.${props.reason}`
   return te(key) ? t(key) : (props.reason || '')
 })

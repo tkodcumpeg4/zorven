@@ -19,6 +19,9 @@ const (
 	ScopeHostnamesRead  = "hostnames:read"
 	ScopeHostnamesWrite = "hostnames:write"
 	ScopeAnalyticsRead  = "analytics:read"
+	// Silme kapsamlari: ayri ve acik onayli (OAuth onay ekraninda varsayilan kapali).
+	ScopeTunnelsDelete   = "tunnels:delete"
+	ScopeHostnamesDelete = "hostnames:delete"
 )
 
 // untrusted, kullanici denetimli metin donduren araclarin aciklamasina eklenir.
@@ -148,6 +151,8 @@ type ToolInfo struct {
 type callCtx struct {
 	be     Backend
 	onCall func(tool string, status int, err error)
+	// onAPICall, aracin SON REST cagrisinin yontem+yolunu (govde/sorgu YOK) bildirir.
+	onAPICall func(tool, method, path string, status int)
 }
 
 type spec struct {
@@ -156,7 +161,10 @@ type spec struct {
 }
 
 // statusRec, bir arac cagrisinda son gorulen HTTP durumunu tutar.
-type statusRec struct{ status int }
+type statusRec struct {
+	status       int
+	method, path string // son gonderilen istek (sorgu dizgesi olmadan)
+}
 
 // call, Backend'e istegi iletir; >=400 yanitlari hataya cevirir.
 type call func(r Request) (Response, error)
@@ -166,6 +174,7 @@ func newCall(ctx context.Context, c *callCtx, rec *statusRec, project string) ca
 		if r.Project == "" {
 			r.Project = project
 		}
+		rec.method, rec.path = r.Method, r.Path
 		resp, err := c.be.Do(ctx, r)
 		if err != nil {
 			return resp, fmt.Errorf("sunucuya ulasilamadi: %w", err)
@@ -183,6 +192,7 @@ func tool[In any](name, title, desc, scope string, write, idempotent bool,
 	tweak func(props map[string]*jsonschema.Schema),
 	run func(do call, in In) (map[string]any, error),
 	project func(In) string,
+	opts ...func(*mcp.Tool),
 ) spec {
 	return spec{
 		info: ToolInfo{Name: name, Scope: scope, Write: write},
@@ -207,16 +217,24 @@ func tool[In any](name, title, desc, scope string, write, idempotent bool,
 					Title:           title,
 				},
 			}
+			for _, o := range opts {
+				o(t)
+			}
 			mcp.AddTool(s, t, func(ctx context.Context, _ *mcp.CallToolRequest, in In) (*mcp.CallToolResult, map[string]any, error) {
 				rec := &statusRec{}
 				out, err := run(newCall(ctx, c, rec, project(in)), in)
 				if c.onCall != nil {
 					c.onCall(name, rec.status, err)
 				}
+				if c.onAPICall != nil && rec.path != "" {
+					c.onAPICall(name, rec.method, rec.path, rec.status)
+				}
 				if err != nil {
 					return nil, nil, err
 				}
-				capOutput(out)
+				if name != "call_api" { // call_api kendi (256 KB) tavanini uygular
+					capOutput(out)
+				}
 				return nil, out, nil
 			})
 		},
@@ -224,6 +242,44 @@ func tool[In any](name, title, desc, scope string, write, idempotent bool,
 }
 
 func ptr[T any](v T) *T { return &v }
+
+// destructiveHint, aracin geri donusu olmayan bir islem yaptigini bildirir (istemci
+// onay arayuzu icin; guvenlik karari buna DAYANMAZ: sunucu tarafi confirm kilidi var).
+func destructiveHint(t *mcp.Tool) {
+	t.Annotations.DestructiveHint = ptr(true)
+	t.Annotations.IdempotentHint = false
+}
+
+type DeleteTunnelIn struct {
+	Common
+	TunnelID    string `json:"tunnel_id" jsonschema:"Tunnel id, from list_tunnels."`
+	Confirm     bool   `json:"confirm" jsonschema:"Must be true. The first call without it returns what would be deleted."`
+	ConfirmName string `json:"confirm_name" jsonschema:"The tunnel's public host (or its id) repeated exactly, to confirm the target."`
+}
+
+type DeleteDomainIn struct {
+	Common
+	DomainID    string `json:"domain_id" jsonschema:"Domain (hostname) id, from list_domains."`
+	Confirm     bool   `json:"confirm" jsonschema:"Must be true. The first call without it returns what would be deleted."`
+	ConfirmName string `json:"confirm_name" jsonschema:"The domain's fqdn repeated exactly, to confirm the target."`
+}
+
+type SetTunnelAccessIn struct {
+	Common
+	TunnelID      string   `json:"tunnel_id" jsonschema:"Tunnel id."`
+	Mode          string   `json:"mode" jsonschema:"Only 'oauth' is supported: visitors must sign in with GitHub or Google and have an email in allowed_emails."`
+	AllowedEmails []string `json:"allowed_emails" jsonschema:"Visitor emails allowed in (at least one, max 100). An empty list would allow every signed-in visitor and is rejected."`
+	Providers     []string `json:"providers,omitempty" jsonschema:"Sign-in providers: github and/or google (default both)."`
+}
+
+// confirmErr, silme araclarinin ilk (onaysiz) cagrisina doner.
+func confirmErr(what, want string) error {
+	return fmt.Errorf("confirm_required: bu islem %s kalici olarak siler. Onaylamak icin confirm=true ve confirm_name=%q ile tekrar cagirin", what, want)
+}
+
+func sameName(a, b string) bool {
+	return a != "" && strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b))
+}
 
 func props(p map[string]*jsonschema.Schema, name string, f func(*jsonschema.Schema)) {
 	if s := p[name]; s != nil {
@@ -251,6 +307,10 @@ func (c Common) proj() string { return strings.TrimSpace(c.ProjectID) }
 
 // specs, tum aracin listesi (silme araci YOK).
 func specs() []spec {
+	return append(baseSpecs(), fullSpecs()...)
+}
+
+func baseSpecs() []spec {
 	return []spec{
 		tool("whoami", "Who am I", "Show the identity behind the API token: organization (tenant), user, auth method and the granted scopes. Use it first to learn which tools will work."+untrusted,
 			"", false, true, nil,
@@ -707,6 +767,126 @@ func specs() []spec {
 				}
 				return decodeObject(r.Body)
 			}, projOf[OpenDoorIn]),
+
+		tool("delete_tunnel", "Delete tunnel", "PERMANENTLY delete a tunnel and its settings. Irreversible: the public host stops working and request history of the tunnel is orphaned. Requires the separate tunnels:delete scope. Call once with confirm=false to see the target, then again with confirm=true and confirm_name set to the tunnel's public host (or id).",
+			ScopeTunnelsDelete, true, false, nil,
+			func(do call, in DeleteTunnelIn) (map[string]any, error) {
+				id, err := seg("tunnel_id", in.TunnelID)
+				if err != nil {
+					return nil, err
+				}
+				r, err := do(Request{Method: "GET", Path: "/api/v1/tunnels/" + id})
+				if err != nil {
+					return nil, err
+				}
+				t, err := decodeObject(r.Body)
+				if err != nil {
+					return nil, err
+				}
+				names := []string{field(t, "id"), field(t, "public_host"), field(t, "private_name")}
+				if hs, ok := t["hostnames"].([]any); ok {
+					for _, h := range hs {
+						names = append(names, field(h, "fqdn"))
+					}
+				}
+				want := field(t, "public_host")
+				if want == "" {
+					want = field(t, "id")
+				}
+				if !in.Confirm {
+					return nil, confirmErr("tunel "+want+" ve ayarlarini", want)
+				}
+				ok := false
+				for _, n := range names {
+					if sameName(n, in.ConfirmName) {
+						ok = true
+					}
+				}
+				if !ok {
+					return nil, confirmErr("tunel "+want+" ve ayarlarini", want)
+				}
+				if _, err := do(Request{Method: "DELETE", Path: "/api/v1/tunnels/" + id}); err != nil {
+					return nil, err
+				}
+				return map[string]any{"deleted": true, "tunnel_id": id, "name": want}, nil
+			}, projOf[DeleteTunnelIn], destructiveHint),
+
+		tool("delete_domain", "Delete domain", "PERMANENTLY remove a domain (hostname) from the organization. Irreversible: the host stops routing to its tunnel. Requires the separate hostnames:delete scope. Call once with confirm=false to see the target, then again with confirm=true and confirm_name set to the domain's fqdn.",
+			ScopeHostnamesDelete, true, false, nil,
+			func(do call, in DeleteDomainIn) (map[string]any, error) {
+				id, err := seg("domain_id", in.DomainID)
+				if err != nil {
+					return nil, err
+				}
+				l, err := listDomains(do)
+				if err != nil {
+					return nil, err
+				}
+				fqdn := ""
+				for _, h := range l {
+					if field(h, "id") == id {
+						fqdn = field(h, "fqdn")
+					}
+				}
+				if fqdn == "" {
+					return nil, fmt.Errorf("not_found: alan adi bulunamadi (HTTP 404)")
+				}
+				if !in.Confirm || !sameName(fqdn, in.ConfirmName) {
+					return nil, confirmErr("alan adi "+fqdn+" kaydini", fqdn)
+				}
+				if _, err := do(Request{Method: "DELETE", Path: "/api/v1/hostnames/" + id}); err != nil {
+					return nil, err
+				}
+				return map[string]any{"deleted": true, "domain_id": id, "fqdn": fqdn}, nil
+			}, projOf[DeleteDomainIn], destructiveHint),
+
+		tool("set_tunnel_access", "Set tunnel access (OAuth)", "Protect a tunnel with visitor sign-in: only visitors who sign in with GitHub/Google and whose email is in allowed_emails get through. Only mode=oauth is supported; password (basic) protection and switching protection off must be done in the panel. Refuses to replace an existing password policy.",
+			ScopeTunnelsWrite, true, true,
+			func(p map[string]*jsonschema.Schema) { props(p, "mode", enumOf("oauth")) },
+			func(do call, in SetTunnelAccessIn) (map[string]any, error) {
+				id, err := seg("tunnel_id", in.TunnelID)
+				if err != nil {
+					return nil, err
+				}
+				if in.Mode != "oauth" {
+					return nil, fmt.Errorf("mode yalnizca 'oauth' olabilir; parola korumasi ve korumayi kapatma panelden yapilir")
+				}
+				if len(in.AllowedEmails) == 0 || len(in.AllowedEmails) > 100 {
+					return nil, fmt.Errorf("allowed_emails 1 ile 100 e-posta icermeli (bos liste herkese acar)")
+				}
+				emails := make([]string, 0, len(in.AllowedEmails))
+				for _, e := range in.AllowedEmails {
+					e = strings.ToLower(strings.TrimSpace(e))
+					if len(e) < 3 || len(e) > 254 || strings.Count(e, "@") != 1 || strings.ContainsAny(e, " \t\r\n,;<>\"") {
+						return nil, fmt.Errorf("gecersiz e-posta: %q", truncStr(e, 60))
+					}
+					emails = append(emails, e)
+				}
+				provs := in.Providers
+				if len(provs) == 0 {
+					provs = []string{"github", "google"}
+				}
+				for _, pv := range provs {
+					if pv != "github" && pv != "google" {
+						return nil, fmt.Errorf("providers yalnizca github ve google olabilir")
+					}
+				}
+				cur, err := do(Request{Method: "GET", Path: "/api/v1/tunnels/" + id + "/access"})
+				if err != nil {
+					return nil, err
+				}
+				if cm, err := decodeObject(cur.Body); err == nil && field(cm, "mode") == "basic" && cm["enabled"] == true {
+					return nil, fmt.Errorf("tunelde parola korumasi (basic) etkin; panelden degistirin")
+				}
+				r, err := do(Request{Method: "PUT", Path: "/api/v1/tunnels/" + id + "/access", Body: map[string]any{
+					"mode": "oauth", "enabled": true,
+					"config": map[string]any{"providers": provs, "allowed_emails": emails},
+				}})
+				if err != nil {
+					return nil, err
+				}
+				return decodeObject(r.Body)
+			}, projOf[SetTunnelAccessIn]),
 
 		tool("close_door", "Close web door", "Close the web door of a raw TCP/UDP tunnel (stops new visitor grants). Does not delete the tunnel or its settings.",
 			ScopeTunnelsWrite, true, true, nil,

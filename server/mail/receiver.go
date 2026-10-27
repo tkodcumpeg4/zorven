@@ -8,8 +8,8 @@
 package mail
 
 import (
-	"context"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"

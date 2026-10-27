@@ -426,7 +426,10 @@ func TestLayeredJoinFullImageAndSubscriptions(t *testing.T) {
 	// B ayrilir: dusuk katman kumeden CIKAR (ajan artik kodlamaz)
 	_, before := fa.lastCall()
 	b.leave()
-	waitUntil(t, func() bool { c, n := fa.lastCall(); return n > before && len(c.specs) == 1 && c.specs[0].ID == layerHigh })
+	waitUntil(t, func() bool {
+		c, n := fa.lastCall()
+		return n > before && len(c.specs) == 1 && c.specs[0].ID == layerHigh
+	})
 	a.hub.mu.Lock()
 	cleared := a.hub.stores[1].w == 0
 	a.hub.mu.Unlock()

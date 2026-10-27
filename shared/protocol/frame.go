@@ -48,6 +48,10 @@ const (
 	// FeatureScreenFiles pazarlanmissa gonderilir; akis kontrolu file_ack ile.
 	FrameFile uint8 = 7
 
+	// FrameVideo, H.264 video modu cercevesi tasir (istemci -> sunucu -> panel).
+	// Yalniz FeatureScreen2Video pazarlanmissa. Yuk duzeni: screen2_video.go.
+	FrameVideo uint8 = 9
+
 	FlagEOF uint8 = 1 << 0
 	// FlagKeyframe (yalniz FrameScreen): kare tum ekrani tasir; alici once
 	// onceki durumu atabilir. FlagFirst: kareyi olusturan ilk mesaj.
@@ -96,7 +100,7 @@ func DecodeBodyFrame(data []byte) (BodyFrame, error) {
 	}
 	ft := data[0]
 	if ft != FrameRequestBody && ft != FrameResponseBody && ft != FrameWSData &&
-		ft != FrameStreamData && ft != FrameDatagram && ft != FrameScreen && ft != FrameFile && ft != FrameWG {
+		ft != FrameStreamData && ft != FrameDatagram && ft != FrameScreen && ft != FrameFile && ft != FrameWG && ft != FrameVideo {
 		return BodyFrame{}, fmt.Errorf("%w: %d", ErrUnknownFrame, ft)
 	}
 	return BodyFrame{

@@ -46,12 +46,17 @@ func (f *fakeStream) Send(_ context.Context, d []byte) error {
 }
 
 // rawTestMgr, sahte akisla gercek TCP dinleyicisi acan yonetici doner.
-func rawTestMgr(t *testing.T, open func() (bridgeStream, bool, error)) (*Manager, string) {
+// setup fonksiyonlari Start'TAN ONCE calisir: yonetici alanlarini (Door, Geo,
+// limits ...) baslattiktan sonra degistirmek veri yarisidir (race detector).
+func rawTestMgr(t *testing.T, open func() (bridgeStream, bool, error), setup ...func(*Manager)) (*Manager, string) {
 	t.Helper()
 	p := freePort(t)
 	ti := TunnelInfo{TunnelID: "tun", TenantID: "ten", ClientID: "cli", Proto: "tcp", Port: p, BindAddr: "127.0.0.1"}
 	m := New(tunnel.NewHub(), nil, quietLog(), func(context.Context) ([]TunnelInfo, error) { return []TunnelInfo{ti}, nil })
 	m.openStream = func(context.Context, TunnelInfo, string) (bridgeStream, bool, error) { return open() }
+	for _, f := range setup {
+		f(m)
+	}
 	m.Start(context.Background())
 	t.Cleanup(m.closeAll)
 	return m, net.JoinHostPort("127.0.0.1", strconv.Itoa(p))
@@ -154,9 +159,10 @@ func TestTCPStatsRejectReasons(t *testing.T) {
 	waitFor(t, "offline reddi", func() bool { l, _ := m.TCPStats("tun"); return l.RejectedBy[TCPRejectOffline] == 1 })
 
 	// Kapi etkin, grant yok.
-	m, addr = rawTestMgr(t, func() (bridgeStream, bool, error) { return newFakeStream("", false), false, nil })
 	gate := &fakeGate{enabled: map[string]bool{"tun": true}}
-	m.Door = gate
+	m, addr = rawTestMgr(t, func() (bridgeStream, bool, error) { return newFakeStream("", false), false, nil }, func(m *Manager) {
+		m.Door = gate
+	})
 	dialAndWait(t, addr)
 	waitFor(t, "kapi reddi", func() bool { l, _ := m.TCPStats("tun"); return l.RejectedBy[TCPRejectDoor] == 1 })
 	live, _ := m.TCPStats("tun")

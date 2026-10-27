@@ -4,7 +4,6 @@ package main
 
 import (
 	"embed"
-	"fmt"
 	"runtime"
 	"sync"
 
@@ -44,6 +43,7 @@ type tray struct {
 	mStatus       *systray.MenuItem
 	mConnect      *systray.MenuItem
 	mStop         *systray.MenuItem
+	mQuit         *systray.MenuItem
 }
 
 // startTray, tepsi simgesini AYRI BIR GOROUTINE'de baslatir.
@@ -55,51 +55,52 @@ func (a *App) startTray() {
 
 func (t *tray) onReady() {
 	systray.SetTitle("Zorven")
-	systray.SetTooltip("Zorven - Güvenli Tünel İstemcisi")
+	systray.SetTooltip(tm("tray.tooltip"))
 	t.setState(agent.StateStopped)
 
-	t.mShow = systray.AddMenuItem("Pencereyi göster", "Uygulama penceresini öne getir")
+	t.mShow = systray.AddMenuItem(tm("tray.show"), tm("tray.show.tip"))
 	systray.AddSeparator()
 
 	// Aktif tünel URL'si ve hızlı tarayıcı/kopyalama işlemleri
-	t.mTunnelURL = systray.AddMenuItem("Tünel hazır değil", "")
+	t.mTunnelURL = systray.AddMenuItem(tm("tray.tunnelNone"), "")
 	t.mTunnelURL.Disable()
 	t.mTunnelURL.Hide()
 
-	t.mOpenBrowser = systray.AddMenuItem("Tarayıcıda aç", "Tünel adresini varsayılan tarayıcıda aç")
+	t.mOpenBrowser = systray.AddMenuItem(tm("tray.open"), tm("tray.open.tip"))
 	t.mOpenBrowser.Hide()
 
-	t.mCopyURL = systray.AddMenuItem("Adresi kopyala", "Tünel adresini panoya kopyala")
+	t.mCopyURL = systray.AddMenuItem(tm("tray.copy"), tm("tray.copy.tip"))
 	t.mCopyURL.Hide()
 
 	// Uzak oturum uyarısı ve kapatma butonu
-	t.mSessionAlert = systray.AddMenuItem("Uzak Oturum Aktif", "Terminal veya ekran paylaşımı bağlı")
+	t.mSessionAlert = systray.AddMenuItem(tm("tray.session"), tm("tray.session.tip"))
 	t.mSessionAlert.Disable()
 	t.mSessionAlert.Hide()
 
-	t.mCloseSession = systray.AddMenuItem("✕ Uzak oturumları sonlandır", "Uzak terminal ve ekran paylaşımını hemen kapat")
+	t.mCloseSession = systray.AddMenuItem(tm("tray.close"), tm("tray.close.tip"))
 	t.mCloseSession.Hide()
 
 	systray.AddSeparator()
 
 	// Hızlı port paylaşımı
-	t.mQuickShare = systray.AddMenuItem("Hızlı Port Paylaş", "Sık kullanılan bir yerel portu hemen tünelle")
-	t.mPort3000 = t.mQuickShare.AddSubMenuItem("Port 3000 (Node / React)", "localhost:3000 tünelle")
-	t.mPort5173 = t.mQuickShare.AddSubMenuItem("Port 5173 (Vite / Nuxt)", "localhost:5173 tünelle")
-	t.mPort8080 = t.mQuickShare.AddSubMenuItem("Port 8080 (Backend / API)", "localhost:8080 tünelle")
+	t.mQuickShare = systray.AddMenuItem(tm("tray.quick"), tm("tray.quick.tip"))
+	t.mPort3000 = t.mQuickShare.AddSubMenuItem("Port 3000 (Node / React)", tm("tray.port3000.tip"))
+	t.mPort5173 = t.mQuickShare.AddSubMenuItem("Port 5173 (Vite / Nuxt)", tm("tray.port5173.tip"))
+	t.mPort8080 = t.mQuickShare.AddSubMenuItem("Port 8080 (Backend / API)", tm("tray.port8080.tip"))
 
 	systray.AddSeparator()
 
 	// Durum satiri tiklanabilir degil, yalnizca bilgi.
-	t.mStatus = systray.AddMenuItem("Bağlı değil", "")
+	t.mStatus = systray.AddMenuItem(tm("state.stopped"), "")
 	t.mStatus.Disable()
 
-	t.mConnect = systray.AddMenuItem("Bağlan", "Tüneli başlat")
-	t.mStop = systray.AddMenuItem("Bağlantıyı kes", "Tüneli durdur")
+	t.mConnect = systray.AddMenuItem(tm("tray.connect"), tm("tray.connect.tip"))
+	t.mStop = systray.AddMenuItem(tm("tray.stop"), tm("tray.stop.tip"))
 	t.mStop.Hide()
 
 	systray.AddSeparator()
-	mQuit := systray.AddMenuItem("Çıkış", "Uygulamayı tamamen kapat")
+	t.mQuit = systray.AddMenuItem(tm("tray.quit"), tm("tray.quit.tip"))
+	mQuit := t.mQuit
 
 	t.mu.Lock()
 	t.started = true
@@ -166,14 +167,14 @@ func (t *tray) update(s agent.Status) {
 	t.setState(s.State)
 
 	label := map[agent.State]string{
-		agent.StateConnected:    "Bağlı",
-		agent.StateConnecting:   "Bağlanıyor…",
-		agent.StateReconnecting: "Yeniden bağlanıyor",
-		agent.StateStopped:      "Bağlı değil",
-		agent.StateFatal:        "Bağlanamadı",
+		agent.StateConnected:    tm("state.connected"),
+		agent.StateConnecting:   tm("state.connecting"),
+		agent.StateReconnecting: tm("state.reconnecting"),
+		agent.StateStopped:      tm("state.stopped"),
+		agent.StateFatal:        tm("state.fatal"),
 	}[s.State]
 	if label == "" {
-		label = "Bağlı değil"
+		label = tm("state.stopped")
 	}
 	t.mStatus.SetTitle(label)
 
@@ -207,7 +208,7 @@ func (t *tray) update(s agent.Status) {
 	// Uzak oturum kontrolü
 	totSessions := s.TerminalActive + s.ScreenActive
 	if totSessions > 0 {
-		t.mSessionAlert.SetTitle(fmt.Sprintf("%d Uzak Oturum Aktif", totSessions))
+		t.mSessionAlert.SetTitle(tm("tray.sessionN", totSessions))
 		t.mSessionAlert.Show()
 		t.mCloseSession.Show()
 	} else {
@@ -228,6 +229,35 @@ func (t *tray) update(s agent.Status) {
 		t.mStop.Hide()
 		t.mConnect.Show()
 	}
+}
+
+// relabel, dil degisince sabit menu etiketlerini ve ipuclarini yeniden yazar;
+// durum satiri, oturum sayisi ve genel ipucu update ile tazelenir.
+func (t *tray) relabel() {
+	t.mu.Lock()
+	ready := t.started
+	t.mu.Unlock()
+	if !ready {
+		return
+	}
+	set := func(m *systray.MenuItem, title, tip string) {
+		m.SetTitle(title)
+		m.SetTooltip(tip)
+	}
+	systray.SetTooltip(tm("tray.tooltip"))
+	set(t.mShow, tm("tray.show"), tm("tray.show.tip"))
+	t.mTunnelURL.SetTitle(tm("tray.tunnelNone"))
+	set(t.mOpenBrowser, tm("tray.open"), tm("tray.open.tip"))
+	set(t.mCopyURL, tm("tray.copy"), tm("tray.copy.tip"))
+	set(t.mSessionAlert, tm("tray.session"), tm("tray.session.tip"))
+	set(t.mCloseSession, tm("tray.close"), tm("tray.close.tip"))
+	set(t.mQuickShare, tm("tray.quick"), tm("tray.quick.tip"))
+	t.mPort3000.SetTooltip(tm("tray.port3000.tip"))
+	t.mPort5173.SetTooltip(tm("tray.port5173.tip"))
+	t.mPort8080.SetTooltip(tm("tray.port8080.tip"))
+	set(t.mConnect, tm("tray.connect"), tm("tray.connect.tip"))
+	set(t.mStop, tm("tray.stop"), tm("tray.stop.tip"))
+	set(t.mQuit, tm("tray.quit"), tm("tray.quit.tip"))
 }
 
 // setState, duruma karsilik gelen simgeyi yukler.

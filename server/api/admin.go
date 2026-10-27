@@ -222,7 +222,7 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		m.Next.ServeHTTP(w, r)
+		m.next(w, r)
 		return
 	}
 	// Terminal ve ekran WS'leri bearer basligi tasiyamaz (tarayici WS kisiti);
@@ -230,7 +230,7 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// /terminal veya /screen ile biten yollar muaf; bilet gecersizse handler
 	// 401 dondurur / baglantiyi kapatir.
 	if isTicketWSRoute(r) {
-		m.Next.ServeHTTP(w, r)
+		m.next(w, r)
 		return
 	}
 
@@ -244,14 +244,9 @@ func (m *Middleware) serveAuthenticated(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// 1. Better Auth oturum cerezi kontrolu (better-auth.session_token veya __Secure-better-auth.session_token)
+	// 1. Better Auth oturum cerezi kontrolu (HTTPS: __Host-zorven.session_token; yerel: better-auth.session_token)
 	if m.BetterAuth != nil {
-		token := ""
-		if c, err := r.Cookie("better-auth.session_token"); err == nil && c.Value != "" {
-			token = c.Value
-		} else if c, err := r.Cookie("__Secure-better-auth.session_token"); err == nil && c.Value != "" {
-			token = c.Value
-		}
+		token := auth.SessionCookieValue(r)
 		if token != "" {
 			// Better Auth cerezleri "<token>.<signature>" biciminde imzalanir;
 			// veritabanindaki session.token alaninda nokta oncesindeki token saklanir.
@@ -308,7 +303,7 @@ func (m *Middleware) serveAuthenticated(w http.ResponseWriter, r *http.Request) 
 					TenantID: activeTenant,
 					Role:     role,
 				})
-				m.Next.ServeHTTP(w, r.WithContext(ctx))
+				m.next(w, r.WithContext(ctx))
 				return
 			}
 		}
@@ -330,7 +325,7 @@ func (m *Middleware) serveAuthenticated(w http.ResponseWriter, r *http.Request) 
 				ctx := withTenant(r.Context(), sess.TenantID)
 				ctx = m.resolveProject(ctx, r, sess.TenantID)
 				ctx = withUser(ctx, user)
-				m.Next.ServeHTTP(w, r.WithContext(ctx))
+				m.next(w, r.WithContext(ctx))
 				return
 			}
 		}
@@ -409,7 +404,7 @@ func (m *Middleware) serveAuthenticated(w http.ResponseWriter, r *http.Request) 
 					Role:     "api_token",
 				})
 			}
-			m.Next.ServeHTTP(w, r.WithContext(ctx))
+			m.next(w, r.WithContext(ctx))
 			return
 		}
 
@@ -465,7 +460,7 @@ func (m *Middleware) serveAuthenticated(w http.ResponseWriter, r *http.Request) 
 					TenantID: activeTenant,
 					Role:     role,
 				})
-				m.Next.ServeHTTP(w, r.WithContext(ctx))
+				m.next(w, r.WithContext(ctx))
 				return
 			}
 		}
@@ -514,10 +509,25 @@ func (m *Middleware) serveAuthenticated(w http.ResponseWriter, r *http.Request) 
 	}
 	ctx := withPlatformAdmin(withTenant(r.Context(), adminTenant))
 	ctx = m.resolveProject(ctx, r, adminTenant)
-	m.Next.ServeHTTP(w, r.WithContext(ctx))
+	m.next(w, r.WithContext(ctx))
 }
 
 // resolveProject, kiracı için X-Zorven-Project başlığını çözümler veya default projeye düşer (FAZ 0 / F00).
+// next, kimligi dogrulanmis istegi asil isleyiciye verir. X-Zorven-Project
+// basligi bilinmeyen bir proje gosteriyorsa yazma istegi reddedilir.
+func (m *Middleware) next(w http.ResponseWriter, r *http.Request) {
+	if bad, ok := r.Context().Value(ctxKeyProjectInvalid).(string); ok && bad != "" {
+		switch r.Method {
+		case http.MethodGet, http.MethodHead, http.MethodOptions:
+		default:
+			writeJSONError(w, http.StatusBadRequest, "project_not_found",
+				"X-Zorven-Project basligindaki proje bulunamadi: "+bad)
+			return
+		}
+	}
+	m.Next.ServeHTTP(w, r)
+}
+
 func (m *Middleware) resolveProject(ctx context.Context, r *http.Request, tenantID string) context.Context {
 	if m.Store == nil || tenantID == "" {
 		return ctx
@@ -532,6 +542,10 @@ func (m *Middleware) resolveProject(ctx context.Context, r *http.Request, tenant
 		if p, err := m.Store.GetProjectByID(ctx, tenantID, targetProj); err == nil {
 			return withProject(ctx, p.ID)
 		}
+		// Bulunamayan proje: yazma istekleri varsayilan projeye SESSIZCE
+		// dusmez (yanlis projeye yazardi); m.next 400 doner. Okumalar
+		// geriye uyumluluk icin varsayilana duser.
+		ctx = context.WithValue(ctx, ctxKeyProjectInvalid, targetProj)
 	}
 	// Fallback: default proje
 	if def, err := m.Store.GetDefaultProject(ctx, tenantID); err == nil {
@@ -569,7 +583,7 @@ func hasCredentials(r *http.Request) bool {
 		return true
 	}
 	for _, c := range r.Cookies() {
-		if strings.HasSuffix(c.Name, "better-auth.session_token") || c.Name == session.CookieName {
+		if (c.Name == auth.HostSessionCookie || c.Name == "better-auth.session_token") || c.Name == session.CookieName {
 			return true
 		}
 	}

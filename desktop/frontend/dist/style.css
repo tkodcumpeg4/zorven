@@ -168,3 +168,19 @@ main { position: relative; z-index: 1; padding: 14px; max-width: 620px; margin: 
 .update-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
 .update-info { display: flex; flex-direction: column; gap: 2px; font-size: 12px; }
 .update-info small { color: var(--fg-subtle); font-size: 11px; }
+
+/* ---- Tam Ağ Katmanı (Mod B) kartı ---- */
+.nt-title { display: flex; align-items: center; gap: 6px; }
+.nt-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px; margin-top: 12px; }
+.nt-grid small { display: block; color: var(--fg-subtle); font-size: 10px; text-transform: uppercase; letter-spacing: .06em; }
+.nt-grid .mono { font-size: 12px; word-break: break-all; }
+.nt-peers { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 8px; }
+.nt-peer { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 0; font-size: 12px; }
+.nt-peer .nt-pname { font-weight: 600; }
+.nt-peer .nt-pip { color: var(--fg-subtle); font-family: var(--mono); font-size: 11px; margin-left: 6px; }
+.nt-path { font-size: 10.5px; font-weight: 600; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--fg-muted); white-space: nowrap; }
+.nt-path.direct { color: var(--brand); border-color: rgba(61,220,132,.35); background: rgba(61,220,132,.08); }
+.nt-path.relay { color: var(--warn); border-color: rgba(245,180,69,.35); background: var(--warn-deep); }
+.nt-path.off { color: var(--fg-subtle); }
+.nt-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.lang-row { margin-top: 0; padding-top: 0; border-top: 0; margin-bottom: 12px; }

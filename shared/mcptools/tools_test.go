@@ -73,12 +73,19 @@ func toolNames(t *testing.T, cs *mcp.ClientSession) []string {
 }
 
 func TestCatalog_NoDeleteTools(t *testing.T) {
-	forbidden := []string{"delete", "remove", "revoke", "destroy", "drop", "purge", "rotate", "token"}
+	forbidden := []string{"remove", "revoke", "destroy", "drop", "purge", "rotate", "token"}
 	for _, ti := range Catalog() {
 		for _, f := range forbidden {
 			if strings.Contains(ti.Name, f) {
 				t.Errorf("yasak arac adi: %s", ti.Name)
 			}
+		}
+		// Silme araclari yalniz ayri :delete kapsamiyla var olabilir.
+		if strings.Contains(ti.Name, "delete") != strings.HasSuffix(ti.Scope, ":delete") {
+			t.Errorf("%s: silme araci ile :delete kapsami eslesmiyor (%q)", ti.Name, ti.Scope)
+		}
+		if strings.HasSuffix(ti.Scope, ":delete") || ti.Scope == ScopeFull {
+			continue
 		}
 		if ti.Write && ti.Scope == "" {
 			t.Errorf("%s: yazma araci kapsamsiz", ti.Name)
@@ -93,7 +100,7 @@ func TestCatalog_NoDeleteTools(t *testing.T) {
 }
 
 func TestSchemas_ValidAndDescribed(t *testing.T) {
-	cs := connect(t, NewServer(&fakeBackend{}, Options{}))
+	cs := connect(t, NewServer(&fakeBackend{}, Options{Scopes: []string{ScopeFull}}))
 	res, err := cs.ListTools(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -119,8 +126,9 @@ func TestSchemas_ValidAndDescribed(t *testing.T) {
 		if tl.Annotations.ReadOnlyHint == isWrite(tl.Name) {
 			t.Errorf("%s: readOnlyHint tutarsiz", tl.Name)
 		}
-		if tl.Annotations.DestructiveHint == nil || *tl.Annotations.DestructiveHint {
-			t.Errorf("%s: destructiveHint false olmali", tl.Name)
+		isDel := strings.HasPrefix(tl.Name, "delete_") || tl.Name == "call_api"
+		if tl.Annotations.DestructiveHint == nil || *tl.Annotations.DestructiveHint != isDel {
+			t.Errorf("%s: destructiveHint %v olmali", tl.Name, isDel)
 		}
 	}
 }
@@ -149,8 +157,12 @@ func TestScopeFiltering(t *testing.T) {
 			[]string{"create_tunnel", "list_devices"}, 0},
 		{[]string{}, []string{"whoami", "get_status"}, []string{"list_tunnels", "create_tunnel"}, 2},
 		{[]string{"read"}, []string{"list_devices", "list_requests"}, []string{"create_tunnel", "open_door"}, 0},
-		{[]string{"*"}, []string{"create_tunnel", "list_requests", "open_door"}, nil, len(Catalog())},
-		{nil, []string{"create_tunnel"}, nil, len(Catalog())},
+		// "*"/admin silme kapsamlarini ICERMEZ: silme araclari yalniz acik kapsamla gorunur.
+		{[]string{"*"}, []string{"create_tunnel", "list_requests", "open_door"}, []string{"delete_tunnel", "delete_domain"}, len(Catalog()) - 4},
+		{[]string{"write"}, []string{"create_tunnel", "set_tunnel_access"}, []string{"delete_tunnel", "delete_domain"}, 0},
+		{[]string{"tunnels:delete"}, []string{"delete_tunnel", "list_tunnels"}, []string{"delete_domain", "create_tunnel"}, 0},
+		{[]string{"hostnames:delete"}, []string{"delete_domain", "list_domains"}, []string{"delete_tunnel"}, 0},
+		{nil, []string{"create_tunnel"}, []string{"call_api", "list_api_endpoints"}, len(Catalog()) - 2},
 	}
 	for _, c := range cases {
 		cs := connect(t, NewServer(&fakeBackend{}, Options{Scopes: c.scopes}))
@@ -246,8 +258,11 @@ func TestToolsMapToEndpoints(t *testing.T) {
 		{"open_door", map[string]any{"tunnel_id": "t1"}, "PUT", "/api/v1/tunnels/t1/door", nil, map[string]any{"enabled": true, "duration_sec": float64(3600)}},
 		{"open_door", map[string]any{"tunnel_id": "t1", "duration_sec": 86400}, "PUT", "/api/v1/tunnels/t1/door", nil, map[string]any{"enabled": true, "duration_sec": float64(86400)}},
 		{"close_door", map[string]any{"tunnel_id": "t1"}, "PUT", "/api/v1/tunnels/t1/door", nil, map[string]any{"enabled": false}},
+		{"delete_tunnel", map[string]any{"tunnel_id": "t1", "confirm": true, "confirm_name": "x"}, "DELETE", "/api/v1/tunnels/t1", nil, nil},
+		{"delete_domain", map[string]any{"domain_id": "a", "confirm": true, "confirm_name": "X.example.com"}, "DELETE", "/api/v1/hostnames/a", nil, nil},
 	}
-	covered := map[string]bool{}
+	covered0 := map[string]bool{"set_tunnel_access": true} // ayri testte (ic ice govde)
+	covered := covered0
 	for _, tc := range tests {
 		covered[tc.tool] = true
 		out, isErr, text := callTool(t, cs, tc.tool, tc.args)
@@ -285,7 +300,7 @@ func TestToolsMapToEndpoints(t *testing.T) {
 		}
 	}
 	for _, ti := range Catalog() {
-		if !covered[ti.Name] {
+		if !covered[ti.Name] && ti.Scope != ScopeFull { // full araclari fulltools_test.go'da
 			t.Errorf("%s: testte kapsanmamis", ti.Name)
 		}
 	}
@@ -449,5 +464,123 @@ func TestHTTPBackend(t *testing.T) {
 	}
 	if gotAuth != "Bearer zrv_api_x" || gotProj != "p1" || gotPath != "/api/v1/me" || gotQuery != "a=1" {
 		t.Errorf("%q %q %q %q", gotAuth, gotProj, gotPath, gotQuery)
+	}
+}
+
+func TestDeleteToolsRequireConfirmationAndName(t *testing.T) {
+	be := &fakeBackend{reply: func(r Request) Response {
+		if r.Method == "GET" && r.Path == "/api/v1/tunnels/t1" {
+			return jsonResp(200, `{"id":"t1","public_host":"app--acme.zorven.app","hostnames":[{"fqdn":"app--acme.zorven.app"}]}`)
+		}
+		if r.Method == "GET" && r.Path == "/api/v1/hostnames" {
+			return jsonResp(200, `[{"id":"h1","fqdn":"www.example.com"}]`)
+		}
+		return jsonResp(204, ``)
+	}}
+	cs := connect(t, NewServer(be, Options{Scopes: []string{"tunnels:delete", "hostnames:delete"}}))
+	deleted := func() bool {
+		be.mu.Lock()
+		defer be.mu.Unlock()
+		for _, r := range be.reqs {
+			if r.Method == "DELETE" {
+				return true
+			}
+		}
+		return false
+	}
+	for name, args := range map[string]map[string]any{
+		"delete_tunnel": {"tunnel_id": "t1"},
+		"delete_domain": {"domain_id": "h1"},
+	} {
+		// onaysiz, adsiz, yanlis adli: asla DELETE gitmemeli
+		for _, a := range []map[string]any{
+			args,
+			{"confirm": true},
+			{"confirm": true, "confirm_name": "baska.example.com"},
+			{"confirm": false, "confirm_name": "app--acme.zorven.app"},
+		} {
+			full := map[string]any{}
+			for k, v := range args {
+				full[k] = v
+			}
+			for k, v := range a {
+				full[k] = v
+			}
+			_, isErr, text := callTool(t, cs, name, full)
+			if !isErr || !strings.Contains(text, "confirm") {
+				t.Errorf("%s %v: onay hatasi beklenirdi: %v %q", name, a, isErr, text)
+			}
+			if deleted() {
+				t.Fatalf("%s %v: onaysiz DELETE gitti", name, a)
+			}
+		}
+	}
+	// dogru onay
+	if _, isErr, text := callTool(t, cs, "delete_tunnel", map[string]any{"tunnel_id": "t1", "confirm": true, "confirm_name": "app--acme.zorven.app"}); isErr {
+		t.Fatalf("dogru onay reddedildi: %s", text)
+	}
+	if !deleted() || be.last().Path != "/api/v1/tunnels/t1" {
+		t.Fatalf("DELETE gitmedi: %+v", be.last())
+	}
+	// yol enjeksiyonu
+	if _, isErr, _ := callTool(t, cs, "delete_tunnel", map[string]any{"tunnel_id": "../x", "confirm": true, "confirm_name": "x"}); !isErr {
+		t.Fatal("tunnel_id yol enjeksiyonu kabul edildi")
+	}
+	// annotations
+	res, _ := cs.ListTools(context.Background(), nil)
+	for _, tl := range res.Tools {
+		if strings.HasPrefix(tl.Name, "delete_") && (tl.Annotations.ReadOnlyHint || tl.Annotations.DestructiveHint == nil || !*tl.Annotations.DestructiveHint) {
+			t.Errorf("%s: destructiveHint=true/readOnly=false olmali", tl.Name)
+		}
+	}
+}
+
+func TestSetTunnelAccessOnlyOAuthWithEmails(t *testing.T) {
+	mode := "none"
+	be := &fakeBackend{reply: func(r Request) Response {
+		if r.Method == "GET" {
+			return jsonResp(200, `{"mode":"`+mode+`","enabled":true}`)
+		}
+		return jsonResp(200, `{"ok":true}`)
+	}}
+	cs := connect(t, NewServer(be, Options{}))
+	put := func() bool {
+		be.mu.Lock()
+		defer be.mu.Unlock()
+		for _, r := range be.reqs {
+			if r.Method == "PUT" {
+				return true
+			}
+		}
+		return false
+	}
+	bad := []map[string]any{
+		{"tunnel_id": "t1", "mode": "basic", "allowed_emails": []string{"a@b.co"}},
+		{"tunnel_id": "t1", "mode": "none", "allowed_emails": []string{"a@b.co"}},
+		{"tunnel_id": "t1", "mode": "oauth", "allowed_emails": []string{}},
+		{"tunnel_id": "t1", "mode": "oauth", "allowed_emails": []string{"gecersiz"}},
+		{"tunnel_id": "t1", "mode": "oauth", "allowed_emails": []string{"a@b.co"}, "providers": []string{"evil"}},
+		{"tunnel_id": "t1", "mode": "oauth", "allowed_emails": []string{"a@b.co,c@d.co"}},
+	}
+	for _, a := range bad {
+		if _, isErr, _ := callTool(t, cs, "set_tunnel_access", a); !isErr {
+			t.Errorf("kabul edildi: %v", a)
+		}
+	}
+	if put() {
+		t.Fatal("gecersiz girdiyle PUT gitti")
+	}
+	// parola (basic) politikasi uzerine yazilmaz
+	mode = "basic"
+	if _, isErr, _ := callTool(t, cs, "set_tunnel_access", map[string]any{"tunnel_id": "t1", "mode": "oauth", "allowed_emails": []string{"a@b.co"}}); !isErr || put() {
+		t.Fatal("basic politikanin uzerine yazildi")
+	}
+	mode = "none"
+	if _, isErr, text := callTool(t, cs, "set_tunnel_access", map[string]any{"tunnel_id": "t1", "mode": "oauth", "allowed_emails": []string{"A@B.co"}}); isErr {
+		t.Fatalf("gecerli cagri: %s", text)
+	}
+	raw, _ := json.Marshal(be.last().Body)
+	if !strings.Contains(string(raw), `"allowed_emails":["a@b.co"]`) || strings.Contains(string(raw), "password") {
+		t.Fatalf("govde: %s", raw)
 	}
 }

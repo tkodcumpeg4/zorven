@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"sync"
 	"time"
 
@@ -87,8 +88,16 @@ type screen2Viewer struct {
 	seq                    uint32
 	lastSend               time.Time
 	gone                   bool
-	wake                   chan struct{}
-	quit                   chan struct{}
+	// Geri bildirim sayaclari (screen_feedback.go); hub.mu altinda.
+	fbArrived, fbDelivered, fbBlocked int
+	fbQueueMax                        time.Duration
+	fbPrev                            fbWin
+	fbLast                            viewerFB
+	dirtySince                        time.Time // en eski bekleyen karonun gelis zamani (katmanli)
+	resyncSince                       time.Time // eski yayinda atlama baslangici
+	wake                              chan struct{}
+	quit                              chan struct{}
+	vid                               videoState // screen_video.go; hub.mu altinda
 }
 
 // screen2Hub, tek istemcinin paylasimli yayini.
@@ -113,6 +122,18 @@ type screen2Hub struct {
 	wasActive [numLayers]bool       // hub.mu altinda
 	sentSpecs []protocol.Screen2LayerSpec
 	sentFPS   int
+
+	// H.264 video modu (screen_video.go); hub.mu altinda.
+	vid videoHubState
+
+	// Geri bildirim (screen_feedback.go): ajan pazarladiysa fbOK. fbSent* ve
+	// fbTickAt hub.mu altinda.
+	fbOK     bool
+	clock    func() time.Time // yalniz testler
+	fbAgent  feedbackAgent
+	fbSent   []protocol.Screen2FeedbackLayer
+	fbSentAt time.Time
+	fbTickAt time.Time
 
 	mu       sync.Mutex
 	viewers  map[*screen2Viewer]struct{}
@@ -180,6 +201,12 @@ func (r *screen2Registry) join(clientID string, agent screen2Agent, o tunnel.Scr
 			if fa, ok := agent.(fileAgent); ok {
 				h.filesOK = fa.SupportsScreenFiles()
 			}
+			if fa, ok := agent.(feedbackAgent); ok && fa.SupportsScreen2Feedback() {
+				h.fbOK, h.fbAgent = true, fa
+			}
+			if va, ok := agent.(videoAgent); ok && va.SupportsScreen2Video() {
+				h.vid.ok, h.vid.agent, h.vid.sent = true, va, protocol.Screen2VideoTiles
+			}
 			if la, ok := agent.(layerAgent); ok && la.SupportsScreen2Layers() {
 				// Ilk izleyicinin tercihine gore baslangic katmanlari.
 				first := layerHigh
@@ -209,6 +236,7 @@ func (r *screen2Registry) join(clientID string, agent screen2Agent, o tunnel.Scr
 				return nil, err
 			}
 			go h.pump()
+			go h.feedbackLoop()
 			close(h.ready)
 		} else {
 			<-h.ready
@@ -308,7 +336,7 @@ func settingsMsg(o tunnel.Screen2Options) []byte {
 
 // capsMsg, yayinin imlec/pano yeteneklerini panele bildirir.
 func (h *screen2Hub) capsMsg() []byte {
-	b, _ := json.Marshal(map[string]any{"type": "caps", "cursor": h.curOK, "clipboard": h.clipOK, "files": h.filesOK})
+	b, _ := json.Marshal(map[string]any{"type": "caps", "cursor": h.curOK, "clipboard": h.clipOK, "files": h.filesOK, "video": h.vid.ok})
 	return b
 }
 
@@ -358,6 +386,10 @@ func (h *screen2Hub) pump() {
 		case <-h.ctx.Done():
 			return
 		case b := <-h.raw:
+			if len(b) > 0 && b[0] == protocol.FrameVideo {
+				h.relayVideo(b)
+				continue
+			}
 			if h.layered {
 				h.mu.Lock()
 				h.ingestLocked(b)
@@ -365,9 +397,14 @@ func (h *screen2Hub) pump() {
 				continue
 			}
 			keyframe, first := screen2Flags(b)
+			eof := len(b) > 13 && b[13]&protocol.FlagEOF != 0
 			needAsk := false
 			h.mu.Lock()
+			now := time.Now()
 			for v := range h.viewers {
+				if eof {
+					v.fbArrived++
+				}
 				if v.resync {
 					if !(keyframe && first) {
 						needAsk = true
@@ -377,8 +414,15 @@ func (h *screen2Hub) pump() {
 				}
 				select {
 				case v.out <- b:
+					if eof {
+						v.fbDelivered++
+					}
 				default:
+					if !v.resync {
+						v.resyncSince = now
+					}
 					v.resync = true
+					v.fbBlocked++
 					needAsk = true
 				}
 			}
@@ -438,6 +482,36 @@ func (h *screen2Hub) relayAux(a tunnel.ScreenAux) {
 		h.shapeMsg = msg
 		for v := range h.viewers {
 			v.sendMsg(msg)
+		}
+		h.mu.Unlock()
+	case a.Stats != nil:
+		// Ajan olcumu icerigi degistirilmeden iletilir; katmanli yayinda her
+		// izleyiciye kendi etkin katmani eklenir (-1: katmansiz).
+		raw, err := json.Marshal(a.Stats)
+		if err != nil {
+			return
+		}
+		var m map[string]json.RawMessage
+		if json.Unmarshal(raw, &m) != nil {
+			return
+		}
+		delete(m, "session_id")
+		m["type"] = json.RawMessage(`"stats"`)
+		h.mu.Lock()
+		for v := range h.viewers {
+			m["layer"] = json.RawMessage("-1")
+			if h.layered {
+				m["layer"] = json.RawMessage(strconv.Itoa(v.layer))
+			}
+			// Sunucunun bu izleyiciye teslim ozeti (varsa).
+			delete(m, "srv")
+			if srv := v.srvLocked(h.fbOK); srv != nil {
+				if sb, err := json.Marshal(srv); err == nil {
+					m["srv"] = sb
+				}
+			}
+			b, _ := json.Marshal(m)
+			v.sendMsg(b)
 		}
 		h.mu.Unlock()
 	case a.Clipboard != nil:
@@ -549,6 +623,7 @@ func (v *screen2Viewer) leave() {
 	if !empty {
 		h.broadcastViewers()
 		h.syncLayers()
+		h.syncVideo(false)
 	}
 }
 
@@ -625,6 +700,10 @@ func (v *screen2Viewer) input(ctx context.Context, in protocol.ScreenInput) bool
 // (ajan ve diger izleyiciler etkilenmez); eski yayinda ajandan anahtar kare istenir.
 func (v *screen2Viewer) keyframe() {
 	h := v.hub
+	if h.vid.ok && v.videoActive() {
+		h.askKeyframe() // video akiyor: IDR (depodaki eski karolar videonun ustune cizilmesin)
+		return
+	}
 	if !h.layered {
 		h.askKeyframe()
 		return

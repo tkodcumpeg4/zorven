@@ -9,11 +9,11 @@ let logWin = null;         // ayrı log penceresi referansı
 let totalReq = 0;
 
 const STATES = {
-  connected:    { cls: 'badge-connected',  label: 'Bağlı' },
-  connecting:   { cls: 'badge-connecting', label: 'Bağlanıyor…' },
-  reconnecting: { cls: 'badge-connecting', label: 'Yeniden Bağlanıyor…' },
-  stopped:      { cls: 'badge-stopped',    label: 'Bağlı Değil' },
-  fatal:        { cls: 'badge-stopped',    label: 'Bağlanamadı' },
+  connected:    { cls: 'badge-connected',  key: 'state.connected' },
+  connecting:   { cls: 'badge-connecting', key: 'state.connecting' },
+  reconnecting: { cls: 'badge-connecting', key: 'state.reconnecting' },
+  stopped:      { cls: 'badge-stopped',    key: 'state.stopped' },
+  fatal:        { cls: 'badge-stopped',    key: 'state.fatal' },
 };
 
 // ---------------------------------------------------------------- AUTH GATE
@@ -54,13 +54,22 @@ function renderStatus(s) {
   const meta = STATES[s.state] ?? STATES.stopped;
   const badge = $('connBadge');
   badge.className = 'badge ' + meta.cls;
-  badge.textContent = meta.label;
+  badge.textContent = t(meta.key);
+
+  // Kalici hata / yeniden deneme nedeni (409, 429, sertifika...) kullaniciya
+  // gorunur kalsin; yalnizca rozet "Bağlanamadı" nedenini anlatmiyordu.
+  const cm = $('connMsg');
+  if (cm && (s.state === 'fatal' || s.state === 'reconnecting') && s.message) {
+    cm.textContent = s.message; cm.hidden = false; cm.dataset.sticky = '1';
+  } else if (cm && cm.dataset.sticky) {
+    cm.hidden = true; delete cm.dataset.sticky;
+  }
 
   // Bağlan / Bağlantıyı Kes butonu (duruma göre)
   const live = s.state === 'connected' || s.state === 'connecting' || s.state === 'reconnecting';
   const btn = $('btnConn');
   if (btn) {
-    btn.textContent = live ? 'Bağlantıyı Kes' : 'Bağlan';
+    btn.textContent = live ? t('conn.disconnect') : t('conn.connect');
     btn.className = live ? 'btn btn-secondary' : 'btn btn-primary';
     btn.style.color = live ? 'var(--danger)' : '';
     btn.style.borderColor = live ? 'rgba(255,92,92,.4)' : '';
@@ -72,8 +81,8 @@ function renderStatus(s) {
   const asEl = $('activeSessions');
   if (asEl) {
     const parts = [];
-    if (ta > 0) parts.push('<span class="as-item as-cli"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m4 17 6-6-6-6"/><path d="M12 19h8"/></svg>Uzak CLI etkin' + (ta > 1 ? ' (' + ta + ')' : '') + '</span>');
-    if (sa > 0) parts.push('<span class="as-item as-screen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="12" x="3" y="4" rx="2"/><path d="M7 20h10M12 16v4"/></svg>Ekran paylaşımı etkin' + (sa > 1 ? ' (' + sa + ')' : '') + '</span>');
+    if (ta > 0) parts.push('<span class="as-item as-cli"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m4 17 6-6-6-6"/><path d="M12 19h8"/></svg>' + esc(t('sess.cli')) + '' + (ta > 1 ? ' (' + ta + ')' : '') + '</span>');
+    if (sa > 0) parts.push('<span class="as-item as-screen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="12" x="3" y="4" rx="2"/><path d="M7 20h10M12 16v4"/></svg>' + esc(t('sess.screen')) + '' + (sa > 1 ? ' (' + sa + ')' : '') + '</span>');
     asEl.innerHTML = parts.join('');
     asEl.hidden = parts.length === 0;
   }
@@ -82,21 +91,21 @@ function renderStatus(s) {
   const list = $('tunnelList');
   if (tunnels.length && tunnels[0].hostnames) {
     const rows = [];
-    for (const t of tunnels) {
-      for (const h of (t.hostnames || [])) {
+    for (const tn of tunnels) {
+      for (const h of (tn.hostnames || [])) {
         rows.push(`<div class="tunnel-row">
           <div style="min-width:0">
             <a class="tunnel-url" href="#" data-url="https://${h}">https://${h}</a>
-            <div class="tunnel-target">→ ${t.target || 'yerel servis'}</div>
+            <div class="tunnel-target">→ ${esc(tn.target || t('tunnels.localService'))}</div>
           </div>
-          <button class="btn-ghost" data-open="https://${h}">Aç</button>
+          <button class="btn-ghost" data-open="https://${h}">${esc(t('tunnels.open'))}</button>
         </div>`);
       }
     }
-    list.innerHTML = rows.join('') || `<div class="empty">Açık tünel yok. Tünelleri web panelinden oluşturun.</div>`;
+    list.innerHTML = rows.join('') || t('tunnels.empty');
     list.querySelectorAll('[data-open]').forEach(b => b.addEventListener('click', () => api().OpenBrowser(b.dataset.open)));
   } else {
-    list.innerHTML = `<div class="empty">Açık tünel yok. Tünelleri <b>web panelinden</b> (zorven.app) oluşturun.</div>`;
+    list.innerHTML = t('tunnels.empty');
   }
 }
 
@@ -131,26 +140,26 @@ function lpRender(){
   $('lfBody').innerHTML = vis.map(r => '<tr><td style="color:var(--fg-subtle)">' + esc((r.ts||'').slice(11,19)) +
     '</td><td class="lp-m">' + esc(r.method||'GET') + '</td><td class="path" title="' + esc(r.path) + '">' + esc(r.path||'/') +
     '</td><td class="' + lpCls(r.status) + '">' + (r.status||200) + '</td><td style="color:var(--fg-muted)">' + (r.duration_ms||0) + 'ms</td></tr>').join('');
-  $('lfCount').textContent = logCount + ' istek';
+  $('lfCount').textContent = t('log.count', { n: logCount });
 }
 function pushLog(r){
   if (!r) return;
   logCount++; logRows.unshift(r); if (logRows.length > 3000) logRows.pop();
-  if (!$('logPanel').hidden){ if (logLive) lpRender(); else $('lfCount').textContent = logCount + ' istek'; }
+  if (!$('logPanel').hidden){ if (logLive) lpRender(); else $('lfCount').textContent = t('log.count', { n: logCount }); }
 }
 function openLogPanel(){ $('logPanel').hidden = false; try { api().ResizeWindow(1120, 760); } catch {} lpRender(); }
 function closeLogPanel(){ $('logPanel').hidden = true; try { api().ResizeWindow(460, 820); } catch {} }
 $('lfClose').addEventListener('click', closeLogPanel);
-$('lfLive').addEventListener('click', () => { logLive = !logLive; $('lfLive').classList.toggle('paused', !logLive); $('lfLive').textContent = logLive ? '● canlı' : '● duraklatıldı'; if (logLive) lpRender(); });
+$('lfLive').addEventListener('click', () => { logLive = !logLive; $('lfLive').classList.toggle('paused', !logLive); $('lfLive').textContent = t(logLive ? 'log.live' : 'log.paused'); if (logLive) lpRender(); });
 $('lfClear').addEventListener('click', () => { logRows = []; logCount = 0; lpRender(); });
 ['lfMethod','lfStatus','lfQ','lfDur'].forEach(id => $(id).addEventListener('input', lpRender));
 $('lfExport').addEventListener('click', () => {
   const NL = String.fromCharCode(10);
   const vis = logRows.filter(lpMatch);
-  const head = ['ts','method','path','status','duration_ms'].join(',');
+  const head = t('log.csvHeader');
   const lines = vis.map(r => [r.ts, r.method, '"'+(r.path||'').replace(/"/g,'""')+'"', r.status, r.duration_ms].join(','));
   const csv = head + NL + lines.join(NL);
-  const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([csv],{type:'text/csv'})); a.download = 'zorven-loglar.csv'; a.click();
+  const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([csv],{type:'text/csv'})); a.download = t('log.csvFile'); a.click();
 });
 
 // ---------------------------------------------------------------- BUTONLAR
@@ -200,49 +209,172 @@ async function loadVersion() {
 }
 $('btnCheckUpdate').addEventListener('click', async () => {
   const btn = $('btnCheckUpdate');
-  btn.disabled = true; btn.textContent = 'Denetleniyor…';
+  btn.disabled = true; btn.textContent = t('set.checking');
   $('btnInstallUpdate').hidden = true;
   try {
     const u = await api().CheckForUpdate();
     if (u.error) updMsg(u.error, true);
     else if (u.available) {
-      updMsg('Yeni sürüm hazır: v' + u.latest + ' (şu an v' + u.current + ')', false);
+      updMsg(t('upd.available', { latest: u.latest, current: u.current }), false);
       $('btnInstallUpdate').hidden = false;
-    } else updMsg('En güncel sürümü kullanıyorsunuz (v' + u.current + ').', false);
-  } catch { updMsg('Güncelleme denetlenemedi.', true); }
-  btn.disabled = false; btn.textContent = 'Güncellemeleri denetle';
+    } else updMsg(t('upd.upToDate', { current: u.current }), false);
+  } catch { updMsg(t('upd.checkFailed'), true); }
+  btn.disabled = false; btn.textContent = t('set.checkUpdate');
 });
 $('btnInstallUpdate').addEventListener('click', async () => {
   const btn = $('btnInstallUpdate');
-  btn.disabled = true; btn.textContent = 'İndiriliyor…';
+  btn.disabled = true; btn.textContent = t('set.downloading');
   const err = await api().InstallUpdate();
-  if (err) { updMsg(err, true); btn.disabled = false; btn.textContent = 'Güncelle ve yeniden başlat'; }
-  else updMsg('Güncelleme kuruldu, uygulama yeniden başlatılıyor…', false);
+  if (err) { updMsg(err, true); btn.disabled = false; btn.textContent = t('set.installUpdate'); }
+  else updMsg(t('upd.installed'), false);
 });
 $('setAutostart').addEventListener('change', async (e) => {
   const err = await api().SetAutostart(e.target.checked);
   if (err) e.target.checked = !e.target.checked; else flashSaved();
 });
 
+// ---------------------------------------------------------------- TAM AĞ KATMANI (Mod B)
+let ntTimer = null;
+let ntBusy = false;
+let ntState = null;
+
+function ntRender(v) {
+  ntState = v;
+  const badge = $('ntBadge');
+  const btn = $('btnNtToggle');
+  // Yonetici olarak calisan masaustu tam ag katmanini kendi istemcisinde acar
+  // (embedded); servis aranmaz. Eskiden yalniz service_found bakildigindan kart
+  // 'Servis yok' gosterip Aç/Kapat dugmesini devre disi birakiyordu.
+  const usable = (v.service_found || v.embedded) && !v.need_elevation;
+  if (v.active) { badge.className = 'badge badge-connected'; badge.textContent = t('nt.on'); }
+  else if (!usable) { badge.className = 'badge badge-stopped'; badge.textContent = t(v.need_elevation ? 'nt.noAccess' : 'nt.noService'); }
+  else { badge.className = 'badge badge-stopped'; badge.textContent = t('nt.off'); }
+
+  btn.textContent = t(v.active ? 'nt.btnOff' : 'nt.btnOn');
+  btn.disabled = ntBusy || !usable || (!v.active && v.ok && !v.server_tun);
+  btn.className = v.active ? 'btn btn-secondary' : 'btn btn-primary';
+
+  $('ntDetails').hidden = !(v.active || (usable && v.ip));
+  $('ntIP').textContent = v.ip || '—';
+  $('ntPool').textContent = v.pool || '—';
+  $('ntIface').textContent = v.interface || '—';
+  $('ntDNS').textContent = !v.active ? '—'
+    : v.dns_ok ? ('*.zorven.internal (' + (v.dns_method || 'ok') + ')')
+    : (t('nt.dnsNotRegistered') + (v.dns_note ? ': ' + v.dns_note : ''));
+
+  const peers = v.peers || [];
+  $('ntPeers').hidden = peers.length === 0;
+  $('ntPeers').innerHTML = peers.map(p => {
+    const cls = !p.online ? 'off' : (p.path === 'direct' ? 'direct' : 'relay');
+    const label = !p.online ? t('nt.peerOffline')
+      : p.path === 'direct' ? (t('nt.peerDirect') + (p.rtt_ms ? ' · ' + p.rtt_ms + ' ms' : ''))
+      : t('nt.peerRelay');
+    return '<div class="nt-peer"><span><span class="nt-pname">' + esc(p.name) + '</span><span class="nt-pip">' + esc(p.ip) +
+      '</span></span><span class="nt-path ' + cls + '">' + esc(label) + '</span></div>';
+  }).join('');
+
+  let err = v.error || '';
+  if (v.ok && !v.active && !v.server_tun && (v.service_found || v.embedded)) {
+    // Eski servis "connected" alanini bilmez: reason yoksa eski mesaj.
+    if (v.embedded && !v.connected) err = t('nt.errNotConnected', { reason: v.reason ? ' (' + v.reason + ')' : '' });
+    else if (!v.connected && v.reason) err = t('nt.errSvcNotConnected', { reason: v.reason });
+    else if (v.connected) err = t('nt.errNotOffered');
+    else err = t('nt.errNotOfferedOrWaiting');
+  }
+  $('ntErr').textContent = err; $('ntErr').hidden = !err;
+  $('ntHint').textContent = v.hint || ''; $('ntHint').hidden = !v.hint;
+  $('btnNtInstall').hidden = !(v.need_service && v.can_install);
+  $('btnNtElevate').hidden = !(v.need_elevation && v.can_elevate);
+  $('ntActions').hidden = $('btnNtInstall').hidden && $('btnNtElevate').hidden;
+}
+
+async function ntRefresh() {
+  if (ntBusy || !api()?.NetTunStatus) return;
+  try { ntRender(await api().NetTunStatus()); } catch (e) { /* sessiz */ }
+}
+
+function startNetTun() {
+  if (ntTimer) return;
+  ntRefresh();
+  ntTimer = setInterval(() => { if (!$('main').hidden) ntRefresh(); }, 5000);
+}
+
+$('btnNtToggle').addEventListener('click', async () => {
+  if (!ntState) return;
+  ntBusy = true; $('btnNtToggle').disabled = true;
+  $('btnNtToggle').textContent = t(ntState.active ? 'nt.closing' : 'nt.opening');
+  try { ntRender(ntState.active ? await api().NetTunDown() : await api().NetTunUp()); }
+  catch (e) { ntRender({ ...ntState, error: String(e) }); }
+  finally { ntBusy = false; ntRender(ntState); }
+});
+
+$('btnNtInstall').addEventListener('click', async () => {
+  $('btnNtInstall').disabled = true;
+  const r = await api().NetTunInstallService();
+  $('ntErr').textContent = r.error || ''; $('ntErr').hidden = !r.error;
+  if (r.message) { $('ntHint').textContent = r.message; $('ntHint').hidden = false; }
+  // UAC sonrasi servis kurulup baslayana kadar durumu sik sorgula.
+  for (let i = 0; r.ok && i < 15; i++) {
+    await new Promise(res => setTimeout(res, 2000));
+    const v = await api().NetTunStatus();
+    if (v.service_found) { ntRender(v); break; }
+  }
+  $('btnNtInstall').disabled = false;
+});
+
+$('btnNtElevate').addEventListener('click', async () => {
+  const r = await api().NetTunRelaunchElevated();
+  if (r && r.error) { $('ntErr').textContent = r.error; $('ntErr').hidden = false; }
+});
+
+// ---------------------------------------------------------------- DIL
+// applyLanguage: arayuz dilini degistirir ve dinamik icerigi yeniden cizer
+// (yeniden baslatma gerekmez). Go tarafi (SetLanguage) tepsiyi ve ajan
+// mesajlarini kendisi gunceller.
+function applyLanguage(lang) {
+  ZI18n.setLang(lang);
+  $('lfLive').textContent = t(logLive ? 'log.live' : 'log.paused');
+  lpRender();
+  if (currentStatus) renderStatus(currentStatus);
+  if (ntState) { ntRender(ntState); ntRefresh(); }
+  updMsg('', false);
+}
+async function loadLanguage() {
+  try {
+    const li = await api().GetLanguage();
+    $('setLanguage').value = li.setting || '';
+    if (li.effective !== ZI18n.getLang()) applyLanguage(li.effective);
+  } catch { /* api hazir degil */ }
+}
+$('setLanguage').addEventListener('change', async (e) => {
+  const err = await api().SetLanguage(e.target.value);
+  if (err) { updMsg(err, true); return; }
+  applyLanguage((await api().GetLanguage()).effective);
+  flashSaved();
+});
+
 // ---------------------------------------------------------------- BAŞLANGIÇ
 window.addEventListener('DOMContentLoaded', async () => {
+  // Go'dan etkin dil gelene kadar tarayici dili (ilk cizimde bos/yanlis dil gorunmesin).
+  ZI18n.setLang(ZI18n.guess());
   for (let i = 0; i < 50 && !api(); i++) await new Promise(r => setTimeout(r, 100));
   if (!api()) return;
+  await loadLanguage();
   loadVersion();
 
   const authed = await api().IsAuthed();
-  if (authed) { showMain(); loadSettings(); renderStatus(await api().GetStatus()); }
+  if (authed) { showMain(); loadSettings(); startNetTun(); renderStatus(await api().GetStatus()); }
   else showAuth();
 
   window.runtime?.EventsOn('status', renderStatus);
   window.runtime?.EventsOn('telemetry', renderTelemetry);
   window.runtime?.EventsOn('request_log', (r) => pushLog(r));
-  window.runtime?.EventsOn('device:approved', () => { showMain(); loadSettings(); });
+  window.runtime?.EventsOn('device:approved', () => { showMain(); loadSettings(); startNetTun(); });
   window.runtime?.EventsOn('device:error', (msg) => {
-    $('browserErr').textContent = msg || 'Giriş başarısız.'; $('browserErr').hidden = false;
+    $('browserErr').textContent = msg || t('auth.loginFailed'); $('browserErr').hidden = false;
     $('browserWaiting').hidden = true; $('btnBrowserLogin').hidden = false; $('btnBrowserLogin').disabled = false;
   });
   window.runtime?.EventsOn('auth:changed', async () => {
-    (await api().IsAuthed()) ? showMain() : showAuth();
+    (await api().IsAuthed()) ? (showMain(), startNetTun()) : showAuth();
   });
 });

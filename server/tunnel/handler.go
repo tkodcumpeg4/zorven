@@ -266,6 +266,18 @@ func (h *Handler) handshake(ctx context.Context, s *Session) error {
 			s.screenCursor = true
 			enabled = append(enabled, protocol.FeatureScreenCursor)
 		}
+		if f == protocol.FeatureScreen2Stats {
+			s.screen2Stats = true
+			enabled = append(enabled, protocol.FeatureScreen2Stats)
+		}
+		if f == protocol.FeatureScreen2Feedback {
+			s.screen2Feedback = true
+			enabled = append(enabled, protocol.FeatureScreen2Feedback)
+		}
+		if f == protocol.FeatureScreen2Video {
+			s.screen2Video = true
+			enabled = append(enabled, protocol.FeatureScreen2Video)
+		}
 		if f == protocol.FeatureScreenFiles {
 			s.screenFiles = true
 			enabled = append(enabled, protocol.FeatureScreenFiles)

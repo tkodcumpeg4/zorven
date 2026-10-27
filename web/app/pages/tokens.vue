@@ -80,6 +80,9 @@ const availableScopes = [
   { id: 'hostnames:write', label: t('tokens.scopeHostnamesWrite'), desc: t('tokens.scopeHostnamesWriteDesc') },
   { id: 'clients:read', label: t('tokens.scopeClientsRead'), desc: t('tokens.scopeClientsReadDesc') },
   { id: 'clients:write', label: t('tokens.scopeClientsWrite'), desc: t('tokens.scopeClientsWriteDesc') },
+  { id: 'net:read', label: t('tokens.scopeNetRead'), desc: t('tokens.scopeNetReadDesc') },
+  { id: 'net:write', label: t('tokens.scopeNetWrite'), desc: t('tokens.scopeNetWriteDesc') },
+  { id: 'net:connect', label: t('tokens.scopeNetConnect'), desc: t('tokens.scopeNetConnectDesc') },
 ]
 
 // --- IP Allowlist State ---

@@ -33,6 +33,10 @@ type Config struct {
 	// HideToTray, pencere kapatilinca cikmak yerine sistem tepsisine gizlensin mi.
 	HideToTray bool `json:"hide_to_tray"`
 
+	// Language, arayuz dili: "tr", "en", "ja"; bos = otomatik (ZORVEN_LANG /
+	// LC_* / LANG / Windows arayuz dili, bkz. client/i18n.Detect).
+	Language string `json:"language,omitempty"`
+
 	// Hizli Port Paylasimi gecmisi
 	LastPort    int   `json:"last_port,omitempty"`
 	RecentPorts []int `json:"recent_ports,omitempty"`

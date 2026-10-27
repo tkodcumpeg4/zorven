@@ -275,12 +275,19 @@ func (s *Store) ListHostRoutes(ctx context.Context) ([]store.HostRoute, error) {
 		        COALESCE(sub.plan,'free'), t.frozen,
 		        COALESCE(rep.clients, '{}') AS replica_clients,
 		        COALESCE(tp.config,'{}'::jsonb), COALESCE(tp.enabled,false),
-		        COALESCE(mt.enabled,false), COALESCE(mt.ca_pem,'')
+		        COALESCE(mc.config,'{}'::jsonb), COALESCE(mc.enabled,false),
+		        COALESCE((SELECT jsonb_agg(jsonb_build_object('id',k.id,'label',k.label,'hash',k.key_hash,'exp',k.expires_at))
+		            FROM tunnel_mcp_keys k WHERE k.tunnel_id = t.id), '[]'::jsonb),
+		        COALESCE(mt.enabled,false),
+		        COALESCE(mt.ca_pem,''),
+		        COALESCE(sc.config,'{}'::jsonb)
 		 FROM hostnames h
 		 JOIN tunnels t ON t.id = h.tunnel_id
 		 LEFT JOIN tunnel_access_policies ap ON ap.tunnel_id = t.id
 		 LEFT JOIN tunnel_traffic_policies tp ON tp.tunnel_id = t.id
+		 LEFT JOIN tunnel_mcp mc ON mc.tunnel_id = t.id
 		 LEFT JOIN tunnel_mtls mt ON mt.tunnel_id = t.id
+		 LEFT JOIN tunnel_security sc ON sc.tunnel_id = t.id
 		 LEFT JOIN subscriptions sub ON sub.tenant_id = t.tenant_id
 		 LEFT JOIN (SELECT tunnel_id, array_agg(client_id) AS clients
 		            FROM tunnel_replicas GROUP BY tunnel_id) rep ON rep.tunnel_id = t.id
@@ -301,7 +308,8 @@ func (s *Store) ListHostRoutes(ctx context.Context) ([]store.HostRoute, error) {
 			&r.Target, &r.Enabled, &r.Proto, &r.Exposure,
 			&r.AccessMode, &r.AccessConfig, &r.AccessEnabled, &r.Plan, &r.Frozen,
 			&r.ReplicaClientIDs, &r.TrafficConfig, &r.TrafficEnabled,
-			&r.MTLSEnabled, &r.MTLSCAPem); err != nil {
+			&r.MCPConfig, &r.MCPEnabled, &r.MCPKeys,
+			&r.MTLSEnabled, &r.MTLSCAPem, &r.SecurityConfig); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

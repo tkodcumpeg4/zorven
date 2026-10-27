@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"github.com/tkodcumpeg4/zorven/client/wgnet"
 	"runtime"
 
 	"github.com/tkodcumpeg4/zorven/shared/protocol"
@@ -13,7 +14,10 @@ var errClipboardTooLarge = errors.New("pano metni gecersiz veya 64 KiB'i asiyor"
 // helloFeatures, Hello'da ilan edilen yetenekler. Imlec ve pano yalniz platform
 // destekliyorsa; pano ayrica --no-clipboard ile ilan edilmez.
 func (a *Agent) helloFeatures() []string {
-	f := []string{protocol.FeatureFlowControl, protocol.FeatureScreenInputStatus, protocol.FeatureScreen2, protocol.FeatureScreen2Layers}
+	f := []string{protocol.FeatureFlowControl, protocol.FeatureScreenInputStatus, protocol.FeatureScreen2, protocol.FeatureScreen2Layers, protocol.FeatureScreen2Stats, protocol.FeatureScreen2Feedback}
+	if videoEncoderAvailable() {
+		f = append(f, protocol.FeatureScreen2Video)
+	}
 	if cursorSupported() {
 		f = append(f, protocol.FeatureScreenCursor)
 	}
@@ -24,8 +28,17 @@ func (a *Agent) helloFeatures() []string {
 		f = append(f, protocol.FeatureScreenFiles)
 	}
 	f = append(f, protocol.FeatureUDPProbe)
+	if !a.NoPosture {
+		f = append(f, protocol.FeaturePosture, protocol.FeatureDeviceCert)
+	}
 	if !a.NoNet {
 		f = append(f, protocol.FeatureWGNet, protocol.FeatureWGRelay)
+		if !a.NoP2P && !wgnet.DirectDisabledByEnv() {
+			f = append(f, protocol.FeatureWGPunch)
+		}
+		if a.tunSupported() {
+			f = append(f, protocol.FeatureWGTun, protocol.FeatureWGALog)
+		}
 	}
 	return f
 }

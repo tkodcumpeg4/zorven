@@ -15,9 +15,11 @@ import (
 
 	"github.com/tkodcumpeg4/zorven/server/accesslog"
 	"github.com/tkodcumpeg4/zorven/server/bandwidth"
+	"github.com/tkodcumpeg4/zorven/server/botguard"
 	"github.com/tkodcumpeg4/zorven/server/door"
 	"github.com/tkodcumpeg4/zorven/server/events"
 	"github.com/tkodcumpeg4/zorven/server/ipfilter"
+	"github.com/tkodcumpeg4/zorven/server/mcpconf"
 	"github.com/tkodcumpeg4/zorven/server/ratelimit"
 	"github.com/tkodcumpeg4/zorven/server/reqlog"
 	"github.com/tkodcumpeg4/zorven/server/store"
@@ -106,6 +108,17 @@ type Handler struct {
 	// anahtarindan (store.DoorRoute.PublicIP) cozer. nil/bos donus = PlatformDomain.
 	PortHost func(publicIP string) string
 
+	// MCP tunel modu (MCP M3/M4). MCPVerifier + MCPIssuer + MCPUsers, auth=oauth
+	// icin gerekir; yoksa oauth modundaki MCP tuneller 503 doner (fail-closed).
+	MCPVerifier MCPVerifier
+	// MCPIssuer, OAuth AS'in kok URL'si (PRM authorization_servers), or. https://zorven.app.
+	MCPIssuer string
+	MCPUsers  MCPUserLookup
+	// MCPLog, MCP cagri loglarini yazar (nil olabilir).
+	MCPLog   *MCPLogger
+	mcpOnce  sync.Once
+	mcpState *mcpState
+
 	// rr (FAZ 5 / HA): hostname basina round-robin sayaci. Cok-replikalı
 	// tunellerde istekleri cevrimici agent'lar arasinda dagitir. Zero-value hazir.
 	rr roundRobin
@@ -113,6 +126,19 @@ type Handler struct {
 	// rejectLim, ingress'in proxy'lemeden reddettigi isteklerin loglanmasini
 	// tunel basina sinirlar (tarama/bot seli request_logs'u doldurmasin).
 	rejectLim rejectLimiter
+
+	// Bot korumasi (B1-B3). BotKey: main.go'nun ziyaretci sirrindan HKDF ile
+	// turettigi ana anahtar (bos ise surece ozel rastgele anahtar). TLSFP: el
+	// sikismada yakalanan ClientHello parmak izleri (nil = TLS sinyali yok).
+	// BotResolver: dogrulanmis bot DNS'i (nil = net.DefaultResolver).
+	BotKey      []byte
+	TLSFP       *botguard.TLSFPStore
+	BotResolver botguard.Resolver
+	botOnce     sync.Once
+	botSt       *botState
+
+	// wsLive: acik WebSocket'ler (Z2 yeniden degerlendirme; bkz. wslive.go).
+	wsLive wsRegistry
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -182,7 +208,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.IPFilter != nil && tun.TenantID != "" {
 		ip := clientIP(r)
 		allowed, err := h.IPFilter.CheckAllowed(r.Context(), tun.TenantID, tun.TunnelID, ip)
-		if err == nil && !allowed {
+		// Hata (kural varken cozumlenemeyen istemci IP'si) = RET (fail-closed).
+		if err != nil || !allowed {
 			h.Log.Warn("IP izin listesi tarafindan engellendi",
 				"ip", ip, "tunel", tun.TunnelID, "tenant", tun.TenantID, "hostname", tun.FQDN)
 			writeError(w, r, http.StatusForbidden, protocol.CodeIPForbidden,
@@ -190,6 +217,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.logReject(tun, r, http.StatusForbidden, RejectIPForbidden, started)
 			return
 		}
+	}
+
+	// ZTNA Z3: tunel seviyesinde ulke (Geo) kurali. IP filtresinden sonra,
+	// ziyaretci giris uclarindan ONCE: yasakli bolgeden giris sayfasina da ulasilamaz.
+	sec := h.Router.SecurityFor(tun.TunnelID)
+	if sec != nil && h.enforceTunnelGeo(w, r, tun, sec, started) {
+		return
 	}
 
 	// Ziyaretçi OAuth uçları (/_zva/start, /_zva/finish) erişim denetiminden
@@ -207,12 +241,55 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Bot korumasi: /.zorven/* tunel host'unda Zorven'e ayrilmistir (PoW dogrulama
+	// ucu) ve ASLA tunele iletilmez. Sonra B2 hiz siniri ve B1/B3 bot sorgusu;
+	// Geo'dan sonra, WAF ve erisim denetiminden ONCE (ucuz ve ucuz-reddeden
+	// kontroller once; sorgu cozulmeden WAF/Basic-parola isi yapilmaz).
+	if reservedZorvenPath(r.URL.Path) {
+		h.serveReserved(w, r, tun, sec, started)
+		return
+	}
+	if sec != nil && (h.enforceRate(w, r, tun, sec, started) || h.enforceBot(w, r, tun, sec, started)) {
+		return
+	}
+
+	// ZTNA Z3: tunel WAF'i. Kimlik dogrulamadan ONCE calisir (giris formu ve
+	// yetkisiz yuzey de korunur); Zorven'in kendi /_zva/ /_zvb/ uclari muaftir.
+	if sec != nil && h.enforceTunnelWAF(w, r, tun, sec, started) {
+		return
+	}
+
 	// Tünel erişim denetimi (Basic Auth / OAuth). Politika yoksa/kapalıysa
 	// tünel herkese açıktır (geriye uyumlu). Reddedilirse yanıt yazılmıştır.
-	arec := &recorder{ResponseWriter: w, status: http.StatusOK}
-	if !h.enforceAccess(arec, r, tun) {
-		h.logReject(tun, r, arec.status, accessRejectReason(arec.status), started)
-		return
+	var mc *mcpReq
+	if rt, ok := h.Router.mcpFor(tun.TunnelID); ok {
+		// MCP modu: korunan kaynak metadata'si ingress'te yanitlanir (upstream'e gitmez).
+		if h.serveMCPMetadata(w, r, rt) {
+			return
+		}
+		ident := mcpIdent{Method: mcpconf.AuthNone}
+		if rt.cfg.Auth != mcpconf.AuthNone {
+			// oauth|apikey: klasik erisim politikasi yerine MCP kimlik dogrulamasi,
+			// TUM yollarda (kimliksiz hicbir bayt upstream'e ulasmaz).
+			id, ok := h.mcpAuthenticate(w, r, tun, rt, started)
+			if !ok {
+				return
+			}
+			ident = id
+		} else {
+			arec := &recorder{ResponseWriter: w, status: http.StatusOK}
+			if !h.enforceAccess(arec, r, tun) {
+				h.logReject(tun, r, arec.status, accessRejectReason(arec.status), started)
+				return
+			}
+		}
+		mc = h.mcpBegin(r, tun, rt, ident, started)
+	} else {
+		arec := &recorder{ResponseWriter: w, status: http.StatusOK}
+		if !h.enforceAccess(arec, r, tun) {
+			h.logReject(tun, r, arec.status, accessRejectReason(arec.status), started)
+			return
+		}
 	}
 
 	// FAZ 4: ücretsiz katman platform-domain tünellerinde ilk ziyarette uyarı
@@ -279,6 +356,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	// Z3: politika "challenge" eylemi -> ziyaretci OAuth'u (yoksa 403).
+	if pol.challenge {
+		if ok, st := h.enforceChallenge(w, r, tun); !ok {
+			h.logReject(tun, r, st, RejectChallenge, started)
+			return
+		}
+	}
 	tp = mergePolicyHeaders(tp, pol)
 
 	// Yönlendirme (redirect) kurallari: eslesirse istemciye is gonderilmeden
@@ -298,6 +382,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"Bu tunel icin istek hizi siniri asildi.")
 		h.logReject(tun, r, http.StatusTooManyRequests, RejectRateLimited, started)
 		return
+	}
+
+	// MCP: govde incelemesi (arac izin/ret, hiz siniri, log) ve yanit sarmali.
+	if mc != nil {
+		if mc.prepare(w, r) {
+			return
+		}
+		mw := newMCPWriter(w, mc)
+		defer mw.finish()
+		w = mw
 	}
 
 	var runtimeState *bandwidth.TenantRuntimeState
@@ -349,7 +443,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.proxy(w, r, sess, tun.TunnelID, tun.TenantID, runtimeState, tp)
+	h.proxy(w, r, sess, tun.TunnelID, tun.TenantID, runtimeState, tp, mc)
 }
 
 // enforceAccess, tunelin erişim denetimi politikasını uygular.
@@ -368,14 +462,15 @@ func (h *Handler) enforceAccess(w http.ResponseWriter, r *http.Request, tun stor
 	return true
 }
 
-func (h *Handler) proxy(w http.ResponseWriter, r *http.Request, sess *tunnel.Session, tunnelID, tenantID string, runtimeState *bandwidth.TenantRuntimeState, tp *trafficPolicy) {
+func (h *Handler) proxy(w http.ResponseWriter, r *http.Request, sess *tunnel.Session, tunnelID, tenantID string, runtimeState *bandwidth.TenantRuntimeState, tp *trafficPolicy, mc *mcpReq) {
 	ctx := r.Context()
 	hasBody := r.Body != nil && r.ContentLength != 0
 
 	// FAZ 2: opt-in tam yakalama (kapaliyken sifir maliyet). Istek govdesini
 	// tavana kadar yakala; yanit writeResponse'da tee edilir.
 	var capt *reqlog.Capture
-	if h.Captures != nil && h.Captures.Enabled(tenantID) {
+	// MCP modunda yakalama ZORLA kapali: arac argumanlari/sonuclari sir icerebilir.
+	if mc == nil && h.Captures != nil && h.Captures.Enabled(tenantID) {
 		capt = &reqlog.Capture{
 			ID:         newCaptureID(),
 			TunnelID:   tunnelID,
@@ -416,6 +511,9 @@ func (h *Handler) proxy(w http.ResponseWriter, r *http.Request, sess *tunnel.Ses
 	// FAZ 6: trafik politikasi istek basliklari (backend'e iletilen).
 	reqHeaders := forwardHeaders(r)
 	tp.applyToRequest(http.Header(reqHeaders))
+	if mc != nil {
+		mc.applyUpstream(reqHeaders)
+	}
 
 	ex, err := sess.SendRequest(ctx, protocol.HTTPRequest{
 		TunnelID:      tunnelID,
@@ -455,6 +553,24 @@ func (h *Handler) proxy(w http.ResponseWriter, r *http.Request, sess *tunnel.Ses
 		}
 	}
 
+	headTimeout := UpstreamTimeout
+	var idle time.Duration
+	if mc != nil {
+		headTimeout = mc.rt.cfg.HeadTimeout()
+		idle = mc.rt.cfg.IdleTimeout()
+		// Uzun omurlu akislarda istemci kopmasi, upstream sessizken bile fark
+		// edilir ve ajana iptal bildirilir.
+		stop := make(chan struct{})
+		defer close(stop)
+		go func() {
+			select {
+			case <-ctx.Done():
+				sess.SendCancel(context.Background(), ex.ReqID(), "client_disconnected")
+			case <-stop:
+			}
+		}()
+	}
+
 	// Yanit basligini bekle.
 	select {
 	case <-ctx.Done():
@@ -462,7 +578,7 @@ func (h *Handler) proxy(w http.ResponseWriter, r *http.Request, sess *tunnel.Ses
 		sess.SendCancel(context.Background(), ex.ReqID(), "client_disconnected")
 		return
 
-	case <-time.After(UpstreamTimeout):
+	case <-time.After(headTimeout):
 		writeError(w, r, http.StatusGatewayTimeout, protocol.CodeUpstreamTimeout,
 			"Istemci zamaninda yanit vermedi.")
 		return
@@ -480,11 +596,11 @@ func (h *Handler) proxy(w http.ResponseWriter, r *http.Request, sess *tunnel.Ses
 			capt.Status = head.Status
 			capt.RespHeaders = head.Headers
 		}
-		h.writeResponse(w, head, ex, capt, tp)
+		h.writeResponse(w, head, ex, capt, tp, idle, sess)
 	}
 }
 
-func (h *Handler) writeResponse(w http.ResponseWriter, head tunnel.ResponseHead, ex *tunnel.Exchange, capt *reqlog.Capture, tp *trafficPolicy) {
+func (h *Handler) writeResponse(w http.ResponseWriter, head tunnel.ResponseHead, ex *tunnel.Exchange, capt *reqlog.Capture, tp *trafficPolicy, idle time.Duration, sess *tunnel.Session) {
 	dst := w.Header()
 	for k, vals := range head.Headers {
 		lk := strings.ToLower(k)
@@ -514,6 +630,14 @@ func (h *Handler) writeResponse(w http.ResponseWriter, head tunnel.ResponseHead,
 	if capt != nil {
 		out = io.MultiWriter(out, &captureWriter{w: io.Discard, dst: &capt.RespBody, truncated: &capt.RespBodyTruncated, max: h.Captures.MaxBody()})
 	}
+	if idle > 0 {
+		// MCP: N saniye hic bayt gelmeyen akis temizlenir (asili/sizdirilmis baglanti).
+		t := time.AfterFunc(idle, func() {
+			sess.SendCancel(context.Background(), ex.ReqID(), "idle_timeout")
+		})
+		defer t.Stop()
+		out = &idleResetWriter{w: out, t: t, d: idle}
+	}
 	if _, err := io.Copy(out, ex.Body()); err != nil {
 		h.Log.Debug("yanit govdesi yazilirken kesildi", "hata", err)
 	}
@@ -538,12 +662,16 @@ func (h *Handler) clientCertOK(r *http.Request, tunnelID string) bool {
 	for _, c := range r.TLS.PeerCertificates[1:] {
 		inter.AddCert(c)
 	}
-	_, err := r.TLS.PeerCertificates[0].Verify(x509.VerifyOptions{
+	leaf := r.TLS.PeerCertificates[0]
+	_, err := leaf.Verify(x509.VerifyOptions{
 		Roots:         pool,
 		Intermediates: inter,
 		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
 	})
-	return err == nil
+	if err != nil {
+		return false
+	}
+	return true
 }
 
 // sanitizeSetCookie, Set-Cookie degerinden platform domainine (veya onun ust
@@ -605,13 +733,18 @@ func forwardHeaders(r *http.Request) map[string][]string {
 		}
 	}
 
+	setForwardedHeaders(out, r)
+	return out
+}
+
+// setForwardedHeaders, X-Forwarded-* basliklarini yazar: onceki zincir korunur,
+// gercek ziyaretci IP'si sona eklenir; Proto ve Host her zaman sunucunun gordugudur.
+func setForwardedHeaders(out map[string][]string, r *http.Request) {
 	proto := "http"
 	if r.TLS != nil {
 		proto = "https"
 	}
 	ip := clientIP(r)
-
-	// Zincirdeki onceki proxy'lerin degerini koru, sonuna ekle.
 	if prior, ok := out["X-Forwarded-For"]; ok {
 		out["X-Forwarded-For"] = []string{strings.Join(prior, ", ") + ", " + ip}
 	} else {
@@ -619,7 +752,6 @@ func forwardHeaders(r *http.Request) map[string][]string {
 	}
 	out["X-Forwarded-Proto"] = []string{proto}
 	out["X-Forwarded-Host"] = []string{r.Host}
-	return out
 }
 
 func clientIP(r *http.Request) string {
@@ -751,4 +883,16 @@ func agentPath(u *url.URL) string {
 		p = "/"
 	}
 	return strings.ReplaceAll(p, "@", "%40")
+}
+
+// idleResetWriter, her yazimda idle zamanlayicisini sifirlar.
+type idleResetWriter struct {
+	w io.Writer
+	t *time.Timer
+	d time.Duration
+}
+
+func (i *idleResetWriter) Write(p []byte) (int, error) {
+	i.t.Reset(i.d)
+	return i.w.Write(p)
 }

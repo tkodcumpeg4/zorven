@@ -10,6 +10,7 @@ const {
   init,
   loginWithEmail,
   signUpWithEmail,
+  resendVerificationEmail,
   loginWithBetterAuthGithub,
   loginWithBetterAuthGoogle,
   loginWithKey,
@@ -33,6 +34,36 @@ const keyInput = ref('')
 
 const error = ref('')
 const loading = ref(false)
+// Giriş "e-posta doğrulanmadı" ile reddedildi (ilk kayıt ya da süreli yeniden doğrulama).
+const needsReverify = ref(false)
+const resendBusy = ref(false)
+const resendDone = ref(false)
+// Kayıt CAPTCHA'sı (platform CAPTCHA açıksa widget gösterilir).
+const captcha = useSignupCaptcha()
+const captchaEl = ref<HTMLElement | null>(null)
+watch([activeTab, captchaEl], async ([tab, el]) => {
+  if (tab === 'signup' && el) {
+    await nextTick()
+    await captcha.mount(el)
+  } else if (tab !== 'signup') {
+    captcha.unmount()
+  }
+})
+onMounted(() => { captcha.loadConfig() })
+onBeforeUnmount(() => captcha.unmount())
+
+async function resendVerification() {
+  resendBusy.value = true
+  resendDone.value = false
+  try {
+    await resendVerificationEmail(email.value.trim())
+    resendDone.value = true
+  } catch (e: any) {
+    error.value = e?.message || t('auth.verifyResendFailed')
+  } finally {
+    resendBusy.value = false
+  }
+}
 // Urun duyurusu e-postasi (opt-in): ISARETSIZ baslar, onceden secilmez.
 const announceOptIn = ref(false)
 const { setPending: setAnnouncePending } = useAnnouncementConsent()
@@ -120,6 +151,8 @@ onMounted(async () => {
 
 async function handleSignIn() {
   error.value = ''
+  needsReverify.value = false
+  resendDone.value = false
   if (!email.value.trim() || !password.value) {
     error.value = t('auth.errEmailPassword')
     return
@@ -129,6 +162,7 @@ async function handleSignIn() {
     await loginWithEmail(email.value.trim(), password.value)
   } catch (err: any) {
     error.value = err.message || t('auth.errSigninFailed')
+    needsReverify.value = err?.code === 'EMAIL_NOT_VERIFIED'
   } finally {
     loading.value = false
   }
@@ -148,11 +182,15 @@ async function handleSignUp() {
     error.value = t('auth.errPasswordMin')
     return
   }
+  if (captcha.enabled.value && !captcha.token.value) {
+    error.value = t('auth.captchaRequired')
+    return
+  }
   loading.value = true
   try {
     // Secim (evet/hayir) once saklanir: dogrulama e-postasi veya oturum sonrasi panelde uygulanir.
     setAnnouncePending(announceOptIn.value, email.value.trim())
-    const r = await signUpWithEmail(email.value.trim(), password.value, name.value.trim())
+    const r = await signUpWithEmail(email.value.trim(), password.value, name.value.trim(), captcha.token.value)
     if (r.needsVerification) {
       // Hesap oluştu ama oturum açılmadı: e-posta doğrulama ekranını göster.
       signedUpEmail.value = email.value.trim()
@@ -160,6 +198,8 @@ async function handleSignUp() {
     // needsVerification false ise oturum açıldı; slot render edilir.
   } catch (err: any) {
     error.value = err.message || t('auth.errSignupFailed')
+    // CAPTCHA jetonu tek kullanimlik: başarısız denemeden sonra yeniden çözülmeli.
+    if (captcha.enabled.value) captcha.reset()
   } finally {
     loading.value = false
   }
@@ -352,8 +392,16 @@ async function handleKeySubmit() {
       <!-- Error Alert -->
       <div v-if="error" class="mt-4 flex items-start gap-2 rounded-lg border border-danger/30 bg-danger/10 p-3 text-xs text-danger">
         <Icon name="lucide:alert-circle" class="size-4 shrink-0 mt-0.5" />
-        <span>{{ error }}</span>
+        <span>
+          {{ error }}
+          <template v-if="needsReverify && activeTab === 'signin'">
+            <button type="button" class="ml-1 cursor-pointer underline" :disabled="resendBusy" @click="resendVerification">{{ t('auth.verifyResend') }}</button>
+          </template>
+        </span>
       </div>
+      <p v-if="resendDone && activeTab === 'signin'" class="mt-2 flex items-center gap-1.5 text-xs text-emerald-400">
+        <Icon name="lucide:mail-check" class="size-3.5" />{{ t('auth.verifyResent') }}
+      </p>
 
       <!-- Tab: Giriş Yap (Email & Password) -->
       <form v-if="activeTab === 'signin'" class="mt-4 space-y-3.5" @submit.prevent="handleSignIn">
@@ -491,6 +539,13 @@ async function handleKeySubmit() {
           />
         </div>
 
+        <!-- Zorven CAPTCHA (platform CAPTCHA açıksa) -->
+        <div v-if="captcha.enabled.value" class="min-h-[3.5rem]">
+          <div ref="captchaEl" />
+          <p v-if="captcha.status.value === 'loading'" class="mt-1 text-[11px] text-fg-subtle">{{ t('auth.captchaLoading') }}</p>
+          <p v-else-if="captcha.status.value === 'error'" class="mt-1 text-[11px] text-danger">{{ t('auth.captchaUnavailable') }}</p>
+        </div>
+
         <label class="flex cursor-pointer items-start gap-2 text-xs leading-relaxed text-fg-muted">
           <input v-model="announceOptIn" type="checkbox" class="mt-0.5 size-4 shrink-0 accent-[var(--color-accent,#3ddc84)]">
           <span>{{ t('auth.announceOptIn') }}</span>
@@ -498,7 +553,7 @@ async function handleKeySubmit() {
 
         <button
           type="submit"
-          :disabled="loading"
+          :disabled="loading || (captcha.enabled.value && !captcha.token.value)"
           class="flex w-full cursor-pointer items-center justify-center gap-2 rounded-md bg-accent px-4 py-2.5 text-sm font-medium text-on-accent transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
         >
           <Icon v-if="loading" name="lucide:loader-circle" class="size-4 animate-spin" />

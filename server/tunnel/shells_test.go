@@ -10,9 +10,9 @@ import (
 func TestSanitizeShells(t *testing.T) {
 	in := []protocol.ShellInfo{
 		{ID: "zsh", Name: "Zsh", Path: "/bin/zsh"},
-		{ID: "zsh", Name: "dup", Path: "/x"},            // tekrar
-		{ID: "../etc", Name: "kotu", Path: "/x"},       // gecersiz ID
-		{ID: "Bash", Name: "buyuk harf", Path: "/x"},   // gecersiz ID
+		{ID: "zsh", Name: "dup", Path: "/x"},         // tekrar
+		{ID: "../etc", Name: "kotu", Path: "/x"},     // gecersiz ID
+		{ID: "Bash", Name: "buyuk harf", Path: "/x"}, // gecersiz ID
 		{ID: "bash", Name: "", Path: strings.Repeat("a", 1000)},
 	}
 	out, def := sanitizeShells(in, "fish")

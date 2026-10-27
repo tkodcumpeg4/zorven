@@ -15,6 +15,7 @@ import (
 
 	"github.com/tkodcumpeg4/zorven/server/ratelimit"
 	"github.com/tkodcumpeg4/zorven/server/store"
+	"github.com/tkodcumpeg4/zorven/server/tunsec"
 )
 
 // Router, hostname -> tunel eslestirmesini BELLEKTE tutar.
@@ -49,7 +50,7 @@ type Router struct {
 	policies map[string][]*compiledPolicy
 	// geo, Geo/IP cozumleyicisi (FAZ 1 Part 2 / F03a). nil ise ozellik kapali;
 	// Geo kosullari eslesmez ama istek normal akisina devam eder.
-	geo *geoResolver
+	geo geoLookuper
 
 	// lb (FAZ 4 / F21): saglik tablosu + acik istek sayaclari. Deger alani:
 	// router tek sefer kurulur ve pointer ile paylasilir.
@@ -81,6 +82,16 @@ type Router struct {
 	// mTLS istiyorsa istemci sertifikasini BU havuza gore yeniden dogrular (yol
 	// yonlendirmesinde hedef tunelin CA'si host'unkinden farkli olabilir).
 	mtlsByTunnel map[string]*x509.CertPool
+
+	// mcp (MCP M3): tunelID -> parse edilmis MCP ayari. Yalniz etkin tuneller.
+	mcp map[string]*mcpRoute
+
+	// sec (ZTNA Z3): tunelID -> derlenmis WAF/Geo ayari. Yalniz bir sey acik olan
+	// tuneller icin doldurulur; Reload'da BIR KEZ derlenir.
+	sec map[string]*tunsec.Compiled
+	// SecurityGate, planin WAF block / Geo hakki var mi (Pro+). nil = kapi yok
+	// (open core): hicbir sey kisitlanmaz. main.go baslangicta ayarlar.
+	SecurityGate func(plan string) bool
 
 	// reloadMu, Reload'lari serilestirir (O8): es zamanli iki Reload'dan eski
 	// olanin yenisini ezmesi ve limiter onbelleginin yarismasi engellenir.
@@ -119,12 +130,87 @@ func (r *Router) SetGeoResolver(path string) error {
 	if err != nil {
 		return err
 	}
+	r.swapGeo(g)
+	return nil
+}
+
+// SetGeoPath, ZTNA Z3 icin otomatik yenilenen Geo cozumleyicisini baglar. Dosya
+// henuz yoksa hata vermez: belirince (mtime denetimiyle) yuklenir, o zamana dek
+// ulke "unknown" sayilir. Dosya yuklu mu bilgisi donerek log'a yazilabilir.
+func (r *Router) SetGeoPath(path string) (loaded bool) {
+	g := newAutoGeoResolver(path)
+	r.swapGeo(g)
+	return g.loaded()
+}
+
+func (r *Router) swapGeo(g *geoResolver) {
 	r.mu.Lock()
 	old := r.geo
-	r.geo = g
+	if g == nil {
+		r.geo = nil
+	} else {
+		r.geo = g
+	}
 	r.mu.Unlock()
-	old.close()
-	return nil
+	if og, ok := old.(*geoResolver); ok {
+		og.close()
+	}
+}
+
+// geoLookup, istemci IP'si icin Geo bilgisini doner (cozucu yoksa ok=false).
+func (r *Router) geoLookup(ip string) ipInfo {
+	r.mu.RLock()
+	g := r.geo
+	r.mu.RUnlock()
+	if g == nil {
+		return ipInfo{}
+	}
+	return g.lookup(ip)
+}
+
+// GeoLoaded, Geo veritabani (mmdb) su an yuklu mu.
+func (r *Router) GeoLoaded() bool {
+	r.mu.RLock()
+	g := r.geo
+	r.mu.RUnlock()
+	gr, ok := g.(*geoResolver)
+	return ok && gr.loaded()
+}
+
+// Country, tunsec.CountryResolver uygulamasi: ulke cozulemezse ok=false ("unknown").
+func (r *Router) Country(ip string) (string, bool) {
+	info := r.geoLookup(ip)
+	if !info.ok || info.country == "" {
+		return "", false
+	}
+	return info.country, true
+}
+
+// SecurityFor, tunelin derlenmis WAF/Geo ayarini doner (nil = hicbir sey acik degil).
+// Plan kapisi (SecurityGate) Reload'da uygulanmistir.
+func (r *Router) SecurityFor(tunnelID string) *tunsec.Compiled {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.sec[tunnelID]
+}
+
+// gateSecurity, planin izin vermedigi kisimlari kapatir: Pro altinda WAF block kipi
+// log'a duser, Geo kapanir, bot always -> suspicious, hiz siniri kapanir (log kipi herkese acik). SecurityGate nil ise (open core
+// veya kapi yok) hicbir sey kisitlanmaz.
+func (r *Router) gateSecurity(plan string, c tunsec.Config) tunsec.Config {
+	if r.SecurityGate == nil || r.SecurityGate(plan) {
+		return c
+	}
+	if c.WAF.Mode == tunsec.WAFBlock {
+		c.WAF.Mode = tunsec.WAFLog
+	}
+	c.Geo = tunsec.GeoConfig{}
+	// Bot: always -> suspicious; hiz siniri uygulanmaz (ayar silinmez).
+	if c.Bot.Mode == tunsec.BotAlways {
+		c.Bot.Mode = tunsec.BotSuspicious
+	}
+	c.Rate.Enabled = false
+	return c
 }
 
 // SetIPIntel, liste tabanli IP bilgi saglayicilarini baglar.
@@ -167,7 +253,24 @@ func (r *Router) Reload(ctx context.Context) error {
 		nextMTLSByTunnel[rt.TunnelID] = pool
 		return pool
 	}
+	nextMCP := make(map[string]*mcpRoute)
+	nextSec := make(map[string]*tunsec.Compiled)
+	addSec := func(rt store.HostRoute) {
+		if len(rt.SecurityConfig) == 0 {
+			return
+		}
+		if _, done := nextSec[rt.TunnelID]; done {
+			return
+		}
+		if c := tunsec.Compile(r.gateSecurity(rt.Plan, tunsec.Parse(rt.SecurityConfig))); c != nil {
+			nextSec[rt.TunnelID] = c
+		}
+	}
 	for _, rt := range routes {
+		addSec(rt)
+		if m := buildMCPRoute(rt); m != nil {
+			nextMCP[rt.TunnelID] = m
+		}
 		h := normalizeHost(rt.FQDN)
 		// Trafik politikasini BIR KEZ parse et (yalnizca etkinse).
 		if rt.TrafficEnabled {
@@ -216,6 +319,10 @@ func (r *Router) Reload(ctx context.Context) error {
 				tp = parseTrafficPolicy(rt.TrafficConfig)
 			}
 			addTunnelCA(rt)
+			addSec(rt)
+			if m := buildMCPRoute(rt); m != nil {
+				nextMCP[rt.TunnelID] = m
+			}
 			h := normalizeHost(rt.FQDN)
 			nextPaths[h] = append(nextPaths[h], pathRule{prefix: rt.PathPrefix, route: rt, traffic: tp})
 		}
@@ -317,6 +424,8 @@ func (r *Router) Reload(ctx context.Context) error {
 	}
 	r.byHost = next
 	r.wild = nextWild
+	r.mcp = nextMCP
+	r.sec = nextSec
 	r.traffic = nextTraffic
 	r.paths = nextPaths
 	r.mtls = nextMTLS

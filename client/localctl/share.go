@@ -35,6 +35,27 @@ type ShareInfo struct {
 	Allow       []string  `json:"allow,omitempty"` // yetkili es IP'leri
 	ExpiresUnix int64     `json:"expires_unix,omitempty"`
 	Persistent  bool      `json:"persistent,omitempty"`
+	// Path (W2): cevrimici alicilarla yol ozeti: direct | relay | mixed | "".
+	Path string `json:"path,omitempty"`
+}
+
+// PathInfo, bir esle secili yol (net_paths).
+type PathInfo struct {
+	Name   string `json:"name"`
+	IP     string `json:"ip"`
+	Online bool   `json:"online"`
+	// Path: direct | relay
+	Path  string `json:"path"`
+	Addr  string `json:"addr,omitempty"` // dogrudan yolun uzak adresi
+	RTTMs int    `json:"rtt_ms,omitempty"`
+	// DirectCapable: es dogrudan yolu destekliyor.
+	DirectCapable bool `json:"direct_capable,omitempty"`
+}
+
+// NetStatuser, ajanin yol durumunu raporlayabildigini belirtir (istege bagli;
+// eski denetleyicilerde "bilinmeyen islem" doner).
+type NetStatuser interface {
+	NetPaths() ([]PathInfo, error)
 }
 
 // NetController, ajanin Zorven Net (paylasim/erisim) IPC yuzeyi. Controller
@@ -57,7 +78,7 @@ func IsUnsupported(err error) bool {
 
 func opTimeout(op string) time.Duration {
 	switch op {
-	case "share_create", "share_delete", "access_open":
+	case "share_create", "share_delete", "access_open", "net_up", "net_down":
 		return 25 * time.Second
 	}
 	return 8 * time.Second
@@ -107,6 +128,16 @@ func (e Endpoint) netOp(ctl Controller, req Request, resp *Response) error {
 		resp.Local = addr
 	case "access_close":
 		return nc.AccessClose(req.Local)
+	case "net_paths":
+		ns, ok := ctl.(NetStatuser)
+		if !ok {
+			return errors.New("bilinmeyen islem")
+		}
+		p, err := ns.NetPaths()
+		if err != nil {
+			return err
+		}
+		resp.Paths = p
 	}
 	return nil
 }

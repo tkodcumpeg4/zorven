@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/tkodcumpeg4/zorven/server/accesslog"
 	"github.com/tkodcumpeg4/zorven/server/auth"
+	"github.com/tkodcumpeg4/zorven/server/captcha"
 	"github.com/tkodcumpeg4/zorven/server/domain"
 	"github.com/tkodcumpeg4/zorven/server/door"
 	"github.com/tkodcumpeg4/zorven/server/entitlements"
@@ -45,6 +46,9 @@ type Server struct {
 	Logger  *slog.Logger
 	Version string
 
+	// Captcha, Zorven CAPTCHA servisi (main.go kurar; nil ise public uclar 501).
+	Captcha *captcha.Service
+
 	// screen2Hubs, paylasimli screen2 yayinlari (istemci basina tek yakalama).
 	screen2Hubs screen2Registry
 
@@ -69,9 +73,23 @@ type Server struct {
 	// alanlari (*.PlatformDomain) panel sayilmaz. Bos ise apex/www/panel/app.
 	PanelHosts []string
 
+	// MCP tunel modu (MCP M3/M4). MCPProbe: "baglantiyi sina" (ingress, ag cikisi yok);
+	// MCPOAuthReady: OAuth AS bu sunucuda etkin mi; MCPRevokeGrants: bir tunelin
+	// OAuth yetkilerini (kaynak anahtarlariyla) iptal eder.
+	MCPProbe        func(ctx context.Context, tunnelID string) ingress.MCPProbeResult
+	MCPOAuthReady   bool
+	MCPRevokeGrants func(ctx context.Context, tenantID string, resourceKeys []string) (int, error)
+
 	// OnTunnelChange, tunel eklendiginde/degistiginde/silindiginde cagrilir.
 	// Ingress router'ini HEMEN tazelemek icin: 10sn yoklamayi beklemeye gerek kalmaz.
 	OnTunnelChange func()
+
+	// OnAuthzChange (Z2/Z3), yetki/politika/posture/tunel guvenligi degisince
+	// cagrilir: ham TCP/UDP akislari ve ziyaretci WebSocket'leri yeniden
+	// degerlendirilir. tenantID bos = tum kiracilar (periyodik tur). nil olabilir.
+	OnAuthzChange func(tenantID string)
+	// GeoDBLoaded, Geo veritabani (mmdb) yuklu mu (panel uyarisi icin). nil olabilir.
+	GeoDBLoaded func() bool
 
 	// OnPlanChange, bir kiracinin plani/aboneligi degisince cagrilir (bant
 	// genisligi onbellegini atmak icin). nil olabilir.
@@ -190,6 +208,7 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("GET /api/v1/status", s.statusPublic)
 	mux.HandleFunc("GET /api/v1/me", s.me)
 	s.registerUpdates(mux)
+	s.registerCaptcha(mux)
 	mux.HandleFunc("GET /api/v1/my-ip", s.myIP)
 	mux.HandleFunc("GET /api/v1/openapi.yaml", s.openapiSpec)
 	mux.HandleFunc("GET /api/v1/openapi.en.yaml", s.openapiSpecEN)
@@ -265,6 +284,16 @@ func (s *Server) Routes() *http.ServeMux {
 	// FAZ 6 — trafik politikası (header/redirect kuralları).
 	mux.HandleFunc("GET /api/v1/tunnels/{id}/traffic", s.getTunnelTraffic)
 	mux.HandleFunc("PUT /api/v1/tunnels/{id}/traffic", s.setTunnelTraffic)
+	// MCP tunel modu (MCP M3/M4).
+	mux.HandleFunc("GET /api/v1/tunnels/{id}/mcp", s.getTunnelMCP)
+	mux.HandleFunc("PUT /api/v1/tunnels/{id}/mcp", s.setTunnelMCP)
+	mux.HandleFunc("GET /api/v1/tunnels/{id}/mcp/calls", s.listMCPCalls)
+	mux.HandleFunc("GET /api/v1/tunnels/{id}/mcp/stats", s.getMCPStats)
+	mux.HandleFunc("POST /api/v1/tunnels/{id}/mcp/test", s.testTunnelMCP)
+	mux.HandleFunc("POST /api/v1/tunnels/{id}/mcp/revoke-sessions", s.revokeMCPSessions)
+	mux.HandleFunc("GET /api/v1/tunnels/{id}/mcp/keys", s.listMCPKeys)
+	mux.HandleFunc("POST /api/v1/tunnels/{id}/mcp/keys", s.createMCPKey)
+	mux.HandleFunc("DELETE /api/v1/tunnels/{id}/mcp/keys/{keyId}", s.deleteMCPKey)
 	// FAZ 6.3 — per-tünel metrikler.
 	mux.HandleFunc("GET /api/v1/tunnels/{id}/metrics", s.getTunnelMetrics)
 	// FAZ 6.4 — metrik uyarıları.
@@ -273,6 +302,9 @@ func (s *Server) Routes() *http.ServeMux {
 	// FAZ 6.6 — mTLS (istemci sertifikası).
 	mux.HandleFunc("GET /api/v1/tunnels/{id}/mtls", s.getTunnelMTLS)
 	mux.HandleFunc("PUT /api/v1/tunnels/{id}/mtls", s.setTunnelMTLS)
+	// ZTNA Z3 — tunel seviyesinde WAF + Geo.
+	mux.HandleFunc("GET /api/v1/tunnels/{id}/security", s.getTunnelSecurity)
+	mux.HandleFunc("PUT /api/v1/tunnels/{id}/security", s.setTunnelSecurity)
 
 	mux.HandleFunc("GET /api/v1/hostnames", s.listHostnames)
 	mux.HandleFunc("POST /api/v1/hostnames", s.createHostname)
@@ -374,6 +406,11 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("PATCH /api/v1/net/shares/{id}", s.updateNetShare)
 	mux.HandleFunc("DELETE /api/v1/net/shares/{id}", s.deleteNetShare)
 	mux.HandleFunc("GET /api/v1/net/session", s.netSession)
+	mux.HandleFunc("GET /api/v1/net/tun/rules", s.listTunRules)
+	mux.HandleFunc("POST /api/v1/net/tun/rules", s.createTunRule)
+	mux.HandleFunc("DELETE /api/v1/net/tun/rules/{id}", s.deleteTunRule)
+	mux.HandleFunc("GET /api/v1/net/network", s.getNetNetwork)
+	mux.HandleFunc("PUT /api/v1/net/network", s.putNetNetwork)
 
 	mux.HandleFunc("GET /api/v1/devices", s.listDevices)
 	mux.HandleFunc("GET /api/v1/devices/{id}", s.getDevice)
@@ -514,6 +551,11 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	out["platform_admin"] = isPlatformAdmin(r.Context())
+	if isOAuthFull(r.Context()) {
+		// OAuth "full" (tam erisim) kimligi: panel oturumuyla ayni yetki; kapsam
+		// listesi yerine bu bayrak bildirilir.
+		out["oauth_full"] = true
+	}
 	// API token ile gelindiyse etkin (genisletilmis) kapsamlar da bildirilir:
 	// MCP araclari ve istemciler hangi islemlerin calisacagini buradan bilir.
 	if granted, ok := apiScopesFromContext(r.Context()); ok {
@@ -1222,7 +1264,7 @@ func (s *Server) updateTunnel(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deleteTunnel(w http.ResponseWriter, r *http.Request) {
-	if !requireScope(w, r, ScopeTunnelsWrite) {
+	if !requireScopeAny(w, r, ScopeTunnelsWrite, ScopeTunnelsDelete) {
 		return
 	}
 	if !s.requirePrivilegedCaller(w, r) {
@@ -1275,6 +1317,9 @@ func accessConfigOut(p store.TunnelAccessPolicy) map[string]any {
 	if v, ok := raw["allowed_emails"]; ok {
 		safe["allowed_emails"] = v
 	}
+	if v, ok := raw["allowed_groups"]; ok {
+		safe["allowed_groups"] = v
+	}
 	pol := visitorauth.PolicyFromConfig(p.Config)
 	safe["session_ttl_minutes"] = pol.TTLMinutes // 0 = varsayilan (12 saat)
 	safe["session_sliding"] = pol.Sliding
@@ -1321,6 +1366,7 @@ func (s *Server) setTunnelAccess(w http.ResponseWriter, r *http.Request) {
 			Password      string   `json:"password"` // düz metin — burada hash'lenir
 			Providers     []string `json:"providers"`
 			AllowedEmails []string `json:"allowed_emails"`
+			AllowedGroups []string `json:"allowed_groups"` // Z4: kiraci IdP gruplari
 			// Ziyaretci oturumu: nil = mevcut deger korunur; 0 = varsayilan (12 saat).
 			SessionTTLMinutes *int  `json:"session_ttl_minutes"`
 			SessionSliding    *bool `json:"session_sliding"`
@@ -1388,6 +1434,7 @@ func (s *Server) setTunnelAccess(w http.ResponseWriter, r *http.Request) {
 	case "oauth":
 		cfg, _ = json.Marshal(map[string]any{
 			"providers": body.Config.Providers, "allowed_emails": body.Config.AllowedEmails,
+			"allowed_groups":      body.Config.AllowedGroups,
 			"session_ttl_minutes": pol.TTLMinutes, "session_sliding": pol.Sliding,
 		})
 	default:
@@ -1507,7 +1554,7 @@ func (s *Server) listRequests(w http.ResponseWriter, r *http.Request) {
 	if reason, rej := q.Get("reason"), q.Get("rejected"); reason != "" || rej == "true" || rej == "1" {
 		kept := make([]reqlog.Entry, 0, len(entries))
 		for _, e := range entries {
-			if (reason != "" && e.RejectReason == reason) || (reason == "" && e.RejectReason != "") {
+			if (reason != "" && reqlog.MatchReason(reason, e.RejectReason)) || (reason == "" && e.RejectReason != "") {
 				kept = append(kept, e)
 			}
 		}

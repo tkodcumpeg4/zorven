@@ -22,6 +22,7 @@ type tray struct{}
 func (a *App) startTray()             {}
 func (t *tray) update(_ agent.Status) {}
 func (t *tray) stop()                 {}
+func (t *tray) relabel()              {}
 
 // trayEnabled, main.go'nun kapatma davranisini platforma gore ayarlamasi icin.
 const trayEnabled = false

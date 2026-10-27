@@ -23,6 +23,8 @@ type netRuntime struct {
 	node   *wgnet.Node
 	shares map[string]localctl.ShareInfo // id -> IPC ile olusturulan paylasim
 	access map[string]context.CancelFunc // yerel adres -> kapatici
+	// tunWanted: kullanici Mod B'yi (OS TUN) istedi; yeniden baglaninca otomatik acilir.
+	tunWanted bool
 }
 
 func (r *netRuntime) set(ctx context.Context, n *wgnet.Node) {
@@ -147,13 +149,60 @@ func (a *Agent) ShareList() ([]localctl.ShareInfo, error) {
 	a.netRT.mu.Lock()
 	defer a.netRT.mu.Unlock()
 	var out []localctl.ShareInfo
+	paths := n.Paths()
 	for _, o := range n.State().SharesOut {
 		si := a.netRT.shares[o.ID]
 		si.ID, si.Name, si.Port, si.Proto, si.Allow, si.ExpiresUnix = o.ID, o.Name, o.Port, o.Proto, o.Allow, o.ExpiresUnix
+		si.Path = pathSummary(o.Allow, paths)
 		out = append(out, si)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
+}
+
+// NetPaths (localctl.NetStatuser): netmap'teki esler ve secili yol (dogrudan/relay).
+func (a *Agent) NetPaths() ([]localctl.PathInfo, error) {
+	_, n, err := a.netRT.get()
+	if err != nil {
+		return nil, err
+	}
+	var out []localctl.PathInfo
+	for _, p := range n.Paths() {
+		out = append(out, localctl.PathInfo{
+			Name: p.Name, IP: p.IP, Online: p.Online, Path: p.Path, Addr: p.Addr,
+			RTTMs: int(p.RTT / time.Millisecond), DirectCapable: p.DirectCapable,
+		})
+	}
+	return out, nil
+}
+
+// pathSummary: izinli esler arasindaki cevrimici olanlarin yol ozeti.
+func pathSummary(allow []string, paths []wgnet.PathInfo) string {
+	by := map[string]wgnet.PathInfo{}
+	for _, p := range paths {
+		by[p.IP] = p
+	}
+	var d, r int
+	for _, ip := range allow {
+		p, ok := by[ip]
+		if !ok || !p.Online {
+			continue
+		}
+		if p.Path == protocol.PathDirect {
+			d++
+		} else {
+			r++
+		}
+	}
+	switch {
+	case d > 0 && r > 0:
+		return "mixed"
+	case d > 0:
+		return protocol.PathDirect
+	case r > 0:
+		return protocol.PathRelay
+	}
+	return ""
 }
 
 // AccessOpen: bu cihazin dugumuyle bir paylasima yerel dinleyici acar.

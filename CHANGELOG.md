@@ -20,8 +20,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Reserved port pool across several public IPs (TCP_BIND_IP1/2, ZORVEN_TCP_BIND_IPS, ZORVEN_TCP_HOSTS in the compose file).
 - Panel language selector is a dropdown.
 
+- Tunnel bot protection: suspicious-traffic or always-on proof-of-work challenge page, verified-bot allowlist, TLS fingerprint scoring, per-tunnel rate limiting (block or challenge), path exclusions; new "Security" tab per tunnel.
+- Tunnel WAF (log or block, optional body inspection, per-rule disable) and country (Geo) allow/deny rules from a local MMDB (`scripts/geo-update.sh` fetches DB-IP Lite); all plan gates resolve to "allowed" in the open edition.
+- Zorven CAPTCHA: a Turnstile-style embeddable widget (`/captcha/v1/api.js`, proof-of-work in a Web Worker, light/dark), challenge/solve/renew and a Turnstile-compatible `siteverify`, tenant site keys with domain lists and difficulty, optional first-party pass cookie, panel page and OpenAPI entries.
+- Sign-up protection: platform CAPTCHA on the email/password form.
+- MCP: `full` OAuth scope (same authority as the dashboard session, with step-up and an excluded-endpoint list), connected-apps badges, and a per-tunnel MCP mode (keys, call log, stats, test, session revocation) behind the tunnel.
+- Remote screen: H.264 video mode (Windows Media Foundation encoder, automatic switch on motion, bit-rate feedback, WebCodecs playback), viewer performance panel, DXGI desktop capture and a SYSTEM-service screen helper for the login screen.
+- Full network layer (Zorven Net mode B): OS TUN device on the desktop app and CLI (`zorven net up/down`, wintun download on Windows), direct P2P paths via STUN + hole punching, virtual DNS, per-device filter rules.
+- CLI: Turkish/English messages, `zorven settings` terminal UI, table output, privilege checks and a legacy service unit migration; desktop app language setting.
+- Client posture and device-certificate request code (dormant: the open server does not negotiate these features).
+- Live connection view and per-IP connection limits for raw TCP/UDP tunnels.
+
 ### Changed
 - Remote screen control (input, clipboard, files, shortcuts) is limited to tenant owners and admins; members can only watch. The decision is made when the screen ticket is issued.
+- Panel session cookie uses the `__Host-` prefix over HTTPS and a conflicting duplicate cookie is treated as signed-out (cookie-tossing protection).
+- Go toolchain 1.27.3 (`go 1.26`).
 
 ### Fixed
 - Cancelling a browser/visitor request no longer drops the whole agent WebSocket connection (server and client, with regression tests).

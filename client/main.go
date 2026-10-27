@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/url"
 	"os"
@@ -20,6 +21,8 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/tkodcumpeg4/zorven/client/agent"
 	"github.com/tkodcumpeg4/zorven/client/config"
+	"github.com/tkodcumpeg4/zorven/client/i18n"
+	"github.com/tkodcumpeg4/zorven/client/internal/tui"
 	"github.com/tkodcumpeg4/zorven/client/localctl"
 	"github.com/tkodcumpeg4/zorven/shared/protocol"
 )
@@ -27,6 +30,10 @@ import (
 var version = "dev"
 
 func main() {
+	// Dil komutlar kurulmadan secilmeli: yardim metinleri (Short) de cevrilir.
+	if cfg, err := config.Load(); err == nil {
+		i18n.Set(i18n.Detect(cfg.Language))
+	}
 	var (
 		server         string
 		token          string
@@ -47,6 +54,9 @@ func main() {
 		plainBash      bool
 		printURL       bool
 		noNet          bool
+		noPosture      bool
+		noP2P          bool
+		noTUN          bool
 		accessSpecs    []string
 
 		// ephemeralTTLSec (FAZ 2 / F07): yalnizca "ephemeral" alt komutu doldurur.
@@ -85,9 +95,9 @@ func main() {
 			// Tek kelimelik harf dizisi buyuk olasilikla bu surumde olmayan bir
 			// alt komuttur (or. yeni surumdeki "up"): guncellemeyi oner.
 			if w := args[0]; len(args) <= 2 && isPlainWord(w) {
-				return fmt.Errorf("bilinmeyen komut %q (surum %s). Yeni bir surumde eklenmis olabilir: 'zorven update' ile guncelleyin; komutlar icin 'zorven --help'", w, version)
+				return errors.New(i18n.T("main.err.unknown_cmd", w, version))
 			}
-			return fmt.Errorf("gecersiz hedef %q: bir port (8080), host:port veya URL verin; komutlar icin 'zorven --help'", strings.Join(args, " "))
+			return errors.New(i18n.T("main.err.bad_target", strings.Join(args, " ")))
 		}
 
 		// 2. Token Cozumleme: Bayrak > Ortam Degiskeni > Config > Etkilesimli Sorma
@@ -106,12 +116,12 @@ func main() {
 		if activeToken == "" {
 			activeToken = promptTokenInteractive()
 			if activeToken == "" {
-				return fmt.Errorf("istemci token'i bulunamadi.\nToken eklemek icin:\n  zorven authtoken <TOKEN>\nveya --token bayragini kullanin")
+				return errors.New(i18n.T("main.err.no_token"))
 			}
 			// Basariyla girildiyse ayar dosyasina kaydet
 			if err := config.SetToken(activeToken); err == nil {
 				cfgPath, _ := config.Path()
-				fmt.Printf("✓ Token basariyla kaydedildi: %s\n\n", cfgPath)
+				fmt.Print(i18n.T("main.msg.token_saved_path", cfgPath), "\n")
 			}
 		}
 
@@ -183,11 +193,14 @@ func main() {
 			TerminalPlainBash: plainBash,
 			LogLevel:          levelVar,
 			NoNet:             noNet,
+			NoPosture:         noPosture,
+			NoP2P:             noP2P,
+			NoTUN:             noTUN,
 		}
 		for _, spec := range accessSpecs {
 			tgt, loc, ok := strings.Cut(spec, "=")
 			if !ok || strings.TrimSpace(tgt) == "" || strings.TrimSpace(loc) == "" {
-				return fmt.Errorf("gecersiz --access %q (bicim: paylasim[:port]=yerel_port)", spec)
+				return errors.New(i18n.T("main.err.bad_access", spec))
 			}
 			loc = strings.TrimSpace(loc)
 			if !strings.Contains(loc, ":") {
@@ -225,24 +238,24 @@ func main() {
 				}
 				printDashboard(s, activeServer, target, activeInsecure, finalNoTerminal, finalNoScreen)
 			} else if s.State == agent.StateConnecting {
-				fmt.Println("⏳ Zorven sunucusuna baglaniliyor (" + activeServer + ")...")
+				fmt.Println(i18n.T("conn.connecting", activeServer))
 			} else if s.State == agent.StateReconnecting {
-				fmt.Println("⚠️  Baglanti koptu, yeniden baglaniliyor...")
+				fmt.Println(i18n.T("conn.reconnecting"))
 			} else if s.State == agent.StateFatal {
-				fmt.Printf("❌ Baglanti hatasi: %s\n", s.Message)
+				fmt.Println(i18n.T("conn.fatal", s.Message))
 			}
 		}
 
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 
-		if uep, uerr := localctl.UserEndpoint(); uerr == nil {
+		if uep, uerr := foregroundCtlEndpoint(); uerr == nil {
 			ag.OnReady = func(c context.Context) { startLocalCtl(c, ag, uep) }
 		}
 		err = ag.Run(ctx)
 		var fe *agent.FatalError
 		if errors.As(err, &fe) && strings.Contains(fe.Msg, "409") {
-			fmt.Println("Ipucu: calisan bir istemci var. Izinleri degistirmek icin: zorven enable terminal | zorven enable screen")
+			fmt.Println(i18n.T("conn.409hint"))
 		}
 		return err
 	}
@@ -250,7 +263,7 @@ func main() {
 	root := &cobra.Command{
 		Use:          "zorven [port]",
 		Aliases:      []string{"zorven-client", "rpshell-client"},
-		Short:        "Zorven tunel istemcisi — Tek komutla lokal port paylasimi",
+		Short:        i18n.T("main.cmd.root"),
 		Version:      version,
 		Example:      "  zorven 8080\n  zorven http 3000\n  zorven authtoken zrv_live_...\n  zorven --server zorven.app:443 --token zrv_live_...",
 		SilenceUsage: true,
@@ -261,27 +274,30 @@ func main() {
 	// Tunel bayraklari: root, http ve ephemeral icin ayni tanim/anlam.
 	addTunnelFlags := func(c *cobra.Command) {
 		f := c.Flags()
-		f.StringVar(&server, "server", "", "tunel sunucusu adresi (host:port, ornek: zorven.app:443)")
-		f.StringVar(&token, "token", "", "istemci token'i (zrv_live_...)")
-		f.StringVar(&local, "local", "", "acilacak yerel servis adresi veya portu (verilmezse yalnizca sunucudaki tuneller alinir)")
-		f.BoolVar(&insecure, "insecure", false, "TLS yerine duz ws:// kullan (yalnizca lokal gelistirme)")
-		f.StringVar(&caCert, "ca-cert", "", "self-signed sunucu sertifikasi dosyasi")
-		f.StringVar(&logLevel, "log-level", "warn", "debug | info | warn | error")
-		f.BoolVar(&enableTerminal, "enable-terminal", false, "uzaktan terminal (PTY) erisimine izin ver (guvenlik nedeniyle varsayilan kapali)")
-		f.BoolVar(&enableScreen, "enable-screen", false, "uzaktan ekran paylasimina izin ver (guvenlik nedeniyle varsayilan kapali)")
-		f.BoolVar(&noTerminal, "no-terminal", false, "uzaktan terminal erisimini kapat")
-		f.BoolVar(&noScreen, "no-screen", false, "uzaktan ekran paylasimini kapat")
-		f.BoolVar(&noClipboard, "no-clipboard", false, "ekran paylasiminda pano esitlemeyi kapat")
-		f.BoolVar(&noFileTransfer, "no-file-transfer", false, "ekran paylasiminda dosya aktarimini kapat")
-		f.StringVar(&fileDir, "file-dir", "", "dosya aktariminin tek izinli klasoru (varsayilan: Indirilenler/Zorven)")
-		f.IntVar(&fileMaxMB, "file-max-mb", 0, "tek dosya boyut siniri, MiB (varsayilan 2048)")
-		f.BoolVar(&persistFlag, "persist", false, "--enable-terminal/--enable-screen calisan istemciye iletilirse yerel ayara da yaz")
-		f.BoolVar(&noAutoUpdate, "no-auto-update", false, "otomatik guncellemeyi kapat")
-		f.BoolVar(&plainZsh, "terminal-plain-zsh", false, "uzak terminalde Zorven zsh profilini (istem, oneri, vurgulama) kullanma; zsh duz baslar")
-		f.BoolVar(&plainBash, "terminal-plain-bash", false, "uzak terminalde Zorven bash rcfile profilini kullanma")
-		f.BoolVar(&noNet, "no-net", false, "Zorven Net (WireGuard port paylasimi) ozelligini kapat")
-		f.StringArrayVar(&accessSpecs, "access", nil, "bu cihaza acilan bir paylasima yerel dinleyici: paylasim[:port]=yerel_port")
-		f.BoolVar(&printURL, "print-url", false, "gosterge yerine baglantida makine-okur 'zorven-url: <url>' satirlari yaz (SDK'lar icin)")
+		f.StringVar(&server, "server", "", i18n.T("main.flag.server"))
+		f.StringVar(&token, "token", "", i18n.T("main.flag.token"))
+		f.StringVar(&local, "local", "", i18n.T("main.flag.local"))
+		f.BoolVar(&insecure, "insecure", false, i18n.T("main.flag.insecure"))
+		f.StringVar(&caCert, "ca-cert", "", i18n.T("main.flag.ca_cert"))
+		f.StringVar(&logLevel, "log-level", "warn", i18n.T("main.flag.log_level"))
+		f.BoolVar(&enableTerminal, "enable-terminal", false, i18n.T("main.flag.enable_terminal"))
+		f.BoolVar(&enableScreen, "enable-screen", false, i18n.T("main.flag.enable_screen"))
+		f.BoolVar(&noTerminal, "no-terminal", false, i18n.T("main.flag.no_terminal"))
+		f.BoolVar(&noScreen, "no-screen", false, i18n.T("main.flag.no_screen"))
+		f.BoolVar(&noClipboard, "no-clipboard", false, i18n.T("main.flag.no_clipboard"))
+		f.BoolVar(&noFileTransfer, "no-file-transfer", false, i18n.T("main.flag.no_file_transfer"))
+		f.StringVar(&fileDir, "file-dir", "", i18n.T("main.flag.file_dir"))
+		f.IntVar(&fileMaxMB, "file-max-mb", 0, i18n.T("main.flag.file_max_mb"))
+		f.BoolVar(&persistFlag, "persist", false, i18n.T("main.flag.persist"))
+		f.BoolVar(&noAutoUpdate, "no-auto-update", false, i18n.T("main.flag.no_auto_update"))
+		f.BoolVar(&plainZsh, "terminal-plain-zsh", false, i18n.T("main.flag.plain_zsh"))
+		f.BoolVar(&plainBash, "terminal-plain-bash", false, i18n.T("main.flag.plain_bash"))
+		f.BoolVar(&noNet, "no-net", false, i18n.T("main.flag.no_net"))
+		f.BoolVar(&noPosture, "no-posture", false, i18n.T("main.flag.no_posture"))
+		f.BoolVar(&noP2P, "no-p2p", false, i18n.T("main.flag.no_p2p"))
+		f.BoolVar(&noTUN, "no-tun", false, i18n.T("main.flag.no_tun"))
+		f.StringArrayVar(&accessSpecs, "access", nil, i18n.T("main.flag.access"))
+		f.BoolVar(&printURL, "print-url", false, i18n.T("main.flag.print_url"))
 	}
 	addTunnelFlags(root)
 
@@ -290,7 +306,7 @@ func main() {
 	// http alt komutu (ngrok tarzı: "zorven http 8080")
 	httpCmd := &cobra.Command{
 		Use:          "http <port>",
-		Short:        "Yerel bir HTTP servisini internete acar (or. zorven http 8080)",
+		Short:        i18n.T("main.cmd.http"),
 		SilenceUsage: true,
 		Args:         cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -306,46 +322,46 @@ func main() {
 	ephemeralCmd := &cobra.Command{
 		Use:          "ephemeral <port>",
 		Aliases:      []string{"temp", "tmp"},
-		Short:        "Suresi dolunca kendini silen gecici tunel acar (or. zorven ephemeral 3000)",
+		Short:        i18n.T("main.cmd.ephemeral"),
 		Example:      "  zorven ephemeral 3000\n  zorven ephemeral 3000 --ttl 30m",
 		SilenceUsage: true,
 		Args:         cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			d, err := time.ParseDuration(ttlFlag)
 			if err != nil {
-				return fmt.Errorf("gecersiz --ttl degeri %q: 2h, 30m gibi bir sure verin", ttlFlag)
+				return errors.New(i18n.T("main.err.bad_ttl", ttlFlag))
 			}
 			// Sinirlar sunucuda da uygulanir; burada erken ve anlasilir hata
 			// vermek, baglandiktan sonra sessizce baska bir sure almaktan iyi.
 			if d < time.Minute || d > 24*time.Hour {
-				return fmt.Errorf("--ttl 1 dakika ile 24 saat arasinda olmali (verilen: %s)", d)
+				return errors.New(i18n.T("main.err.ttl_range", d))
 			}
 			ephemeralTTLSec = int(d.Seconds())
-			fmt.Printf("Gecici tunel: %s sonra kendiliginden kaldirilacak.\n", d)
+			fmt.Print(i18n.T("main.msg.ephemeral", d))
 			return runTunnel(cmd, args)
 		},
 	}
 	addTunnelFlags(ephemeralCmd)
-	ephemeralCmd.Flags().StringVar(&ttlFlag, "ttl", "2h", "tunelin omru (1m - 24h arasi, or. 30m)")
+	ephemeralCmd.Flags().StringVar(&ttlFlag, "ttl", "2h", i18n.T("main.flag.ttl"))
 	root.AddCommand(ephemeralCmd)
 
 	// authtoken alt komutu (ngrok tarzı: "zorven authtoken <TOKEN>")
 	authtokenCmd := &cobra.Command{
 		Use:          "authtoken <token>",
 		Aliases:      []string{"token"},
-		Short:        "İstemci token'ini yerel yapilandirmaya kaydeder",
+		Short:        i18n.T("main.cmd.authtoken"),
 		SilenceUsage: true,
 		Args:         cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			t := strings.TrimSpace(args[0])
 			if !strings.HasPrefix(t, "zrv_live_") && !strings.HasPrefix(t, "rpsh_live_") {
-				return fmt.Errorf("gecersiz token formati: token 'zrv_live_' ile baslamalidir")
+				return errors.New(i18n.T("main.err.bad_token_format"))
 			}
 			if err := config.SetToken(t); err != nil {
-				return fmt.Errorf("token kaydedilemedi: %w", err)
+				return fmt.Errorf("%s: %w", i18n.T("main.err.token_save"), err)
 			}
 			p, _ := config.Path()
-			fmt.Printf("✓ Zorven istemci token'i kaydedildi: %s\n", p)
+			fmt.Print(i18n.T("main.msg.token_saved", p))
 			return nil
 		},
 	}
@@ -355,30 +371,31 @@ func main() {
 	// config alt komut grubu
 	configCmd := &cobra.Command{
 		Use:   "config",
-		Short: "İstemci yapilandirmasini goruntuler veya ayarlar",
+		Short: i18n.T("main.cmd.config"),
 	}
 
 	configShowCmd := &cobra.Command{
 		Use:   "show",
-		Short: "Gecerli yapilandirma ayarlarini gosterir",
+		Short: i18n.T("main.cmd.config_show"),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := config.Load()
 			if err != nil {
 				return err
 			}
 			p, _ := config.Path()
-			fmt.Printf("Ayar Dosyasi: %s\n", p)
-			fmt.Printf("Sunucu:        %s\n", cfg.ServerAddr)
+			row := func(label, value string) { fmt.Println(padLabel(i18n.T(label), 14) + value) }
+			row("main.lbl.file", p)
+			row("main.lbl.server", cfg.ServerAddr)
 			if cfg.Token != "" {
 				masked := cfg.Token
 				if len(masked) > 16 {
 					masked = masked[:12] + "..." + masked[len(masked)-4:]
 				}
-				fmt.Printf("Token:         %s (kayitli)\n", masked)
+				row("main.lbl.token", i18n.T("main.val.token_saved", masked))
 			} else {
-				fmt.Printf("Token:         [tanimsiz - 'zorven authtoken <TOKEN>' ile ekleyin]\n")
+				row("main.lbl.token", i18n.T("main.val.token_none"))
 			}
-			fmt.Printf("Insecure:      %v\n", cfg.Insecure)
+			row("main.lbl.insecure", fmt.Sprint(cfg.Insecure))
 			return nil
 		},
 	}
@@ -386,7 +403,7 @@ func main() {
 	var isSystemServer bool
 	configSetServerCmd := &cobra.Command{
 		Use:   "set-server <server_addr>",
-		Short: "Varsayilan tunel sunucu adresini ayarlar (or. api.zorven.app:8443)",
+		Short: i18n.T("main.cmd.set_server"),
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			s := strings.TrimSpace(args[0])
@@ -394,97 +411,68 @@ func main() {
 				if err := config.SetServerSystem(s); err != nil {
 					return err
 				}
-				fmt.Printf("✓ Sistem sunucu adresi guncellendi (%s): %s\n", config.SystemPath(), s)
+				fmt.Print(i18n.T("main.msg.sys_server", config.SystemPath(), s))
 				return nil
 			}
 			if err := config.SetServer(s); err != nil {
 				return err
 			}
-			fmt.Printf("✓ Varsayilan sunucu adresi guncellendi: %s\n", s)
+			fmt.Print(i18n.T("main.msg.def_server", s))
 			return nil
 		},
 	}
-	configSetServerCmd.Flags().BoolVar(&isSystemServer, "system", false, "ayari sistem geneline (servis moduna) yazar")
+	configSetServerCmd.Flags().BoolVar(&isSystemServer, "system", false, i18n.T("main.flag.system"))
 
 	var isSystemToken bool
 	configSetTokenCmd := &cobra.Command{
 		Use:   "set-token <token>",
-		Short: "İstemci token'ini ayarlar",
+		Short: i18n.T("main.cmd.set_token"),
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			t := strings.TrimSpace(args[0])
 			if !strings.HasPrefix(t, "zrv_live_") && !strings.HasPrefix(t, "rpsh_live_") {
-				return fmt.Errorf("gecersiz token formati: token 'zrv_live_' ile baslamalidir")
+				return errors.New(i18n.T("main.err.bad_token_format"))
 			}
 			if isSystemToken {
 				if err := config.SetTokenSystem(t); err != nil {
 					return err
 				}
-				fmt.Printf("✓ Sistem token'i guncellendi (%s)\n", config.SystemPath())
+				fmt.Print(i18n.T("main.msg.sys_token", config.SystemPath()))
 				return nil
 			}
 			return authtokenCmd.RunE(cmd, args)
 		},
 	}
-	configSetTokenCmd.Flags().BoolVar(&isSystemToken, "system", false, "ayari sistem geneline (servis moduna) yazar")
+	configSetTokenCmd.Flags().BoolVar(&isSystemToken, "system", false, i18n.T("main.flag.system"))
 
 	configCmd.AddCommand(configShowCmd, configSetServerCmd, configSetTokenCmd)
 	root.AddCommand(configCmd)
 	updateCmd := &cobra.Command{
 		Use:   "update",
-		Short: "Guncellemeleri kontrol et ve varsa uygula (yeniden baslatir)",
+		Short: i18n.T("cmd.update"),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, _ := config.Load()
-			srv := strings.TrimSpace(server)
-			if srv == "" {
-				srv = strings.TrimSpace(cfg.ServerAddr)
+			lines, err := runUpdate(cmd.Context(), false, server, insecure, caCert)
+			for _, l := range lines {
+				fmt.Println(l)
 			}
-			if srv == "" || srv == "localhost:8443" {
-				srv = "zorven.app:443"
-			}
-			ag := &agent.Agent{
-				ServerAddr: srv,
-				Insecure:   insecure || cfg.Insecure,
-				CACertPath: caCert,
-				Log:        slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})),
-				Version:    version,
-			}
-			if ag.CACertPath == "" {
-				ag.CACertPath = cfg.CACertPath
-			}
-			fmt.Printf("Guncelleme kontrol ediliyor (mevcut surum: %s, sunucu: %s)...\n", version, srv)
-			if err := ag.CheckUpdateNow(cmd.Context()); err != nil {
-				return fmt.Errorf("guncelleme yapilamadi: %w", err)
-			}
-			// Diskteki ikili guncel; arka planda calisan istemci (servis ya da
-			// on plan) eski surumle calisiyor olabilir. Yerel kanaldan bulup
-			// ona da guncellemeyi tetikle: panelde eski surum gorunmesin.
-			if ep, r, _ := localctl.Find(); ep != nil && r != nil && r.Version != "" && r.Version != version {
-				if _, err := localctl.Call(*ep, localctl.Request{Op: "update"}); err != nil {
-					fmt.Printf("Calisan istemci eski surumde (%s); guncelleme tetiklenemedi: %v\n", r.Version, err)
-					if ep.Service {
-						fmt.Println("  Ipucu: sudo zorven update  ya da  sudo zorven service restart")
-					}
-				} else {
-					fmt.Printf("Calisan istemci (%s, surum %s) guncelleniyor; birkac saniye icinde yeni surumle yeniden baslar.\n", map[bool]string{true: "arka plan servisi", false: "on plan istemci"}[ep.Service], r.Version)
-				}
-			}
-			return nil
+			return err
 		},
 	}
 	root.AddCommand(updateCmd)
+	root.AddCommand(newSettingsCmd())
 
 	// version: istemci surumu + protokol surumu (destek/sorun giderme icin).
 	root.AddCommand(&cobra.Command{
 		Use:   "version",
-		Short: "Istemci surumunu gosterir",
+		Short: i18n.T("main.cmd.version"),
 		Args:  cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Println("zorven", version, "(protokol "+protocol.Version+",", runtime.GOOS+"/"+runtime.GOARCH+")")
+			fmt.Println("zorven", version, "("+i18n.T("main.val.proto", protocol.Version)+",", runtime.GOOS+"/"+runtime.GOARCH+")")
 		},
 	})
 
 	root.AddCommand(newServiceCmd())
+	root.AddCommand(newScreenHelperCmd()) // gizli: servis modu ekran yardimcisi
 	root.AddCommand(newShortcutCmds()...)
 	root.AddCommand(newForwardCmd())
 	root.AddCommand(newConnectCmd())
@@ -499,7 +487,7 @@ func main() {
 	// calisirdi — kullanicinin gordugu hatanin sebebi buydu.)
 	statusCmd := &cobra.Command{
 		Use:          "status",
-		Short:        "İstemci ayarlarini ve arka plan servisinin durumunu gosterir",
+		Short:        i18n.T("main.cmd.status"),
 		SilenceUsage: true,
 		Args:         cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -511,61 +499,66 @@ func main() {
 				srv = "zorven.app:443"
 			}
 
-			fmt.Println("Zorven İstemci Durumu")
-			fmt.Println("---------------------")
-			fmt.Printf("Surum:        %s (protokol %s)\n", version, protocol.Version)
-			fmt.Printf("Ayar Dosyasi: %s\n", p)
-			fmt.Printf("Sunucu:       %s\n", srv)
+			fmt.Println(i18n.T("main.status.title"))
+			fmt.Println(strings.Repeat("-", len([]rune(i18n.T("main.status.title")))))
+			row := func(label, value string) { fmt.Println(padLabel(i18n.T(label), 14) + value) }
+			row("main.lbl.version", i18n.T("main.val.version", version, protocol.Version))
+			row("main.lbl.file", p)
+			row("main.lbl.server", srv)
 			if cfg.Token != "" {
 				masked := cfg.Token
 				if len(masked) > 16 {
 					masked = masked[:12] + "..." + masked[len(masked)-4:]
 				}
-				fmt.Printf("Token:        %s (kayitli)\n", masked)
+				row("main.lbl.token", i18n.T("main.val.token_saved", masked))
 			} else {
-				fmt.Println("Token:        [tanimsiz — 'zorven authtoken <TOKEN>' ile ekleyin]")
+				row("main.lbl.token", i18n.T("main.val.token_none"))
 			}
-			fmt.Println("Yerel Hedef:  (yok - yalnizca sunucuda tanimli tuneller; port icin: zorven <port>)")
+			row("main.lbl.local", i18n.T("main.val.local_none"))
 
-			fmt.Print("Servis:       ")
 			s, err := getService()
 			if err != nil {
-				fmt.Printf("Bilinmiyor (%v)\n", err)
+				row("main.lbl.service", i18n.T("main.val.svc_unknown", err))
 				return nil
 			}
 			st, err := s.Status()
 			if err != nil {
-				fmt.Println("Kurulu degil (arka plan servisi yok)")
+				row("main.lbl.service", i18n.T("main.val.svc_missing"))
 				return nil
 			}
 			switch st {
 			case service.StatusRunning:
-				fmt.Println("Calisiyor (Running)")
+				row("main.lbl.service", i18n.T("main.val.svc_running"))
 			case service.StatusStopped:
-				fmt.Println("Durduruldu (Stopped)")
+				row("main.lbl.service", i18n.T("main.val.svc_stopped"))
 			default:
-				fmt.Printf("%d\n", st)
+				row("main.lbl.service", fmt.Sprint(int(st)))
 			}
+			printLegacyHint()
 			return nil
 		},
 	}
 	root.AddCommand(statusCmd)
 
+	addPrivilegeFlags(root)
+	localizeCobra(root)
 	if err := root.Execute(); err != nil {
+		pauseIfElevatedFailed(err)
 		os.Exit(1)
 	}
 }
 
 // promptTokenInteractive, token tanimli degilse terminalden kullaniciya sorar.
 func promptTokenInteractive() string {
-	fmt.Println("\n==================================================================")
-	fmt.Println("  ZORVEN — İstemci Token'ı Gerekli")
-	fmt.Println("==================================================================")
-	fmt.Println("  Bu cihaz için henüz bir Zorven token'ı yapılandırılmamış.")
-	fmt.Println("  Zorven Dashboard'undan (İstemciler sekmesi) aldığınız")
-	fmt.Println("  istemci token'ınızı girin (örn: zrv_live_...).")
-	fmt.Println("==================================================================")
-	fmt.Print("  Token: ")
+	bar := strings.Repeat("=", 66)
+	fmt.Println("\n" + bar)
+	fmt.Println("  " + i18n.T("main.prompt.title"))
+	fmt.Println(bar)
+	fmt.Println("  " + i18n.T("main.prompt.l1"))
+	fmt.Println("  " + i18n.T("main.prompt.l2"))
+	fmt.Println("  " + i18n.T("main.prompt.l3"))
+	fmt.Println(bar)
+	fmt.Print("  " + i18n.T("main.prompt.token"))
 
 	scanner := bufio.NewScanner(os.Stdin)
 	if scanner.Scan() {
@@ -574,7 +567,7 @@ func promptTokenInteractive() string {
 			return text
 		}
 		if text != "" {
-			fmt.Println("  ⚠️  Uyarı: Token 'zrv_live_' ile başlamalıdır.")
+			fmt.Println("  " + i18n.T("main.prompt.warn"))
 		}
 	}
 	return ""
@@ -640,37 +633,44 @@ func printDashboard(s agent.Status, server, target string, insecure, noTerm, noS
 		}
 	}
 
-	fmt.Println("\n+-------------------------------------------------------------+")
-	fmt.Printf("|  %-59s|\n", "ZORVEN v"+version+" - Guvenli Tunel")
-	fmt.Println("+-------------------------------------------------------------+")
-	fmt.Printf("|  Durum:       \033[32mCevrimici (Online)\033[0m                            |\n")
-	fmt.Printf("|  Sunucu:      %-45s |\n", server)
-	fmt.Printf("|  Istemci:     %-45s |\n", s.ClientID)
-	if target == "" {
-		target = "(sunucudaki tuneller)"
+	const width = 61
+	line := func(label, value string) {
+		fmt.Println("|  " + padLabel(label, 13) + " " + padVisible(value, width-17) + "|")
 	}
-	fmt.Printf("|  Yerel Hedef: %-45s |\n", target)
-	fmt.Println("|                                                             |")
-
+	border := "+" + strings.Repeat("-", width) + "+"
+	fmt.Println("\n" + border)
+	fmt.Println("|  " + padVisible(i18n.T("dash.title", version), width-3) + " |")
+	fmt.Println(border)
+	line(i18n.T("dash.status"), "\033[32m"+i18n.T("dash.online")+"\033[0m")
+	line(i18n.T("dash.server"), server)
+	line(i18n.T("dash.client"), s.ClientID)
+	if target == "" {
+		target = i18n.T("dash.target.none")
+	}
+	line(i18n.T("dash.target"), target)
+	line("", "")
 	if len(publicURLs) > 0 {
 		for _, u := range publicURLs {
-			fmt.Printf("|  Genel URL:   \033[36m\033[1m%-45s\033[0m |\n", u)
+			line(i18n.T("dash.url"), "\033[36m\033[1m"+u+"\033[0m")
 		}
-		fmt.Println("|               (Internet uzerinden erisilebilir)             |")
+		line("", i18n.T("dash.url.note"))
 	} else {
-		fmt.Println("|  Genel URL:   [Tunel kaydi bekleniyor...]                   |")
+		line(i18n.T("dash.url"), i18n.T("dash.url.wait"))
 	}
-
-	fmt.Println("|                                                             |")
+	line("", "")
 	if noTerm && noScreen {
-		fmt.Println("|  Uzak Erisim: \033[33mKapali (Salt Port Tuneli - Guvenli Mod)\033[0m       |")
+		line(i18n.T("dash.remote"), "\033[33m"+i18n.T("dash.remote.off")+"\033[0m")
 	} else {
-		fmt.Printf("|  Uzak Erisim: Terminal: %v, Ekran: %v               |\n", !noTerm, !noScreen)
+		line(i18n.T("dash.remote"), i18n.T("dash.remote.on", onOffText(!noTerm), onOffText(!noScreen)))
 	}
-	fmt.Println("|  Durdurmak icin Ctrl+C tuslarina basin                      |")
-	fmt.Println("+-------------------------------------------------------------+")
-	fmt.Println("\nCanli HTTP Istekleri (Trafik):")
+	fmt.Println("|  " + padVisible(i18n.T("dash.stop"), width-3) + " |")
+	fmt.Println(border)
+	fmt.Println("\n" + i18n.T("dash.live"))
 }
+
+// padVisible, ANSI dizilerini ve genis (CJK) karakterleri hesaba katarak
+// metni w gorunur sutuna tamamlar; tasarsa oldugu gibi birakir.
+func padVisible(s string, w int) string { return tui.PadRight(s, w) }
 
 func truncatePath(p string, maxLen int) string {
 	if len(p) <= maxLen {
@@ -726,4 +726,73 @@ func isPlainWord(w string) bool {
 		}
 	}
 	return true
+}
+
+// foregroundCtlEndpoint, on plan ajanin kontrol soketi. Eski surumlerin
+// kurdugu systemd birimleri ("ExecStart=zorven --enable-terminal", 'service
+// run' degil) ajani root olarak HOME'suz baslatir: kullanici soketi
+// acilamaz ve 'zorven status/settings' istemciyi bulamazdi. Servis yoneticisi
+// altinda root olarak calisiyorsak servis soketi kullanilir.
+func foregroundCtlEndpoint() (localctl.Endpoint, error) {
+	if runtime.GOOS != "windows" && os.Geteuid() == 0 && !service.Interactive() {
+		return localctl.ServiceEndpoint(), nil
+	}
+	return localctl.UserEndpoint()
+}
+
+// runUpdate, 'zorven update' mantigi: diskteki ikiliyi gunceller, ardindan
+// arka planda calisan (eski surumdeki) istemciyi de gunceller. quiet=true iken
+// hicbir sey yazmaz; sonuc satirlari doner (zorven settings).
+func runUpdate(ctx context.Context, quiet bool, server string, insecure bool, caCert string) ([]string, error) {
+	var lines []string
+	cfg, _ := config.Load()
+	srv := strings.TrimSpace(server)
+	if srv == "" {
+		srv = strings.TrimSpace(cfg.ServerAddr)
+	}
+	if srv == "" || srv == "localhost:8443" {
+		srv = "zorven.app:443"
+	}
+	logOut := io.Writer(os.Stderr)
+	if quiet {
+		logOut = io.Discard
+	}
+	ag := &agent.Agent{
+		ServerAddr: srv,
+		Insecure:   insecure || cfg.Insecure,
+		CACertPath: caCert,
+		Log:        slog.New(slog.NewTextHandler(logOut, &slog.HandlerOptions{Level: slog.LevelInfo})),
+		Version:    version,
+	}
+	if ag.CACertPath == "" {
+		ag.CACertPath = cfg.CACertPath
+	}
+	if !quiet {
+		fmt.Println(i18n.T("upd.checking", version, srv))
+	}
+	msg, err := ag.CheckUpdateQuiet(ctx)
+	if err != nil {
+		return lines, fmt.Errorf("%s: %w", i18n.T("upd.failed"), err)
+	}
+	if msg != "" {
+		lines = append(lines, msg)
+	}
+	// Diskteki ikili guncel; arka planda calisan istemci (servis ya da
+	// on plan) eski surumle calisiyor olabilir. Yerel kanaldan bulup
+	// ona da guncellemeyi tetikle: panelde eski surum gorunmesin.
+	if ep, r, _ := localctl.Find(); ep != nil && r != nil && r.Version != "" && r.Version != version {
+		if _, err := localctl.Call(*ep, localctl.Request{Op: "update"}); err != nil {
+			lines = append(lines, i18n.T("upd.running.fail", r.Version, err))
+			if ep.Service {
+				lines = append(lines, i18n.T("upd.running.hint"))
+			}
+		} else {
+			kind := i18n.T("set.run.fg")
+			if ep.Service {
+				kind = i18n.T("set.run.service")
+			}
+			lines = append(lines, i18n.T("upd.running.ok", kind, r.Version))
+		}
+	}
+	return lines, nil
 }

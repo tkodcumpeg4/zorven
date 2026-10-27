@@ -6,11 +6,15 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tkodcumpeg4/zorven/client/i18n"
 	"github.com/tkodcumpeg4/zorven/client/localctl"
 )
 
 func stub(t *testing.T, ep *localctl.Endpoint, ferr error, call func(localctl.Request) (localctl.Response, error)) *bytes.Buffer {
 	t.Helper()
+	prevLang := i18n.Lang()
+	i18n.Set(i18n.TR)
+	t.Cleanup(func() { i18n.Set(prevLang) })
 	of, oc, ow := findAgent, callAgent, outW
 	t.Cleanup(func() { findAgent, callAgent, outW = of, oc, ow })
 	findAgent = func() (*localctl.Endpoint, *localctl.Response, error) { return ep, nil, ferr }
@@ -32,7 +36,7 @@ func TestShareViaAgentRunning(t *testing.T) {
 		t.Fatalf("found=%v err=%v req=%+v", found, err, got)
 	}
 	s := out.String()
-	for _, want := range []string{"s1", "user:ali@x.com", "zorven access db:5432 --local 5432", "kalici"} {
+	for _, want := range []string{"s1", "user:ali@x.com", "zorven access db:5432 --local 5432", "kalıcı"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("cikti %q icermiyor:\n%s", want, s)
 		}
@@ -56,8 +60,8 @@ func TestShareViaAgentNotRunningFallsBack(t *testing.T) {
 func TestShareErrorMapping(t *testing.T) {
 	cases := map[string]string{
 		"bilinmeyen islem":        "desteklemiyor",
-		localctl.ErrNoNet.Error(): "Zorven Net etkin degil",
-		"yetkisiz: uid":           "ayni kullanici",
+		localctl.ErrNoNet.Error(): "Zorven Net etkin değil",
+		"yetkisiz: uid":           "aynı kullanıcı",
 		"port yasak (policy)":     "port yasak (policy)",
 	}
 	for in, want := range cases {
@@ -74,7 +78,7 @@ func TestShareErrorMapping(t *testing.T) {
 func TestShareRmLsPaths(t *testing.T) {
 	// Ajan yok: net hata.
 	stub(t, nil, nil, nil)
-	if err := newShareRmCmd().RunE(nil, []string{"db"}); err == nil || !strings.Contains(err.Error(), "bulunamadi") {
+	if err := newShareRmCmd().RunE(nil, []string{"db"}); err == nil || !strings.Contains(err.Error(), "bulunamadı") {
 		t.Errorf("rm ajansiz: %v", err)
 	}
 	if err := newShareLsCmd().RunE(nil, nil); err == nil {
@@ -97,7 +101,7 @@ func TestShareRmLsPaths(t *testing.T) {
 		t.Errorf("rm: %v %q", err, out.String())
 	}
 	out.Reset()
-	if err := newShareLsCmd().RunE(nil, nil); err != nil || !strings.Contains(out.String(), "zorven access db:5432 --local 5432") || !strings.Contains(out.String(), "1 es") {
+	if err := newShareLsCmd().RunE(nil, nil); err != nil || !strings.Contains(out.String(), "zorven access db:5432 --local 5432") || !strings.Contains(out.String(), "1 eş") {
 		t.Errorf("ls: %v %q", err, out.String())
 	}
 }

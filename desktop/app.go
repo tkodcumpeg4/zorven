@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/tkodcumpeg4/zorven/client/agent"
+	"github.com/tkodcumpeg4/zorven/client/i18n"
 	"github.com/tkodcumpeg4/zorven/client/metrics"
 	"github.com/tkodcumpeg4/zorven/desktop/autostart"
 	"github.com/tkodcumpeg4/zorven/shared/protocol"
@@ -35,11 +36,13 @@ type App struct {
 
 func NewApp() *App {
 	cfg, _ := loadConfig() // hata olsa da varsayilanla devam edilir
+	// Etkin dil (ajan mesajlari dahil): ayar > ortam > isletim sistemi > en.
+	i18n.Set(i18n.Detect(cfg.Language))
 	auto, _ := autostart.New()
 
 	return &App{
 		cfg:    cfg,
-		status: agent.Status{State: agent.StateStopped, Message: "baglanti yok"},
+		status: agent.Status{State: agent.StateStopped, Message: tm("status.none")},
 		auto:   auto,
 		log:    slog.New(slog.NewTextHandler(os.Stderr, nil)),
 	}
@@ -93,6 +96,7 @@ func (a *App) SaveConfig(cfg Config) string {
 	}
 
 	a.mu.Lock()
+	cfg.Language = a.cfg.Language // dil yalnizca SetLanguage ile degisir
 	a.cfg = cfg
 	a.mu.Unlock()
 
@@ -125,7 +129,7 @@ func (a *App) connect(target string) string {
 		cfg.ServerAddr = "zorven.app:443"
 	}
 	if cfg.Token == "" {
-		return "Token boş. Lütfen Ayarlar sekmesinden istemci token'ınızı girin."
+		return tm("app.tokenEmpty")
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -147,7 +151,7 @@ func (a *App) connect(target string) string {
 		// Masaustu kendi guncelleyicisini kullanir (desktop.json); gomulu ajan
 		// CLI ikilisini bu exe'nin uzerine yazmamali.
 		NoAutoUpdate: true,
-		Log:               a.log,
+		Log:          a.log,
 		// Eski (iptal edilmis) ajanin gec gelen "durduruldu" durumu yeni
 		// baglantinin durumunu ezmesin: yalnizca aktif ajan yayin yapar.
 		OnStatus: func(s agent.Status) {
@@ -186,7 +190,7 @@ func (a *App) connect(target string) string {
 // SharePort, belirtilen portu tek tikla paylasir.
 func (a *App) SharePort(port int, secureMode bool) string {
 	if port < 1 || port > 65535 {
-		return "Geçersiz port numarası (1-65535 arasında olmalı)"
+		return tm("app.badPort")
 	}
 	a.mu.Lock()
 	a.cfg.LastPort = port
@@ -240,7 +244,7 @@ func (a *App) Disconnect() {
 	}
 	a.ag = nil
 	a.mu.Unlock()
-	a.publish(agent.Status{State: agent.StateStopped, Message: "baglanti kesildi"})
+	a.publish(agent.Status{State: agent.StateStopped, Message: tm("status.cut")})
 }
 
 // CloseSessions, aktif uzak terminal ve ekran oturumlarını sonlandırır.
@@ -276,10 +280,51 @@ func (a *App) GetAutostart() bool {
 // Hata mesajini doner; bos string basari demektir.
 func (a *App) SetAutostart(on bool) string {
 	if a.auto == nil {
-		return "Bu platformda otomatik baslatma kullanilamiyor"
+		return tm("app.noAutostart")
 	}
 	if err := a.auto.Set(on); err != nil {
 		return err.Error()
+	}
+	return ""
+}
+
+// LanguageInfo, arayuze dil ayarini ve etkin dili bildirir.
+type LanguageInfo struct {
+	Setting   string `json:"setting"`   // kayitli deger: "", "tr", "en", "ja"
+	Effective string `json:"effective"` // gercekte kullanilan dil
+}
+
+// GetLanguage, kayitli dil ayarini ve etkin dili doner.
+func (a *App) GetLanguage() LanguageInfo {
+	a.mu.Lock()
+	s := a.cfg.Language
+	a.mu.Unlock()
+	return LanguageInfo{Setting: s, Effective: i18n.Lang()}
+}
+
+// SetLanguage, arayuz dilini kaydeder ("" = otomatik) ve hemen uygular:
+// client/i18n etkin dili degisir (ajan mesajlari dahil), tepsi menusu
+// yeniden etiketlenir. Hata metni doner; bos = basari.
+func (a *App) SetLanguage(lang string) string {
+	lang = strings.TrimSpace(lang)
+	if lang != "" && i18n.Normalize(lang) == "" {
+		return tm("app.badLanguage", lang)
+	}
+	lang = i18n.Normalize(lang)
+
+	a.mu.Lock()
+	a.cfg.Language = lang
+	cfg := a.cfg
+	st := a.status
+	a.mu.Unlock()
+
+	i18n.Set(i18n.Detect(lang))
+	if err := saveConfig(cfg); err != nil {
+		return tm("app.saveFail", err.Error())
+	}
+	if a.tray != nil {
+		a.tray.relabel()
+		a.tray.update(st)
 	}
 	return ""
 }

@@ -59,3 +59,14 @@ func TestCustomHostnameRespectsProject(t *testing.T) {
 		t.Fatalf("baska projede kayitli: %d %s", w.Code, w.Body.String())
 	}
 }
+
+// Ayni projede ayni ad tekrar eklenirse "baska projede" mesaji VERILMEZ
+// (depo benzersizligiyle genel hostname_taken doner).
+func TestCustomHostnameSameProjectNotOtherProject(t *testing.T) {
+	st := &customProjStore{rows: []store.Hostname{{ID: "hst_1", TenantID: "ten_1", FQDN: "ornek-site.com", Type: store.HostTypeCustom, ProjectID: "prj_web"}}}
+	s := &Server{Store: st, PlatformDomain: "zorven.app"}
+	w := postCustom(s, "prj_web", "ornek-site.com")
+	if strings.Contains(w.Body.String(), "hostname_in_other_project") {
+		t.Fatalf("ayni projede 'baska proje' denmemeli: %d %s", w.Code, w.Body.String())
+	}
+}

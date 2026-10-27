@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/spf13/cobra"
 	"github.com/tkodcumpeg4/zorven/client/config"
+	"github.com/tkodcumpeg4/zorven/client/i18n"
 	"github.com/tkodcumpeg4/zorven/shared/mcptools"
 )
 
@@ -26,14 +28,9 @@ func newMCPCmd() *cobra.Command {
 	var insecureFlag bool
 
 	cmd := &cobra.Command{
-		Use:   "mcp",
-		Short: "Zorven'i MCP sunucusu olarak calistirir (stdio; Claude/Cursor icin)",
-		Long: "Zorven araclarini (cihaz, tunel, alan adi, istek logu, metrik, web kapisi) Model Context\n" +
-			"Protocol uzerinden sunar. Silme araclari yoktur.\n\n" +
-			"API token gerekir (panel > API Tokenlari). Salt okuma icin *:read kapsamlari yeterlidir;\n" +
-			"token'da olmayan kapsamlarin araclari listelenmez.\n\n" +
-			"  ZORVEN_API_TOKEN=zrv_api_... zorven mcp\n\n" +
-			"Sunucu adresi `zorven` yapilandirmasindan (varsayilan zorven.app) alinir; --server/--url ile degisir.",
+		Use:          "mcp",
+		Short:        i18n.T("mcp.short"),
+		Long:         i18n.T("mcp.long"),
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -42,11 +39,11 @@ func newMCPCmd() *cobra.Command {
 				token = strings.TrimSpace(os.Getenv("ZORVEN_API_TOKEN"))
 			}
 			if token == "" {
-				return fmt.Errorf("API token gerekli: --api-token veya ZORVEN_API_TOKEN (panel > API Tokenlari)")
+				return errors.New(i18n.T("mcp.err.token"))
 			}
 			// Istemci (ajan) token'i bir cihazin kimligidir; REST API'de gecmez.
 			if strings.HasPrefix(token, "zrv_live_") || strings.HasPrefix(token, "rpsh_live_") {
-				return fmt.Errorf("bu bir istemci (ajan) token'i; zorven mcp bir API token (zrv_api_...) ister")
+				return errors.New(i18n.T("mcp.err.agenttoken"))
 			}
 			cfg, _ := config.Load()
 			base, err := mcpBaseURL(urlFlag, srvFlag, os.Getenv("ZORVEN_SERVER"), cfg.ServerAddr, insecureFlag || cfg.Insecure)
@@ -68,17 +65,17 @@ func newMCPCmd() *cobra.Command {
 			resp, err := be.Do(vctx, mcptools.Request{Method: http.MethodGet, Path: "/api/v1/me", Project: project})
 			cancel()
 			if err != nil {
-				return fmt.Errorf("%s adresine ulasilamadi: %w", base, err)
+				return fmt.Errorf("%s: %w", i18n.T("mcp.err.unreach", base), err)
 			}
 			if resp.Status == http.StatusUnauthorized {
-				return fmt.Errorf("API token gecersiz veya suresi dolmus (%s)", base)
+				return errors.New(i18n.T("mcp.err.unauth", base))
 			}
 			if resp.Status != http.StatusOK {
-				return fmt.Errorf("sunucu beklenmeyen yanit verdi: HTTP %d", resp.Status)
+				return errors.New(i18n.T("mcp.err.status", resp.Status))
 			}
 			var me map[string]any
 			if err := json.Unmarshal(resp.Body, &me); err != nil {
-				return fmt.Errorf("sunucu yaniti cozulemedi: %w", err)
+				return fmt.Errorf("%s: %w", i18n.T("mcp.err.decode"), err)
 			}
 			scopes := mcptools.ScopesFromMe(me)
 			if scopes == nil {
@@ -92,16 +89,16 @@ func newMCPCmd() *cobra.Command {
 			if httpAddr != "" {
 				return serveMCPHTTP(ctx, httpAddr, newSrv())
 			}
-			fmt.Fprintf(os.Stderr, "zorven mcp: %s (stdio), kapsamlar: %s\n", base, strings.Join(scopes, ","))
+			fmt.Fprintln(os.Stderr, i18n.T("mcp.stdio", base, strings.Join(scopes, ",")))
 			return newSrv().Run(ctx, &mcp.StdioTransport{})
 		},
 	}
-	cmd.Flags().StringVar(&apiToken, "api-token", "", "API token (ZORVEN_API_TOKEN ile de verilebilir)")
-	cmd.Flags().StringVar(&srvFlag, "server", "", "Zorven sunucusu (host:port; varsayilan yapilandirmadan)")
-	cmd.Flags().StringVar(&urlFlag, "url", "", "API taban adresi (or. https://zorven.app); --server'i ezer")
-	cmd.Flags().StringVar(&project, "project", "", "varsayilan proje (slug veya kimlik)")
-	cmd.Flags().BoolVar(&insecureFlag, "insecure", false, "https yerine http (yalnizca lokal gelistirme)")
-	cmd.Flags().StringVar(&httpAddr, "http", "", "stdio yerine yerel streamable HTTP dinle (yalnizca loopback, or. 127.0.0.1:8765)")
+	cmd.Flags().StringVar(&apiToken, "api-token", "", i18n.T("net.flag.apitoken"))
+	cmd.Flags().StringVar(&srvFlag, "server", "", i18n.T("mcp.flag.server"))
+	cmd.Flags().StringVar(&urlFlag, "url", "", i18n.T("mcp.flag.url"))
+	cmd.Flags().StringVar(&project, "project", "", i18n.T("mcp.flag.project"))
+	cmd.Flags().BoolVar(&insecureFlag, "insecure", false, i18n.T("mcp.flag.insecure"))
+	cmd.Flags().StringVar(&httpAddr, "http", "", i18n.T("mcp.flag.http"))
 	return cmd
 }
 
@@ -121,7 +118,7 @@ func (t projectTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 func mcpBaseURL(urlFlag, srvFlag, envSrv, cfgSrv string, insecure bool) (string, error) {
 	if u := strings.TrimSpace(urlFlag); u != "" {
 		if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
-			return "", fmt.Errorf("--url http:// veya https:// ile baslamali")
+			return "", errors.New(i18n.T("mcp.err.url"))
 		}
 		return strings.TrimRight(u, "/"), nil
 	}
@@ -154,7 +151,7 @@ func mcpBaseURL(urlFlag, srvFlag, envSrv, cfgSrv string, insecure bool) (string,
 // gelen capraz-site istekleri reddedilir.
 func serveMCPHTTP(ctx context.Context, addr string, srv *mcp.Server) error {
 	if !isLoopbackListen(addr) {
-		return fmt.Errorf("%s loopback degil: yerel MCP HTTP yalnizca 127.0.0.1/localhost uzerinde acilabilir", addr)
+		return errors.New(i18n.T("mcp.err.loopback", addr))
 	}
 	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv },
 		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
@@ -166,7 +163,7 @@ func serveMCPHTTP(ctx context.Context, addr string, srv *mcp.Server) error {
 		defer cancel()
 		_ = hs.Shutdown(sctx)
 	}()
-	fmt.Fprintf(os.Stderr, "zorven mcp: http://%s (yalnizca yerel). Cikmak icin Ctrl+C.\n", addr)
+	fmt.Fprintln(os.Stderr, i18n.T("mcp.http", addr))
 	if err := hs.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return err
 	}

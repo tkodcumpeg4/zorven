@@ -116,7 +116,7 @@ const (
 func (sm *screenManager) open(parent context.Context, msg protocol.ScreenOpen) {
 	useScreen2 := msg.Mode == protocol.ScreenModeScreen2 && sm.cs.screen2
 	if useScreen2 && platNumDisplays() == 0 {
-		sm.sendError(parent, msg.SessionID, errScreen2Unsupported.Error())
+		sm.sendError(parent, msg.SessionID, screenUnsupportedErr().Error())
 		return
 	}
 	fps := msg.FPS

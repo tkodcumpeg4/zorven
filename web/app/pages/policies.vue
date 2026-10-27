@@ -7,7 +7,7 @@ const { isPrivileged } = useRole()
 const { t } = useI18n()
 
 const ACTION_TYPES: PolicyAction['type'][] = [
-  'deny', 'rate_limit', 'set_header', 'redirect', 'require_mtls', 'verify_webhook', 'waf',
+  'deny', 'rate_limit', 'set_header', 'redirect', 'require_mtls', 'verify_webhook', 'waf', 'challenge',
 ]
 const WEBHOOK_PROVIDERS = ['github', 'stripe', 'gitlab', 'shopify', 'slack'] as const
 const WAF_RULESETS = ['owasp-lite'] as const
@@ -64,7 +64,7 @@ function setMethodsCsv(r: PolicyRule, v: string) {
 // backend "boş bırakılan koşulu dikkate almaz" diyor, boş dizi de aynı anlama
 // gelir ama undefined JSON'u temiz tutar ve kaydedilmiş kural okunaklı kalır.
 function csv(v?: (string | number)[]): string { return (v || []).join(', ') }
-function setCsvUpper(r: PolicyRule, field: 'country' | 'continent', v: string) {
+function setCsvUpper(r: PolicyRule, field: 'country' | 'country_not' | 'continent', v: string) {
   const arr = v.split(',').map(s => s.trim().toUpperCase()).filter(Boolean)
   r.match[field] = arr.length ? arr : undefined
 }
@@ -100,7 +100,7 @@ function triSet(r: PolicyRule, field: 'tor_exit' | 'hosting', v: TriState) {
 // Geo/liste koşulu kullanan kurallar için uyarı gösterilir.
 function usesGeoOrLists(r: PolicyRule): boolean {
   const m = r.match
-  return !!(m.country?.length || m.continent?.length || m.asn?.length || m.isp?.length
+  return !!(m.country?.length || m.country_not?.length || m.unknown || m.continent?.length || m.asn?.length || m.isp?.length
     || m.reputation?.length || m.tor_exit !== undefined || m.hosting !== undefined)
 }
 
@@ -114,6 +114,7 @@ function onActionTypeChange(r: PolicyRule) {
     rate_limit: ['key', 'requests', 'window_sec', 'burst'],
     set_header: ['request', 'response'],
     require_mtls: [],
+    challenge: [],
     verify_webhook: ['provider', 'secret_ref', 'tolerance_sec', 'status'],
     waf: ['ruleset', 'patterns', 'status'],
   }
@@ -335,6 +336,11 @@ onMounted(load)
               </summary>
               <div class="mt-2 grid grid-cols-2 gap-2">
                 <input :value="csv(r.match.country)" type="text" :placeholder="t('policies.countryPh')" class="rounded-md border border-line bg-surface px-2 py-1.5 text-sm text-fg outline-none focus:border-accent" @input="setCsvUpper(r, 'country', ($event.target as HTMLInputElement).value)">
+                <input :value="csv(r.match.country_not)" type="text" :placeholder="t('policies.countryNotPh')" class="rounded-md border border-line bg-surface px-2 py-1.5 text-sm text-fg outline-none focus:border-accent" @input="setCsvUpper(r, 'country_not', ($event.target as HTMLInputElement).value)">
+                <label class="flex items-center gap-2 text-xs text-fg-muted">
+                  <input type="checkbox" :checked="r.match.unknown === true" class="accent-[var(--color-accent)]" @change="r.match.unknown = ($event.target as HTMLInputElement).checked ? true : undefined">
+                  {{ t('policies.unknownCountry') }}
+                </label>
                 <input :value="csv(r.match.continent)" type="text" :placeholder="t('policies.continentPh')" class="rounded-md border border-line bg-surface px-2 py-1.5 text-sm text-fg outline-none focus:border-accent" @input="setCsvUpper(r, 'continent', ($event.target as HTMLInputElement).value)">
                 <input :value="csv(r.match.asn)" type="text" :placeholder="t('policies.asnPh')" class="rounded-md border border-line bg-surface px-2 py-1.5 text-sm text-fg outline-none focus:border-accent" @input="setAsnCsv(r, ($event.target as HTMLInputElement).value)">
                 <input :value="csv(r.match.isp)" type="text" :placeholder="t('policies.ispPh')" class="rounded-md border border-line bg-surface px-2 py-1.5 text-sm text-fg outline-none focus:border-accent" @input="setIspCsv(r, ($event.target as HTMLInputElement).value)">
@@ -383,6 +389,10 @@ onMounted(load)
               <input v-model.number="r.action.requests" type="number" :placeholder="t('policies.requests')" class="rounded-md border border-line bg-surface px-2 py-1.5 text-sm text-fg outline-none focus:border-accent">
               <input v-model.number="r.action.window_sec" type="number" :placeholder="t('policies.windowSec')" class="rounded-md border border-line bg-surface px-2 py-1.5 text-sm text-fg outline-none focus:border-accent">
               <input v-model.number="r.action.burst" type="number" placeholder="burst" class="rounded-md border border-line bg-surface px-2 py-1.5 text-sm text-fg outline-none focus:border-accent">
+            </div>
+
+            <div v-else-if="r.action.type === 'challenge'" class="text-xs text-fg-muted">
+              {{ t('policies.challengeHint') }}
             </div>
 
             <div v-else-if="r.action.type === 'require_mtls'" class="text-xs text-fg-muted">

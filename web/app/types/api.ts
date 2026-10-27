@@ -39,7 +39,9 @@ export interface PolicyMatch {
   methods?: string[]
   header?: Record<string, string>
   // Geo (F03a) — boş bırakılanlar eşleşmede dikkate alınmaz.
-  country?: string[]      // ISO 3166-1 alpha-2
+  country?: string[]      // ISO 3166-1 alpha-2 (icinde)
+  country_not?: string[]  // Z3: ulke bu listede DEGILSE eslesir
+  unknown?: boolean       // Z3: ulke cozulemediginde eslesir
   continent?: string[]    // kıta kodu
   asn?: number[]
   isp?: string[]          // ASN organizasyon adı
@@ -50,7 +52,7 @@ export interface PolicyMatch {
 }
 export type PolicyActionType =
   | 'deny' | 'set_header' | 'redirect' | 'require_mtls' | 'rate_limit'
-  | 'verify_webhook' | 'waf'
+  | 'verify_webhook' | 'waf' | 'challenge'
 
 export interface PolicyAction {
   type: PolicyActionType
@@ -131,6 +133,61 @@ export interface Client {
 // Device, istemci kaydı + kalıcı cihaz bilgisi + canlı durum (F14).
 export interface Device extends Client {
   tunnels?: Tunnel[]         // yalnızca tek cihaz detayında dolu
+}
+
+export interface TimeWindow { days?: string[], from: string, to: string }
+
+// Z1/Z2: cihaz durusu + zaman penceresi koşulları (cekirdek).
+export interface PolicyConditions {
+  require_2fa?: boolean
+  source_cidrs?: string[]
+  min_client_version?: string
+  min_os_version?: Record<string, string>   // windows | macos | linux
+  require_disk_encryption?: boolean
+  require_firewall?: boolean
+  require_attested_posture?: boolean
+  max_posture_age_sec?: number
+  unknown_is?: 'allow' | 'deny'
+  time_windows?: TimeWindow[]
+  time_zone?: string
+}
+
+export type Tri = 'yes' | 'no' | 'unknown'
+
+// Z1: cihazin son durus raporu (istemci beyani, imzasiz).
+export interface DevicePosture {
+  os_name: string
+  os_version: string
+  os_build?: string
+  disk_encrypted: Tri
+  firewall_on: Tri
+  screen_lock: Tri
+  client_version: string
+  is_service: boolean
+  reported_at: string
+}
+
+export interface PostureCompliance { policy_id: string, policy_name: string, ok: boolean, reason?: string }
+export interface DevicePostureView { posture: DevicePosture | null, compliance: PostureCompliance[], age_sec?: number }
+
+export interface PolicyPreview {
+  notes: string[]
+  targets: { client_id: string, name: string }[]
+  members: { user_id: string, email: string, role: string, exempt: boolean, allowed: boolean, reason?: string }[]
+  devices: { client_id: string, name: string, has_posture: boolean, reported_at?: string, allowed: boolean, reason?: string }[]
+  summary: Record<string, number>
+  /** Z5: politikanın özel ağ (Mod B) etkisi. */
+  net?: PolicyPreviewNet
+}
+
+export interface PolicyPreviewNet {
+  enabled: boolean
+  skipped?: 'person_condition' | 'bad_net_scope'
+  level?: 'resource' | 'device'
+  sources?: { client_id: string, name: string, tun: boolean, has_posture: boolean, allowed: boolean, reason?: string }[]
+  targets?: { client_id: string, name: string, tun: boolean }[]
+  resources?: { name: string, client_id: string, host: string, port: number }[]
+  summary?: Record<string, number>
 }
 
 export type TunnelProto = 'http' | 'tcp' | 'udp'
@@ -398,6 +455,7 @@ export interface TunnelAccess {
     has_password?: boolean
     providers?: string[]
     allowed_emails?: string[]
+    allowed_groups?: string[]
     session_ttl_minutes?: number // 0 = varsayılan (12 saat)
     session_sliding?: boolean
   }
@@ -440,6 +498,7 @@ export interface TunnelAccessInput {
     // oauth
     providers?: string[]
     allowed_emails?: string[]
+    allowed_groups?: string[]
     // ortak (basic + oauth): ziyaretçi oturumu
     session_ttl_minutes?: number // 0 = varsayılan; 15..43200
     session_sliding?: boolean
@@ -657,6 +716,35 @@ export interface TCPStatMinute {
 export interface TunnelTCPResp {
   live: TCPLiveStats | null
   series: TCPStatMinute[]
+}
+
+// ZTNA Z3 — tunel WAF + Geo.
+export interface TunnelBotSettings {
+  mode: 'off' | 'suspicious' | 'always'
+  difficulty?: number          // PoW bit sayisi 12-22 (vars. 18)
+  ttl_minutes?: number         // 5-10080 (vars. 60)
+  exclude_paths?: string[]     // en fazla 32, '*' yalniz sonda
+  allow_verified_bots?: boolean
+  block_empty_ua?: boolean
+}
+export interface TunnelRateSettings {
+  enabled: boolean
+  requests?: number            // 1-100000 (vars. 120)
+  window_seconds?: number      // 1-3600 (vars. 60)
+  action?: 'block' | 'challenge'
+  exclude_paths?: string[]
+}
+export interface TunnelSecurity {
+  tunnel_id: string
+  waf: { mode: 'off' | 'log' | 'block', body?: boolean, disabled_rules?: string[] }
+  geo: { mode: 'off' | 'allow' | 'deny', countries?: string[], unknown_is?: 'allow' | 'deny' }
+  // Bot koruması + hız sınırı (eski sunucuda yok olabilir; varsayılanlarla doldurulur).
+  bot?: TunnelBotSettings
+  rate?: TunnelRateSettings
+  updated_at?: string
+  rules?: { id: string, category: string }[]
+  geo_db_loaded?: boolean
+  plan_ok?: boolean
 }
 
 // FAZ 6.6 — mTLS / istemci sertifikası.
@@ -940,7 +1028,28 @@ export interface NetNode {
   ip: string
   online: boolean
   relayed_bytes: number
+  /** Paylaşım sahibiyle yol (W2): direct | relay | boş (bilinmiyor). */
+  path?: 'direct' | 'relay' | ''
+  rtt_ms?: number
+  /** Mod B (W3): düğüm tam ağ katmanında (OS TUN). */
+  tun?: boolean
 }
+/** Mod B erişim kuralı (cihazdan cihaza; varsayılan hepsi kapalı). */
+export interface NetTunRule {
+  id: string
+  name?: string
+  src: NetGrantee
+  /** Hedef cihaz (client) kimliği veya "*" */
+  dst: string
+  proto: 'tcp' | 'udp' | 'icmp' | 'any'
+  ports?: string
+  src_name?: string
+  dst_name?: string
+  created_by?: string
+  created_at?: string
+}
+export interface NetNetwork { cidr: string, resolver: string, zone: string, tun_enabled: boolean }
+export type NetPath = 'direct' | 'relay' | 'mixed' | ''
 export interface NetShare {
   id: string
   name: string
@@ -956,4 +1065,97 @@ export interface NetShare {
   can_manage: boolean
   relation: 'owner' | 'grantee' | 'admin'
   connected: NetNode[]
+  /** Bağlı alıcıların yol özeti (W2): direct | relay | mixed | boş. */
+  path?: NetPath
+}
+
+// --- Tunel MCP modu (M3/M4) ---
+export interface TunnelMCPConfig {
+  path: string
+  transport: 'streamable' | 'sse' | 'auto'
+  auth: 'oauth' | 'apikey' | 'none'
+  ack_no_auth?: boolean
+  allow_tools: string[]
+  deny_tools: string[]
+  log_level: 'meta' | 'none'
+  max_request_bytes: number
+  head_timeout_sec: number
+  idle_timeout_sec: number
+  rate_limit_per_min: number
+  max_streams: number
+  allow_org_members: boolean
+  allowed_emails: string[]
+}
+export interface TunnelMCP {
+  tunnel_id: string
+  enabled: boolean
+  config: TunnelMCPConfig
+  urls: string[]
+  key_count: number
+  oauth_available: boolean
+  protocol: string
+}
+export interface MCPKey {
+  id: string
+  label: string
+  prefix: string
+  created_at: string
+  expires_at?: string
+}
+export interface MCPKeyCreated { id: string, label: string, prefix: string, key: string, expires_at?: string }
+export interface MCPCall {
+  id: number
+  ts: string
+  method: string
+  tool?: string
+  status: 'ok' | 'error' | 'denied' | 'rate_limited'
+  error_code?: number
+  duration_ms: number
+  client?: string
+  principal?: string
+}
+export interface MCPToolStat { tool: string, calls: number, errors: number, denied: number, avg_ms: number, max_ms: number, p95_ms: number }
+export interface MCPStats { window: string, tools: MCPToolStat[], totals: { calls: number, errors: number, denied: number } }
+export interface MCPProbeStep { ok: boolean, status?: number, ms?: number, error?: string }
+export interface MCPTestResult {
+  auth: string
+  checks: Record<string, boolean>
+  probe: {
+    enabled: boolean
+    agent_online: boolean
+    initialize: MCPProbeStep
+    tools_list: MCPProbeStep
+    tool_count: number
+    tool_names?: string[]
+    protocol_version?: string
+    server_name?: string
+  }
+}
+
+// Zorven CAPTCHA (siteler). secret yalniz olusturma/yenileme yanitinda doner.
+export interface CaptchaTotals {
+  challenge: number
+  solve: number
+  verify_ok: number
+  verify_fail: number
+  renewals: number
+  unique_passes: number
+}
+export interface CaptchaSite {
+  id: string
+  name: string
+  site_key: string
+  domains: string[]
+  difficulty: number
+  pass_cookie: { enabled: boolean, ttl_minutes: number }
+  created_at: string
+  updated_at: string
+  stats?: { today: CaptchaTotals, last_7_days: CaptchaTotals }
+  secret?: string
+}
+export interface CaptchaSiteInput {
+  name: string
+  domains: string[]
+  difficulty: number
+  pass_cookie: { enabled: boolean, ttl_minutes: number }
 }

@@ -56,6 +56,13 @@ export default defineNuxtConfig({
         secure: false, // lokal self-signed sertifika
         ws: true,
       },
+      // Zorven CAPTCHA widget betigi (/captcha/v1/api.js): kayit formu ayni
+      // origin'den yukler. Onek kirpilir, hedefe geri eklenir (yukaridaki gibi).
+      '/captcha': {
+        target: (process.env.ZORVEN_PROXY_TARGET || 'https://localhost:8443') + '/captcha',
+        changeOrigin: true,
+        secure: false,
+      },
     },
   },
 

@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"io"
+	"log/slog"
 	"net/http"
 	"path"
 	"regexp"
@@ -37,7 +37,12 @@ type rawMatch struct {
 	Methods    []string          `json:"methods"`
 	Header     map[string]string `json:"header"`
 	// Geo/IP (FAZ 1 Part 2 / F03a). Bos birakilanlar eslesmede dikkate alinmaz.
-	Country   []string `json:"country"`   // ISO 3166-1 alpha-2
+	Country []string `json:"country"` // ISO 3166-1 alpha-2 (icinde)
+	// CountryNot: ulke bu listede DEGILSE eslesir (ulke cozulmus olmali).
+	CountryNot []string `json:"country_not"`
+	// Unknown: true ise ulke COZULEMEDIGINDE eslesir (Geo DB yok / ozel IP).
+	// Boylece "bilinmeyeni de reddet" kurali yazilabilir.
+	Unknown   *bool    `json:"unknown"`
 	Continent []string `json:"continent"` // kita kodu
 	ASN       []uint   `json:"asn"`
 	ISP       []string `json:"isp"` // ASN organizasyon adi (tam eslesme, buyuk/kucuk duyarsiz)
@@ -83,6 +88,7 @@ const (
 	actRateLimit
 	actVerifyWebhook
 	actWAF
+	actChallenge // Z3: tunelin ziyaretci OAuth'una yonlendir (yoksa 403)
 )
 
 type matchCond struct {
@@ -90,11 +96,13 @@ type matchCond struct {
 	methods    map[string]struct{} // upper; bos => her metot
 	header     map[string]string
 	// Geo/IP kosullari. needsGeo true ise cozum gerekir; cozulemezse kosul FALSE.
-	country   map[string]struct{}
-	continent map[string]struct{}
-	asn       map[uint]struct{}
-	isp       map[string]struct{}
-	needsGeo  bool
+	country    map[string]struct{}
+	countryNot map[string]struct{}
+	unknown    bool
+	continent  map[string]struct{}
+	asn        map[uint]struct{}
+	isp        map[string]struct{}
+	needsGeo   bool
 	// Liste tabanli kosullar (F03b-d)
 	torExit    *bool
 	hosting    *bool
@@ -147,6 +155,7 @@ type policyOutcome struct {
 	webhookFailed  bool // => 401/413 (verify_webhook)
 	webhookStatus  int
 	webhookMessage string
+	challenge      bool   // Z3: ziyaretci OAuth'u gerekli (ingress dogrular)
 	wafBlocked     bool   // => 403
 	wafRule        string // yalnizca LOG icin; yanita yazilmaz
 
@@ -222,6 +231,14 @@ func compileMatch(m rawMatch) matchCond {
 		mc.country = upperSet(m.Country)
 		mc.needsGeo = true
 	}
+	if len(m.CountryNot) > 0 {
+		mc.countryNot = upperSet(m.CountryNot)
+		mc.needsGeo = true
+	}
+	if m.Unknown != nil && *m.Unknown {
+		mc.unknown = true
+		mc.needsGeo = true
+	}
 	if len(m.Continent) > 0 {
 		mc.continent = upperSet(m.Continent)
 		mc.needsGeo = true
@@ -289,6 +306,8 @@ func compileActionWith(a rawAction, secrets map[string]string, newLim func(perSe
 		return policyAction{kind: actRedirect, location: a.Location, status: a.Status}, nil
 	case "require_mtls":
 		return policyAction{kind: actRequireMTLS}, nil
+	case "challenge":
+		return policyAction{kind: actChallenge}, nil
 	case "set_header":
 		if len(a.Request.Set) == 0 && len(a.Request.Remove) == 0 &&
 			len(a.Response.Set) == 0 && len(a.Response.Remove) == 0 {
@@ -461,9 +480,24 @@ func (m *matchCond) matches(r *http.Request, geo ipInfo, intel intelInfo) bool {
 	if !m.needsGeo {
 		return m.matchesIntel(intel)
 	}
+	if m.unknown {
+		// "Ulke bilinmiyor" kosulu: yalniz cozulemediginde eslesir.
+		if geo.ok && geo.country != "" {
+			return false
+		}
+		return m.matchesIntel(intel)
+	}
 	if !geo.ok {
 		// DB yok veya IP cozulemedi: Geo kosulu eslesmez (deny tetiklenmez).
 		return false
+	}
+	if len(m.countryNot) > 0 {
+		if geo.country == "" {
+			return false // cozulmemis ulke "disinda" sayilmaz; bunun icin unknown kullanin
+		}
+		if _, in := m.countryNot[geo.country]; in {
+			return false
+		}
 	}
 	if len(m.country) > 0 {
 		if _, ok := m.country[geo.country]; !ok {
@@ -600,7 +634,7 @@ func (rt *Router) evaluatePolicyList(policies []*compiledPolicy, r *http.Request
 		for i := range cp.rules {
 			cr := &cp.rules[i]
 			if cr.match.needsGeo && !geoDone {
-				geo = rt.geo.lookup(clientIP)
+				geo = rt.geoLookup(clientIP)
 				geoDone = true
 			}
 			if cr.match.needsIntel && !intelDone {
@@ -625,6 +659,10 @@ func (rt *Router) evaluatePolicyList(policies []*compiledPolicy, r *http.Request
 				out.redirectLoc = cr.action.location
 				out.redirectStatus = st
 				return out
+			case actChallenge:
+				// Terminal DEGIL: sonraki kurallar degerlendirilmeye devam eder;
+				// ingress ziyaretci oturumunu en sonda dogrular.
+				out.challenge = true
 			case actRequireMTLS:
 				if !mtlsOK {
 					out.mtlsFailed = true

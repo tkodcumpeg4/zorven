@@ -159,14 +159,14 @@ func TestAdaptCtl(t *testing.T) {
 			t.Fatal("erken yukseldi")
 		}
 	}
-	if !a.Observe(time.Millisecond) || a.Quality() != screen2MinQuality+5 || a.FPS() != screen2MinFPS+2 {
+	if !a.Observe(time.Millisecond) || a.Quality() != screen2MinQuality+5 || a.FPS() != screen2MinFPS+screen2RaiseFPS {
 		t.Fatalf("yukselis: q=%d fps=%d", a.Quality(), a.FPS())
 	}
 	// orta bolge sayaci sifirlar
 	for i := 0; i < screen2RaiseAfter-1; i++ {
 		a.Observe(time.Millisecond)
 	}
-	a.Observe(a.Interval() / 4)
+	a.Observe(a.Interval() / 2)
 	for i := 0; i < screen2RaiseAfter-1; i++ {
 		if a.Observe(time.Millisecond) {
 			t.Fatal("sayac sifirlanmaliydi")
@@ -188,6 +188,46 @@ func TestAdaptCtl(t *testing.T) {
 	b.Observe(time.Second)
 	if b.Quality() != 20 || b.FPS() != 2 {
 		t.Fatalf("dusuk tavan: %d %d", b.Quality(), b.FPS())
+	}
+}
+
+func TestAdaptCtlNewRules(t *testing.T) {
+	a := newAdaptCtl(80, 30)
+	iv := a.Interval()
+	// tek yavas kare (ornegin anahtar kare) dusurmez; rahat kare sayaci sifirlar
+	if a.Observe(iv + iv/4) {
+		t.Fatal("tek yavas kare dusurmemeli")
+	}
+	if a.Observe(time.Millisecond); a.FPS() != 30 {
+		t.Fatal("rahat kare sonrasi fps ayni olmali")
+	}
+	// art arda iki yavas kare dusurur
+	a.Observe(iv + iv/4)
+	if !a.Observe(iv+iv/4) || a.FPS() != 22 || a.Quality() != 70 {
+		t.Fatalf("iki yavas kare: q=%d fps=%d", a.Quality(), a.FPS())
+	}
+	// yavas, rahat, yavas: art arda degil => dusmez
+	b := newAdaptCtl(80, 30)
+	b.Observe(2 * b.Interval())
+	b.Observe(time.Millisecond)
+	if b.Observe(2 * b.Interval()) {
+		t.Fatal("art arda olmayan yavaslar dusurmemeli")
+	}
+	// siddetli (>3 aralik) tek karede hemen dusurur
+	c := newAdaptCtl(80, 30)
+	if !c.Observe(4*c.Interval()) || c.FPS() != 22 {
+		t.Fatalf("siddetli: fps=%d", c.FPS())
+	}
+	// yukselis: 4 rahat kare, +3 fps, 30 tavan
+	for i := 0; i < screen2RaiseAfter; i++ {
+		c.Observe(time.Millisecond)
+	}
+	if c.FPS() != 25 {
+		t.Fatalf("yukselis: fps=%d", c.FPS())
+	}
+	// 30 tavani: istenen 30 kabul edilir
+	if d := newAdaptCtl(80, 30); d.FPS() != 30 {
+		t.Fatal("30 fps tavani")
 	}
 }
 
@@ -313,7 +353,7 @@ func TestScreen2SessionLoop(t *testing.T) {
 
 	// 6) canli kalite/fps tavani
 	s.Update(screen2Params{FPS: 5, Quality: 40, Display: -1})
-	waitFor(t, func() bool { return s.ctl.maxFPS == 5 }) // yarisli okuma kabul: yalniz test
+	waitFor(t, func() bool { return s.ctl.MaxFPS() == 5 })
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatal(err)

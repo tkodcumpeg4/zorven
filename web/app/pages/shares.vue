@@ -50,6 +50,16 @@ function granteeLabel(g: NetGrantee): string {
   return key[g.id] ? t(`shares.${key[g.id]}`) : g.id
 }
 
+// Yol göstergesi (W2): doğrudan P2P / sunucu relay / karışık.
+function pathMeta(p?: string): { icon: string, label: string, hint: string, cls: string } | null {
+  switch (p) {
+    case 'direct': return { icon: 'lucide:zap', label: t('shares.pathDirect'), hint: t('shares.pathDirectHint'), cls: 'bg-success/15 text-success' }
+    case 'relay': return { icon: 'lucide:server', label: t('shares.pathRelay'), hint: t('shares.pathRelayHint'), cls: 'bg-fg-subtle/15 text-fg-muted' }
+    case 'mixed': return { icon: 'lucide:shuffle', label: t('shares.pathMixed'), hint: t('shares.pathMixedHint'), cls: 'bg-accent/15 text-accent' }
+  }
+  return null
+}
+
 function fmtExp(s: NetShare): string {
   return s.expires_at ? new Date(s.expires_at).toLocaleString() : t('shares.never')
 }
@@ -166,6 +176,10 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer) })
         </p>
       </section>
 
+      <!-- Tam ağ katmanı (Mod B, W3) -->
+      <NetTunSection :clients="clients" />
+
+
       <!-- Yönettiklerim -->
       <section class="rounded-xl border border-line bg-surface p-5">
         <h2 class="text-sm font-semibold text-fg">{{ t('shares.mine') }}</h2>
@@ -179,6 +193,10 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer) })
                 <div class="font-mono text-fg">
                   {{ s.name }}
                   <span class="ml-1 rounded bg-accent/15 px-1.5 py-0.5 font-sans text-[10px] font-medium uppercase text-accent">{{ s.proto }}/{{ s.port }}</span>
+                  <span v-if="pathMeta(s.path)" class="ml-1.5 inline-flex items-center gap-1 rounded px-1.5 py-0.5 font-sans text-[10px] font-medium" :class="pathMeta(s.path)!.cls" :title="pathMeta(s.path)!.hint">
+                    <Icon :name="pathMeta(s.path)!.icon" class="size-3" />
+                    {{ pathMeta(s.path)!.label }}
+                  </span>
                 </div>
                 <div class="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-fg-subtle">
                   <span class="inline-flex items-center gap-1">
@@ -196,7 +214,13 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer) })
                 <div class="mt-1.5 text-[11px] text-fg-subtle">
                   {{ t('shares.connected') }}:
                   <template v-if="s.connected.length">
-                    <span v-for="n in s.connected" :key="n.id" class="mr-1.5 font-mono">{{ n.name }}</span>
+                    <span v-for="n in s.connected" :key="n.id" class="mr-2 inline-flex items-center gap-1 font-mono">
+                      {{ n.name }}
+                      <span v-if="pathMeta(n.path)" class="inline-flex items-center gap-0.5 rounded px-1 py-px font-sans text-[10px]" :class="pathMeta(n.path)!.cls" :title="pathMeta(n.path)!.hint">
+                        <Icon :name="pathMeta(n.path)!.icon" class="size-3" />
+                        {{ pathMeta(n.path)!.label }}<template v-if="n.path === 'direct' && n.rtt_ms"> · {{ n.rtt_ms }} ms</template>
+                      </span>
+                    </span>
                   </template>
                   <template v-else>{{ t('shares.noneConnected') }}</template>
                 </div>
@@ -271,6 +295,10 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer) })
             <div class="font-mono text-fg">
               {{ s.name }}
               <span class="ml-1 rounded bg-accent/15 px-1.5 py-0.5 font-sans text-[10px] font-medium uppercase text-accent">{{ s.proto }}/{{ s.port }}</span>
+              <span v-if="pathMeta(s.path)" class="ml-1.5 inline-flex items-center gap-1 rounded px-1.5 py-0.5 font-sans text-[10px] font-medium" :class="pathMeta(s.path)!.cls" :title="pathMeta(s.path)!.hint">
+                    <Icon :name="pathMeta(s.path)!.icon" class="size-3" />
+                    {{ pathMeta(s.path)!.label }}
+                  </span>
             </div>
             <div class="mt-0.5 text-[11px] text-fg-subtle">{{ s.owner_name }} · {{ t('shares.expires') }}: {{ fmtExp(s) }}</div>
             <div class="mt-1.5 flex items-center gap-2">

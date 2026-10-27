@@ -6,6 +6,8 @@
 package ratelimit
 
 import (
+	"net/netip"
+	"strings"
 	"sync"
 	"time"
 
@@ -53,6 +55,7 @@ func New(perSecond float64, burst int) *Limiter {
 
 // Allow, anahtarin kotasi varsa true doner ve bir jeton harcar.
 func (l *Limiter) Allow(key string) bool {
+	key = NormKey(key)
 	l.mu.Lock()
 	b, ok := l.buckets[key]
 	if !ok {
@@ -84,6 +87,7 @@ func (l *Limiter) Burst() int { return l.burst }
 // Remaining, anahtarin su an kalan yaklasik jeton sayisi (X-RateLimit-Remaining).
 // Anahtar hic gorulmediyse burst (dolu kova) doner. Jeton harcamaz.
 func (l *Limiter) Remaining(key string) int {
+	key = NormKey(key)
 	l.mu.Lock()
 	b, ok := l.buckets[key]
 	l.mu.Unlock()
@@ -127,4 +131,27 @@ func (l *Limiter) janitor() {
 			l.mu.Unlock()
 		}
 	}
+}
+
+// NormKey, anahtardaki IPv6 adresini /64 onekine indirger. Tek bir IPv6
+// kullanicisi genellikle bir /64'un tamamina sahiptir; ham adresle anahtarlama
+// her istekte yeni adres kullanarak tum IP tabanli sinirlari asmaya izin verir.
+// Taninan bicimler: "<ip>", "ip:<ip>", "<onek>|<ip>". IPv4 ve IP icermeyen
+// anahtarlar (kiraci, tunel kimligi) aynen doner.
+func NormKey(key string) string {
+	pre, ipPart := "", key
+	if i := strings.LastIndexByte(key, '|'); i >= 0 {
+		pre, ipPart = key[:i+1], key[i+1:]
+	} else if strings.HasPrefix(key, "ip:") {
+		pre, ipPart = "ip:", key[3:]
+	}
+	a, err := netip.ParseAddr(ipPart)
+	if err != nil || !a.Is6() || a.Is4In6() {
+		return key
+	}
+	p, err := a.WithZone("").Prefix(64)
+	if err != nil {
+		return key
+	}
+	return pre + p.String()
 }

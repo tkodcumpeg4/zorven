@@ -22,7 +22,8 @@ var knownTokenScopes = map[string]bool{
 	ScopeHostnamesRead: true, ScopeHostnamesWrite: true,
 	ScopeIPAllowRead: true, ScopeIPAllowWrite: true,
 	ScopeAnalyticsRead: true,
-	ScopeNetRead:       true, ScopeNetWrite: true,
+	ScopeTunnelsDelete: true, ScopeHostnamesDelete: true,
+	ScopeNetRead: true, ScopeNetWrite: true, ScopeNetConnect: true,
 }
 
 // normalizeTokenScopes, kapsamlari kirpar/kucultur, tekrarlari atar. Bilinmeyen

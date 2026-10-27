@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/tkodcumpeg4/zorven/client/config"
+	"github.com/tkodcumpeg4/zorven/client/i18n"
 )
 
 // newForwardCmd, ZIYARETCI tarafi komutu: SNI-modu bir ham TCP tuneline yerel
@@ -24,18 +26,16 @@ func newForwardCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "forward <host>",
-		Short: "SNI-modu bir TCP tuneline yerel port acar (ziyaretci tarafi)",
-		Long: "SNI-modu bir ham TCP tunelini yerel bir porta baglar. Ornek:\n" +
-			"  zorven forward mc.ornek.com --port 25565\n" +
-			"Ardindan uygulamanizi 127.0.0.1:25565 adresine baglayin.",
-		Args: cobra.ExactArgs(1),
+		Short: i18n.T("conn2.fw.short"),
+		Long:  i18n.T("conn2.fw.long"),
+		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			host := strings.TrimSpace(args[0])
 			if host == "" {
-				return fmt.Errorf("host gerekli (or. mc.ornek.com)")
+				return errors.New(i18n.T("conn2.fw.err.host"))
 			}
 			if udp {
-				return fmt.Errorf("UDP forward henuz desteklenmiyor; UDP icin rezerve-port modunu kullanin")
+				return errors.New(i18n.T("conn2.fw.err.udp"))
 			}
 			cfg, _ := config.Load()
 			srv := strings.TrimSpace(fwServer)
@@ -51,14 +51,15 @@ func newForwardCmd() *cobra.Command {
 			}
 			ln, err := net.Listen("tcp", laddr)
 			if err != nil {
-				return fmt.Errorf("yerel port acilamadi (%s): %w", laddr, err)
+				return fmt.Errorf("%s: %w", i18n.T("conn2.fw.err.listen", laddr), err)
 			}
 			defer ln.Close()
 
-			fmt.Printf("Zorven forward etkin:\n")
-			fmt.Printf("  Yerel  : %s\n", laddr)
-			fmt.Printf("  Tunel  : %s (TLS-SNI -> %s)\n", host, srv)
-			fmt.Printf("  Uygulamanizi %s adresine baglayin. Durdurmak icin Ctrl+C.\n\n", laddr)
+			fmt.Println(i18n.T("conn2.fw.active"))
+			fmt.Println(i18n.T("conn2.fw.local", laddr))
+			fmt.Println(i18n.T("conn2.fw.tunnel", host, srv))
+			fmt.Println(i18n.T("conn2.fw.connect", laddr))
+			fmt.Println()
 
 			for {
 				c, aerr := ln.Accept()
@@ -69,11 +70,11 @@ func newForwardCmd() *cobra.Command {
 			}
 		},
 	}
-	cmd.Flags().StringVar(&fwServer, "server", "", "tunel sunucusu (host:port, varsayilan zorven.app:443)")
-	cmd.Flags().IntVar(&port, "port", 25565, "dinlenecek yerel port")
-	cmd.Flags().StringVar(&listen, "listen", "", "dinlenecek yerel adres (or. 0.0.0.0:25565); bos ise 127.0.0.1:<port>")
-	cmd.Flags().BoolVar(&udp, "udp", false, "UDP (henuz desteklenmiyor)")
-	cmd.Flags().BoolVar(&insecureFlag, "insecure", false, "sunucu TLS sertifikasini dogrulama (yalnizca gelistirme)")
+	cmd.Flags().StringVar(&fwServer, "server", "", i18n.T("conn2.fw.flag.server"))
+	cmd.Flags().IntVar(&port, "port", 25565, i18n.T("conn2.fw.flag.port"))
+	cmd.Flags().StringVar(&listen, "listen", "", i18n.T("conn2.fw.flag.listen"))
+	cmd.Flags().BoolVar(&udp, "udp", false, i18n.T("conn2.fw.flag.udp"))
+	cmd.Flags().BoolVar(&insecureFlag, "insecure", false, i18n.T("conn2.fw.flag.insecure"))
 	return cmd
 }
 

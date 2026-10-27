@@ -121,11 +121,21 @@ func (c *Campaign) Run(ctx context.Context, post store.UpdatePost, total int) bo
 			if was == store.DeliverySent || (retryOnly && was != store.DeliveryFailed) {
 				continue
 			}
+			// Iptal ONCELIKLI: ikisi de hazirsa select rastgele secer ve iptalden
+			// sonra bir e-posta daha gidebilirdi.
+			if ctx.Err() != nil {
+				flushStats(false, true)
+				return true
+			}
 			select {
 			case <-ctx.Done():
 				flushStats(false, true)
 				return true
 			case <-tick.C:
+			}
+			if ctx.Err() != nil {
+				flushStats(false, true)
+				return true
 			}
 			// Son kontrol: kuyruk beklerken abonelikten cikmis olabilir (opt-in).
 			if sub, err := c.Store.IsAnnouncementSubscribed(ctx, rcpt.UserID); err != nil || !sub {

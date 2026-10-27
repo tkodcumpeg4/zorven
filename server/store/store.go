@@ -17,6 +17,12 @@ import (
 
 var (
 	ErrNotFound = errors.New("kayit bulunamadi")
+	// ErrConflict: baska bir kayitla cakisma (or. alan adi baska kiracida dogrulanmis).
+	ErrConflict = errors.New("kayit cakismasi")
+	// ErrSSODenied: JIT kapali ve kullanici kiraciya uye degil.
+	ErrSSODenied = errors.New("sso: kullanici bu organizasyona uye degil ve otomatik uyelik kapali")
+	// ErrMCPKeyLimit: tunel basina MCP API anahtari siniri asildi.
+	ErrMCPKeyLimit = errors.New("mcp anahtar siniri asildi")
 	// ErrMailAppPasswordLimit: kutu basina aktif uygulama parolasi siniri asildi.
 	ErrMailAppPasswordLimit = errors.New("uygulama parolasi siniri asildi")
 	ErrHostnameTaken        = errors.New("hostname zaten bir tunele bagli")
@@ -645,10 +651,22 @@ type HostRoute struct {
 	TrafficConfig  []byte // JSONB config (request/response headers, redirects)
 	TrafficEnabled bool
 
+	// MCP modu (tunnel_mcp, MCP M3): MCPEnabled ise tunel bir MCP sunucusu olarak
+	// yayinlanir. MCPConfig ham JSON ayaridir (ingress Reload'da BIR KEZ parse
+	// eder); MCPKeys apikey kimlik dogrulamasi icin anahtar ozetleri JSON dizisidir
+	// ([{"id","label","hash","exp"}]). Ham anahtar hicbir yerde tutulmaz.
+	MCPConfig  []byte
+	MCPEnabled bool
+	MCPKeys    []byte
+
 	// mTLS (tunnel_mtls, FAZ 6.6): MTLSEnabled ise bu hostname'e TLS el sıkışmasında
 	// istemci sertifikası zorunlu tutulur; MTLSCAPem imzalayan CA'dır (PEM).
 	MTLSEnabled bool
 	MTLSCAPem   string
+
+	// SecurityConfig (tunnel_security, ZTNA Z3): tunel seviyesinde WAF + Geo ayari
+	// (ham JSON; ingress Reload'da BIR KEZ derler). Bos = hicbir sey acik degil.
+	SecurityConfig []byte
 }
 
 // Kapi (web door) sabitleri.
@@ -728,11 +746,77 @@ type TunnelTrafficPolicy struct {
 	Enabled  bool            `json:"enabled"`
 }
 
+// TunnelMCP, bir tunelin MCP modu ayari (MCP M3).
+type TunnelMCP struct {
+	TunnelID string          `json:"tunnel_id"`
+	Config   json.RawMessage `json:"config"`
+	Enabled  bool            `json:"enabled"`
+}
+
+// MCPKey, bir MCP tunelinin API anahtari kaydi (ham anahtar yok).
+type MCPKey struct {
+	ID        string     `json:"id"`
+	TunnelID  string     `json:"tunnel_id"`
+	TenantID  string     `json:"-"`
+	Label     string     `json:"label"`
+	Prefix    string     `json:"prefix"`
+	KeyHash   string     `json:"-"`
+	CreatedAt time.Time  `json:"created_at"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+}
+
+// MCPCall, tek bir MCP JSON-RPC cagrisinin log satiri (govde icerigi YOK).
+type MCPCall struct {
+	ID         int64     `json:"id,omitempty"`
+	TenantID   string    `json:"-"`
+	TunnelID   string    `json:"tunnel_id"`
+	TS         time.Time `json:"ts"`
+	Session    string    `json:"session,omitempty"`
+	Client     string    `json:"client,omitempty"`
+	Principal  string    `json:"principal,omitempty"`
+	Method     string    `json:"method"`
+	Tool       string    `json:"tool,omitempty"`
+	Status     string    `json:"status"` // ok | error | denied | rate_limited
+	ErrorCode  int       `json:"error_code,omitempty"`
+	DurationMS int       `json:"duration_ms"`
+	BytesIn    int64     `json:"bytes_in"`
+	BytesOut   int64     `json:"bytes_out"`
+}
+
+// MCPToolStat, arac basina toplu istatistik.
+type MCPToolStat struct {
+	Tool   string  `json:"tool"`
+	Calls  int64   `json:"calls"`
+	Errors int64   `json:"errors"`
+	Denied int64   `json:"denied"`
+	AvgMS  float64 `json:"avg_ms"`
+	MaxMS  int64   `json:"max_ms"`
+	P95MS  int64   `json:"p95_ms"`
+}
+
+// MCPCallFilter, cagri listesi filtresi.
+type MCPCallFilter struct {
+	Tool   string
+	Status string
+	Limit  int
+	Offset int
+	Since  time.Time
+}
+
 // TunnelMTLS, bir tunelin mTLS (istemci sertifikasi) yapilandirmasi (FAZ 6.6).
 type TunnelMTLS struct {
 	TunnelID string `json:"tunnel_id"`
 	Enabled  bool   `json:"enabled"`
 	CAPem    string `json:"ca_pem"`
+}
+
+// TunnelSecurity, bir tunelin WAF + Geo ayari (ZTNA Z3). Config ham JSON'dur
+// (tunsec.Config); dogrulama API katmanindadir.
+type TunnelSecurity struct {
+	TunnelID  string          `json:"tunnel_id"`
+	TenantID  string          `json:"-"`
+	Config    json.RawMessage `json:"config"`
+	UpdatedAt time.Time       `json:"updated_at"`
 }
 
 // PathRoute, bir hostname'in yol-tabanli yonlendirme kurali (FAZ 6.5).
@@ -994,6 +1078,21 @@ type Store interface {
 	// SetTunnelTrafficPolicy, politikayi upsert eder. Kiraci sahipligini dogrular.
 	SetTunnelTrafficPolicy(ctx context.Context, tenantID string, p TunnelTrafficPolicy) error
 
+	// --- MCP tunel modu (MCP M3) ---
+	// GetTunnelMCP, tunelin MCP ayarini doner (yoksa enabled=false, config={}).
+	GetTunnelMCP(ctx context.Context, tenantID, tunnelID string) (TunnelMCP, error)
+	// SetTunnelMCP ayari upsert eder. Kiraci sahipligini dogrular (ErrNotFound).
+	SetTunnelMCP(ctx context.Context, tenantID string, m TunnelMCP) error
+	// CreateTunnelMCPKey anahtar kaydini (yalniz ozet) ekler. Tunel basina en fazla 20.
+	CreateTunnelMCPKey(ctx context.Context, tenantID string, k MCPKey) error
+	ListTunnelMCPKeys(ctx context.Context, tenantID, tunnelID string) ([]MCPKey, error)
+	DeleteTunnelMCPKey(ctx context.Context, tenantID, tunnelID, keyID string) error
+	// InsertMCPCalls cagri loglarini toplu yazar.
+	InsertMCPCalls(ctx context.Context, calls []MCPCall) error
+	ListMCPCalls(ctx context.Context, tenantID, tunnelID string, f MCPCallFilter) ([]MCPCall, error)
+	// MCPToolStats, since'ten beri arac basina toplu istatistik.
+	MCPToolStats(ctx context.Context, tenantID, tunnelID string, since time.Time) ([]MCPToolStat, error)
+
 	// --- Hostnames (KIRACI KAPSAMLI) ---
 	//
 	// typ, HostType* sabitlerinden biri. Ayni fqdn ikinci kez eklenirse
@@ -1053,6 +1152,14 @@ type Store interface {
 	GetTunnelMTLS(ctx context.Context, tenantID, tunnelID string) (TunnelMTLS, error)
 	// SetTunnelMTLS, mTLS yapilandirmasini upsert eder. Kiraci sahipligini dogrular.
 	SetTunnelMTLS(ctx context.Context, tenantID string, m TunnelMTLS) error
+
+	// --- Tunel guvenligi: WAF + Geo (ZTNA Z3) ---
+	// GetTunnelSecurity, tunelin ayarini doner (satir yoksa bos Config). Kiraci sahipligini dogrular.
+	GetTunnelSecurity(ctx context.Context, tenantID, tunnelID string) (TunnelSecurity, error)
+	// SetTunnelSecurity, ayari upsert eder. Kiraci sahipligini dogrular.
+	SetTunnelSecurity(ctx context.Context, tenantID string, ts TunnelSecurity) error
+	// ListTunnelSecurities, TUM tunellerin ayarini doner (rawproxy icin tunnel_id -> ham JSON).
+	ListTunnelSecurities(ctx context.Context) (map[string]TunnelSecurity, error)
 
 	// --- Yol tabanli yonlendirme (FAZ 6.5) ---
 	// ListPathRouteEntries, TUM path kurallarini router snapshot'i icin doner

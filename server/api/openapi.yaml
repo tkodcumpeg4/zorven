@@ -4,25 +4,36 @@ info:
   version: "1.0.0"
   description: |
     Zorven'in programatik REST API'si. Tünellerinizi, istemcilerinizi,
-    hostname'lerinizi ve IP kurallarınızı yönetmenizi; istek loglarını ve
-    abonelik/kullanım verinizi okumanızı sağlar.
+    hostname'lerinizi, politikalarınızı, cihazlarınızı, ekibinizi ve IP kurallarınızı
+    yönetmenizi; istek loglarını ve abonelik/kullanım verinizi okumanızı sağlar.
+    Aynı API'ye MCP (Model Context Protocol) ve OAuth 2.1 ile de erişilebilir.
 
     ## Kimlik doğrulama
-    Panelde **API Anahtarları** bölümünden bir token oluşturun ve her istekte
-    `Authorization` başlığında gönderin:
+    İki yöntem vardır:
+
+    1. **API token**: Panelde **API Anahtarları** bölümünden bir token oluşturun ve
+       her istekte `Authorization` başlığında gönderin:
 
     ```
     Authorization: Bearer zrv_api_xxxxxxxx...
     ```
 
+    2. **OAuth 2.1 erişim token'ı** (`at+jwt`): MCP istemcileri (Claude, ChatGPT vb.)
+       için; bkz. aşağıdaki "OAuth 2.1 ve MCP" bölümü.
+
     API erişimi **Pro ve üzeri** planlarda kullanılabilir.
 
     ## Kapsamlar (scopes)
-    Her token bir dizi kapsam taşır (`kaynak:aksiyon`):
+    API token'ları `kaynak:aksiyon` biçiminde kapsam taşır:
     `clients:read`, `clients:write`, `tunnels:read`, `tunnels:write`,
     `hostnames:read`, `hostnames:write`, `ip_allowlist:read`,
     `ip_allowlist:write`, `analytics:read`. `write`, aynı kaynağın `read`'ini
     de kapsar. Yetersiz kapsam → `403 insufficient_scope`.
+
+    **API token'a açık uçlar bir izin listesiyle (allowlist) sınırlıdır.** Listede
+    olmayan her uç token'a kapalıdır (varsayılan ret). Bu belgede her ucun
+    açıklamasında **Kapsam / erişim** notu vardır: "API token'a açık" ya da
+    "Panel oturumu veya OAuth `full` kapsamı".
 
     ## Sayfalama
     Liste uçları `?limit=` (varsayılan 50, maks 200) ve `?cursor=` kabul eder.
@@ -40,6 +51,81 @@ info:
     Programatik istekler kiracı başına ~30 istek/sn (burst 60) ile sınırlıdır.
     Yanıtlarda `X-RateLimit-Limit` ve `X-RateLimit-Remaining` döner; aşımda
     `429 rate_limited` + `Retry-After`.
+
+    ## Proje seçimi
+    Çok projeli organizasyonlarda `X-Zorven-Project: <proje-id>` başlığı isteğin
+    hangi projeye uygulanacağını seçer (MCP `call_api` aracında `project_id`).
+
+    ## OAuth 2.1 ve MCP
+    Zorven bir OAuth 2.1 yetkilendirme sunucusu ve bir MCP kaynak sunucusudur.
+    Bu uçlar `/api/v1` altında değildir; `https://<alan>/oauth/*`,
+    `/.well-known/*` ve `/mcp` adreslerindedir (ilgili yollarda ayrı `servers` verilmiştir).
+
+    - **Akış**: `authorization_code` + **PKCE S256 (zorunlu)**. İstemci kimliği
+      **dinamik istemci kaydı** ile alınır (RFC 7591, `POST /oauth/register`,
+      yalnızca kamusal istemci: `token_endpoint_auth_method=none`).
+    - **Resource indicator** (RFC 8707): yönetim kaynağı `https://<alan>/mcp`
+      adresidir; `resource` parametresi bu değeri taşımalıdır.
+    - **Meta veri**: `/.well-known/oauth-authorization-server`,
+      `/.well-known/oauth-protected-resource`, JWKS `/.well-known/jwks.json`.
+    - **Uçlar**: `/oauth/authorize`, `/oauth/token`, `/oauth/revoke`, `/oauth/register`.
+    - **Token ömürleri**: access token (`at+jwt`) **1 saat**; refresh token
+      **döner** (yeniden kullanım algılanırsa tüm aile iptal edilir) ve **30 gün** geçerlidir.
+    - **MCP uç noktası**: `POST/GET https://<alan>/mcp` (streamable HTTP),
+      `Authorization: Bearer <API token veya OAuth access token>`. 401 yanıtı
+      `WWW-Authenticate: Bearer resource_metadata="..."` başlığını taşır.
+
+    ### OAuth kapsamları
+    | Kapsam | Anlamı |
+    |---|---|
+    | `mcp:read` | Tüm `*:read` kapsamları ve `analytics:read` (salt okuma) |
+    | `mcp:manage` | `mcp:read` + `clients:write`, `tunnels:write`, `hostnames:write` |
+    | `clients:read` / `clients:write` | İstemciler |
+    | `tunnels:read` / `tunnels:write` | Tüneller |
+    | `tunnels:delete` | Tünel silme (yıkıcı; onay ekranında varsayılan kapalı) |
+    | `hostnames:read` / `hostnames:write` | Hostname'ler |
+    | `hostnames:delete` | Hostname silme (yıkıcı; varsayılan kapalı) |
+    | `analytics:read` | Loglar, metrikler, abonelik, denetim |
+    | `mcp` | Yalnızca tünel MCP kaynakları (yönetim API'sine yetki vermez) |
+    | `full` | **Tam erişim**: kullanıcının panel oturumuyla aynı yetki (aşağıya bakın) |
+
+    ## Tam erişim (`full` kapsamı)
+    `full`, MCP istemcisine kullanıcının **panel oturumuyla aynı yetkiyi** verir:
+    kiracı rolü (owner/admin/member), plan
+    kapıları ve `X-Zorven-Project` proje seçimi aynen uygulanır. API token
+    izin listesini aşar ama **kullanıcının kendi yetkisini asla aşmaz**; platform
+    yönetici uçları yalnızca kullanıcı gerçekten platform yöneticisiyse çalışır.
+
+    - **Onay ekranı**: ayrı bir uyarı bölümünde, varsayılan **kapalı**. İstemci
+      istemese bile kullanıcı işaretlerse verilir; istemci isterse yalnızca önerilir.
+    - **Step-up (yeniden doğrulama)**: onay için panel oturumu **son 5 dakikada**
+      açılmış olmalıdır (parola ve 2FA açıksa 2FA ile giriş). Aksi halde
+      `403 reauth_required`; panel kullanıcıyı yeniden girişe yönlendirir ve
+      girişten sonra aynı onay sayfasına döner.
+    - **Ömürler**: `full` access token **30 dakika**, refresh token **7 gün**
+      (kayan). Grant 30 günden eskiyse yenileme reddedilir (yeniden onay gerekir).
+    - **İptal**: panelde **Bağlı uygulamalar** bölümünde "Tam erişim" rozeti ve tek tıkla iptal.
+    - **Denetim**: her çağrı `mcp.full_call` olarak kaydedilir (method + path, gövde yok);
+      terminal/ekran biletleri `mcp.full_ticket`.
+    - **Hariç uçlar** (`403 full_scope_excluded`): `/api/v1/api-tokens*`,
+      `/api/v1/tokens*`, `/api/v1/team/members/{id}/tokens*`,
+      `/api/v1/mail/app-passwords*`,
+      `/api/v1/tunnels/{id}/mcp/keys*`, `POST /api/v1/device/approve`,
+      `/api/v1/auth/*`, `DELETE /api/v1/organization`. OAuth uygulama/grant
+      yönetimi (`/oauth/*`) MCP'den erişilemez; `call_api` yalnızca `/api/v1` çağırır.
+      Hesap kimlik bilgileri (parola/2FA/e-posta) `/api/auth` altındadır ve MCP kapsamı dışındadır.
+
+    ### MCP araçları (`full` ile)
+    - `list_api_endpoints`: OpenAPI'den method/path/özet/gerekli alanlar
+      (`filter`, `method`, `limit`, `offset`).
+    - `call_api`: `method` (GET/POST/PUT/PATCH/DELETE), `path` (`/api/v1/...`),
+      `query`, `body`, `project_id`, `confirm`. **DELETE** ve yıkıcı fiiller
+      (`revoke`, `revoke-sessions`, `rotate`, `freeze`, `send`) için `confirm=true`
+      zorunludur. Yanıt 256 KB ile sınırlıdır (kesilirse `truncated: true`).
+      WebSocket/akış uçları (`/events`, `/clients/{id}/terminal|screen`) çağrılamaz.
+    - Mevcut araçlar `full` ile de çalışır (silme araçları dahil; onlar da `confirm` ister).
+
+    Ayrıntılı kılavuz: `docs/mcp.md`.
   contact:
     name: Zorven
     url: https://zorven.app
@@ -51,6 +137,7 @@ servers:
 
 security:
   - bearerAuth: []
+  - oauth2: [mcp:read]
 
 tags:
   - name: Meta
@@ -65,6 +152,31 @@ tags:
     description: CIDR bazlı erişim kuralları
   - name: Analytics
     description: İstek logları, abonelik ve kullanım
+
+  - name: Projects
+    description: "Projeler ve organizasyon"
+  - name: Policies
+    description: "Politika motoru ve kaynak erişim politikaları"
+  - name: Devices
+    description: "Cihaz envanteri"
+  - name: Network
+    description: "Özel ağ (Zorven Net / WireGuard) ve özel kaynaklar"
+  - name: Secrets
+    description: "Secret Vault"
+  - name: Tokens
+    description: "API token'ları"
+  - name: Team
+    description: "Ekip üyeleri ve davetler"
+  - name: Mail
+    description: "Webmail"
+  - name: Captcha
+    description: "Zorven CAPTCHA: widget, doğrulama servisi ve site yönetimi"
+  - name: Billing
+    description: "Abonelik"
+  - name: "Platform admin"
+    description: "Yalnızca platform yöneticileri"
+  - name: "OAuth & MCP"
+    description: "OAuth 2.1 yetkilendirme sunucusu ve MCP uç noktası (/api/v1 altında değildir)"
 
 paths:
   /health:
@@ -561,6 +673,81 @@ paths:
         "400": { description: Geçersiz window }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /tunnels/{id}/mcp:
+    get:
+      tags: [Analytics]
+      summary: Tunel MCP modu ayari
+      description: "Kapsam: `tunnels:read`. MCP ayarlarini (kimlik dogrulama, arac izin/ret listeleri, sinirlar) ve baglanti URL'lerini doner."
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: MCP setting }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Analytics]
+      summary: MCP modunu ayarla
+      description: "Kapsam: `tunnels:write` (sahip/yonetici). Yalniz HTTP tunelleri. `auth`: oauth (varsayilan) | apikey | none (`ack_no_auth` gerekir). `allow_tools`/`deny_tools` `*`/`?` joker kabul eder; ret onceliklidir; politika modunda ayristirilamayan govde reddedilir. API anahtarlari yalniz panelden yonetilir."
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled: { type: boolean }
+                config:
+                  type: object
+                  properties:
+                    path: { type: string, default: /mcp }
+                    transport: { type: string, enum: [streamable, sse, auto] }
+                    auth: { type: string, enum: [oauth, apikey, none] }
+                    ack_no_auth: { type: boolean }
+                    allow_tools: { type: array, items: { type: string } }
+                    deny_tools: { type: array, items: { type: string } }
+                    log_level: { type: string, enum: [meta, none] }
+                    max_request_bytes: { type: integer }
+                    head_timeout_sec: { type: integer, maximum: 900 }
+                    idle_timeout_sec: { type: integer, maximum: 3600 }
+                    rate_limit_per_min: { type: integer, maximum: 6000 }
+                    max_streams: { type: integer, maximum: 200 }
+                    allow_org_members: { type: boolean }
+                    allowed_emails: { type: array, items: { type: string } }
+      responses:
+        "200": { description: Saved }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { description: "invalid_config / not_http / oauth_unavailable" }
+
+  /tunnels/{id}/mcp/calls:
+    get:
+      tags: [Analytics]
+      summary: MCP cagri logu
+      description: "Kapsam: `analytics:read`. Yalniz ust veri (yontem, arac, durum, sure); arguman ve sonuc ASLA saklanmaz."
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: tool, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { type: string, enum: [ok, error, denied, rate_limited] } }
+        - { name: window, in: query, schema: { type: string, enum: ["1h", "24h", "7d", "30d"] } }
+        - { name: limit, in: query, schema: { type: integer, maximum: 200 } }
+        - { name: offset, in: query, schema: { type: integer } }
+      responses:
+        "200": { description: "Çağrılar, en yeni önce" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /tunnels/{id}/mcp/stats:
+    get:
+      tags: [Analytics]
+      summary: MCP arac analitigi
+      description: "Kapsam: `analytics:read`. Arac basina cagri, hata, ret, ortalama/p95/maks sure."
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: window, in: query, schema: { type: string, enum: ["1h", "24h", "7d", "30d"], default: "24h" } }
+      responses:
+        "200": { description: Statistics }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /tunnels/{id}/door:
     get:
       tags: [Analytics]
@@ -657,6 +844,2315 @@ paths:
               schema: { type: string }
         "403": { $ref: "#/components/responses/Forbidden" }
 
+  /status:
+    get:
+      tags: [Meta]
+      summary: "Herkese açık servis durumu"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı)."
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { status: { type: string }, components: { type: array, items: { type: object, additionalProperties: true } } } }
+
+  /my-ip:
+    get:
+      tags: [Meta]
+      summary: "İstemcinin görünen IP adresi"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı)."
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { ip: { type: string } } }
+
+  /abuse:
+    post:
+      tags: [Meta]
+      summary: "Kötüye kullanım bildir"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı)."
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [fqdn], properties: { fqdn: { type: string }, reason: { type: string } } }
+      responses:
+        "202":
+          description: Accepted
+          content:
+            application/json:
+              schema: { type: object, properties: { ok: { type: boolean }, id: { type: string } } }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /projects:
+    get:
+      tags: [Projects]
+      summary: "Projeleri listele"
+      description: "Kapsam / erişim: API token'a açık."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Project" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Projects]
+      summary: "Proje oluştur"
+      description: "Kapsam / erişim: API token'a açık. Owner/admin rolü gerekir."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [name, slug], properties: { name: { type: string }, slug: { type: string } } }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Project" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /projects/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    patch:
+      tags: [Projects]
+      summary: "Projeyi yeniden adlandır"
+      description: "Kapsam / erişim: API token'a açık. Owner/admin rolü gerekir."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [name], properties: { name: { type: string, minLength: 1, maxLength: 80 } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Project" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    delete:
+      tags: [Projects]
+      summary: "Projeyi sil"
+      description: "Varsayılan proje silinemez; boş olmayan proje `409 project_not_empty` döner. Kapsam / erişim: API token'a açık. Owner/admin rolü gerekir. MCP `call_api` ile çağrılırken `confirm=true` zorunludur."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { status: { type: string, example: deleted } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /organization:
+    delete:
+      tags: [Projects]
+      summary: "Organizasyonu sil"
+      description: "Yalnızca owner. Son organizasyon ve platform organizasyonu silinemez. Kapsam / erişim: yalnızca panel oturumu. OAuth `full` kapsamına da KAPALI (`403 full_scope_excluded`). Owner/admin rolü gerekir. MCP `call_api` ile çağrılırken `confirm=true` zorunludur."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [confirm_slug], properties: { confirm_slug: { type: string } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { status: { type: string }, disconnected_clients: { type: integer } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /terminal-ticket:
+    post:
+      tags: [Clients]
+      summary: "Uzak terminal bileti"
+      description: "Dönen kısa ömürlü bilet ile `GET /clients/{id}/terminal` WebSocket'i açılır (OpenAPI dışı, akış ucu). Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı)."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [client_id], properties: { client_id: { type: string }, shell: { type: string }, attach: { type: string } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /screen-ticket:
+    post:
+      tags: [Clients]
+      summary: "Uzak ekran bileti"
+      description: "Bilet ile `GET /clients/{id}/screen` WebSocket'i açılır (akış ucu). Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı)."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [client_id], properties: { client_id: { type: string } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /clients/{id}/screen-files:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Clients]
+      summary: "Uzak ekran dosya listesi"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı)."
+      parameters:
+        - { name: path, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { dir: { type: string }, files: { type: array, items: { type: object, additionalProperties: true } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Clients]
+      summary: "Cihaza dosya yükle"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı)."
+      parameters:
+        - { name: name, in: query, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/octet-stream:
+              schema: { type: object, properties: { name: { type: string }, size: { type: integer }, sha256: { type: string } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /clients/{id}/screen-files/download:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Clients]
+      summary: "Cihazdan dosya indir"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı)."
+      parameters:
+        - { name: name, in: query, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /tunnels/{id}/access:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Tunnels]
+      summary: "Ziyaretçi erişim politikası"
+      description: "Kapsam / erişim: API token'a açık."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Tunnels]
+      summary: "Ziyaretçi erişim politikasını ayarla"
+      description: "Kapsam / erişim: API token'a açık. Owner/admin rolü gerekir."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, properties: { mode: { type: string, enum: [none, basic, oauth] }, enabled: { type: boolean }, config: { type: object, properties: { username: { type: string }, password: { type: string }, providers: { type: array, items: { type: string } }, allowed_emails: { type: array, items: { type: string } }, allowed_groups: { type: array, items: { type: string } }, session_ttl_minutes: { type: integer }, session_sliding: { type: boolean } } } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /tunnels/{id}/access/revoke-sessions:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    post:
+      tags: [Tunnels]
+      summary: "Ziyaretçi oturumlarını sonlandır"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı). Owner/admin rolü gerekir. MCP `call_api` ile çağrılırken `confirm=true` zorunludur."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, properties: { identity: { type: string, description: "empty = all" } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { revoked: { type: boolean }, scope: { type: string }, identity: { type: string } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /tunnels/{id}/lb:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Tunnels]
+      summary: "Yük dengeleme ayarı"
+      description: "Kapsam / erişim: API token'a açık."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { config: { type: object, additionalProperties: true }, candidates: { type: array, items: { type: object, additionalProperties: true } }, health: { type: object, additionalProperties: true } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Tunnels]
+      summary: "Yük dengelemeyi ayarla"
+      description: "Gelişmiş LB için uygun plan gerekir. Kapsam / erişim: API token'a açık. Owner/admin rolü gerekir."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /tunnels/{id}/replicas:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Tunnels]
+      summary: "Yineleme (replica) istemcileri"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı)."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { replicas: { type: array, items: { type: object, additionalProperties: true } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Tunnels]
+      summary: "Yineleme istemcisi ekle"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı). Owner/admin rolü gerekir."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [client_id], properties: { client_id: { type: string } } }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { type: object, properties: { ok: { type: boolean }, client_id: { type: string } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /tunnels/{id}/replicas/{clientID}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+      - { name: clientID, in: path, required: true, schema: { type: string } }
+    delete:
+      tags: [Tunnels]
+      summary: "Yineleme istemcisini kaldır"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı). Owner/admin rolü gerekir. MCP `call_api` ile çağrılırken `confirm=true` zorunludur."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Ok" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /tunnels/{id}/udp:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Tunnels]
+      summary: "UDP tüneli ayarı"
+      description: "Kapsam / erişim: API token'a açık."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Tunnels]
+      summary: "UDP tüneli ayarla"
+      description: "Kapsam / erişim: API token'a açık. Owner/admin rolü gerekir."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /tunnels/{id}/tcp:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Tunnels]
+      summary: "TCP tüneli istatistikleri"
+      description: "Yalnızca TCP tünelleri; aksi halde `409 not_tcp`. Kapsam / erişim: API token'a açık."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /tunnels/{id}/game-status:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Tunnels]
+      summary: "Oyun sunucusu durumu"
+      description: "Kapsam / erişim: API token'a açık."
+      parameters:
+        - { name: kind, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /tunnels/{id}/traffic:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Tunnels]
+      summary: "Trafik politikası"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı)."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { enabled: { type: boolean }, config: { type: object, additionalProperties: true } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Tunnels]
+      summary: "Trafik politikasını ayarla"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı). Owner/admin rolü gerekir."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [enabled], properties: { enabled: { type: boolean }, config: { type: object, additionalProperties: true } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { ok: { type: boolean }, enabled: { type: boolean } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /tunnels/{id}/metrics:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Tunnels]
+      summary: "Tünel metrikleri"
+      description: "Kapsam / erişim: API token'a açık."
+      parameters:
+        - { name: window, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /tunnels/{id}/alert:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Tunnels]
+      summary: "Hata oranı uyarısı"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı)."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TunnelAlert" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Tunnels]
+      summary: "Hata oranı uyarısını ayarla"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı). Owner/admin rolü gerekir."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, properties: { enabled: { type: boolean }, error_rate_pct: { type: integer, minimum: 1, maximum: 100 }, window_min: { type: integer, minimum: 1, maximum: 1440 }, min_requests: { type: integer }, notify_email: { type: string } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { ok: { type: boolean }, enabled: { type: boolean } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /tunnels/{id}/security:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Tunnels]
+      summary: "WAF / coğrafi güvenlik ayarı"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı)."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TunnelSecurity" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Tunnels]
+      summary: "WAF / coğrafi güvenliği ayarla"
+      description: "Tünel güvenliği özelliği için uygun plan gerekir (`feature_not_available`). Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı). Owner/admin rolü gerekir."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, properties: { waf: { type: object, additionalProperties: true }, geo: { type: object, additionalProperties: true }, bot: { $ref: "#/components/schemas/TunnelSecurity/properties/bot" }, rate: { $ref: "#/components/schemas/TunnelSecurity/properties/rate" } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { ok: { type: boolean }, waf: { type: object, additionalProperties: true }, geo: { type: object, additionalProperties: true }, bot: { $ref: "#/components/schemas/TunnelSecurity/properties/bot" }, rate: { $ref: "#/components/schemas/TunnelSecurity/properties/rate" } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /tunnels/{id}/mtls:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Tunnels]
+      summary: "mTLS ayarı"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı)."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { tunnel_id: { type: string }, enabled: { type: boolean } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Tunnels]
+      summary: "mTLS ayarla"
+      description: "`ca_pem` gerekir, aksi halde `422 missing_ca`. Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı). Owner/admin rolü gerekir."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, properties: { enabled: { type: boolean }, ca_pem: { type: string } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { ok: { type: boolean }, enabled: { type: boolean } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /tunnels/{id}/mcp/test:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    post:
+      tags: [Tunnels]
+      summary: "MCP bağlantı sınaması"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı). Owner/admin rolü gerekir."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { auth: { type: string }, checks: { type: object, additionalProperties: true }, probe: { type: object, additionalProperties: true } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /tunnels/{id}/mcp/revoke-sessions:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    post:
+      tags: [Tunnels]
+      summary: "MCP oturumlarını sonlandır"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı). Owner/admin rolü gerekir. MCP `call_api` ile çağrılırken `confirm=true` zorunludur."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { revoked: { type: integer } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /tunnels/{id}/mcp/keys:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Tunnels]
+      summary: "MCP API anahtarları"
+      description: "Kapsam / erişim: yalnızca panel oturumu. OAuth `full` kapsamına da KAPALI (`403 full_scope_excluded`)."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Tunnels]
+      summary: "MCP API anahtarı oluştur"
+      description: "Kapsam / erişim: yalnızca panel oturumu. OAuth `full` kapsamına da KAPALI (`403 full_scope_excluded`). Owner/admin rolü gerekir."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, properties: { name: { type: string } } }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /tunnels/{id}/mcp/keys/{keyId}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+      - { name: keyId, in: path, required: true, schema: { type: string } }
+    delete:
+      tags: [Tunnels]
+      summary: "MCP API anahtarını sil"
+      description: "Kapsam / erişim: yalnızca panel oturumu. OAuth `full` kapsamına da KAPALI (`403 full_scope_excluded`). Owner/admin rolü gerekir. MCP `call_api` ile çağrılırken `confirm=true` zorunludur."
+      responses:
+        "204": { description: "OK" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /hostnames/{id}/dns-check:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    post:
+      tags: [Hostnames]
+      summary: "Özel alan adı DNS kontrolü"
+      description: "Kapsam / erişim: API token'a açık."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /hostnames/{id}/paths:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Hostnames]
+      summary: "Yol (path) yönlendirmeleri"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı)."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { fqdn: { type: string }, routes: { type: array, items: { $ref: "#/components/schemas/PathRoute" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Hostnames]
+      summary: "Yol yönlendirmesi ekle"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı). Owner/admin rolü gerekir."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [path_prefix, tunnel_id], properties: { path_prefix: { type: string, example: /api }, tunnel_id: { type: string } } }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PathRoute" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /hostnames/{id}/paths/{routeID}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+      - { name: routeID, in: path, required: true, schema: { type: string } }
+    delete:
+      tags: [Hostnames]
+      summary: "Yol yönlendirmesini sil"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı). Owner/admin rolü gerekir. MCP `call_api` ile çağrılırken `confirm=true` zorunludur."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Ok" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /requests/capture:
+    get:
+      tags: [Analytics]
+      summary: "İstek yakalama ayarı"
+      description: "Kapsam / erişim: API token'a açık."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { enabled: { type: boolean } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Analytics]
+      summary: "İstek yakalamayı aç/kapat"
+      description: "Kapsam / erişim: API token'a açık. Owner/admin rolü gerekir."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [enabled], properties: { enabled: { type: boolean } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { enabled: { type: boolean } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /requests/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Analytics]
+      summary: "Yakalanan istek ayrıntısı"
+      description: "Kapsam / erişim: API token'a açık."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /requests/{id}/replay:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    post:
+      tags: [Analytics]
+      summary: "Yakalanan isteği yeniden oynat"
+      description: "Kapsam / erişim: API token'a açık. Owner/admin rolü gerekir."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true, description: "optional overrides (method, path, headers, body)" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /policies:
+    get:
+      tags: [Policies]
+      summary: "Politikaları listele"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı)."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { policies: { type: array, items: { $ref: "#/components/schemas/Policy" } }, count: { type: integer } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Policies]
+      summary: "Politika oluştur"
+      description: "Pro+ plan (`policy_engine`). `config` içindeki `{{secret:ad}}` referansları kiracıda tanımlı olmalıdır (`422 unknown_secret`). Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı). Owner/admin rolü gerekir."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [name, config], properties: { name: { type: string }, config: { type: object, additionalProperties: true }, priority: { type: integer } } }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Policy" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /policies/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Policies]
+      summary: "Politika getir"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı)."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Policy" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Policies]
+      summary: "Politikayı güncelle (kısmi)"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı). Owner/admin rolü gerekir."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, properties: { name: { type: string }, config: { type: object, additionalProperties: true }, enabled: { type: boolean }, priority: { type: integer } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Policy" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    delete:
+      tags: [Policies]
+      summary: "Politikayı sil"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı). Owner/admin rolü gerekir. MCP `call_api` ile çağrılırken `confirm=true` zorunludur."
+      responses:
+        "204": { description: "OK" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /policies/{id}/bind:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    post:
+      tags: [Policies]
+      summary: "Politikayı tünele/hostname'e bağla"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı). Owner/admin rolü gerekir."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, properties: { tunnel_id: { type: string }, hostname: { type: string } }, description: "tunnel_id or hostname" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Ok" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /policies/{id}/unbind:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    post:
+      tags: [Policies]
+      summary: "Politika bağını kaldır"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı). Owner/admin rolü gerekir."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, properties: { tunnel_id: { type: string }, hostname: { type: string } }, description: "tunnel_id or hostname" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Ok" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /devices:
+    get:
+      tags: [Devices]
+      summary: "Cihaz envanteri"
+      description: "Kapsam / erişim: API token'a açık."
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Device" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /devices/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Devices]
+      summary: "Cihaz ayrıntısı"
+      description: "Kapsam / erişim: API token'a açık."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Device" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /devices/{id}/config:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Devices]
+      summary: "Cihaz ajan ayarları"
+      description: "Kapsam / erişim: API token'a açık."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Devices]
+      summary: "Cihaz ajan ayarlarını güncelle"
+      description: "Değişiklik çevrimiçi ajana anında iletilir. Uzak yapılandırma özelliği gerekir. Kapsam / erişim: API token'a açık. Owner/admin rolü gerekir."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /network/resources:
+    get:
+      tags: [Network]
+      summary: "Özel ağ kaynakları"
+      description: "Kapsam / erişim: API token'a açık."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { resources: { type: array, items: { type: object, additionalProperties: true } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Network]
+      summary: "Özel ağ kaynağı yayınla"
+      description: "Kapsam / erişim: API token'a açık. Owner/admin rolü gerekir."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [name, client_id], properties: { name: { type: string }, client_id: { type: string }, target: { type: string, description: "host:port" }, subnet: { type: string, description: "CIDR range instead of a single target" } } }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /network/connect:
+    get:
+      tags: [Network]
+      summary: "Özel kaynağa bağlan (WebSocket)"
+      description: "`zorven connect` bu ucu kullanır. API token kimliği gerektirir. Kapsam / erişim: API token'a açık."
+      parameters:
+        - { name: target, in: query, required: true, schema: { type: string, description: "name:port" } }
+      responses:
+        "101": { description: Switching Protocols }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /net/nodes:
+    get:
+      tags: [Network]
+      summary: "Zorven Net düğümleri"
+      description: "Kapsam / erişim: API token'a açık."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { nodes: { type: array, items: { type: object, additionalProperties: true } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /net/nodes/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    delete:
+      tags: [Network]
+      summary: "Düğümü iptal et"
+      description: "Kapsam / erişim: API token'a açık. Owner/admin rolü gerekir. MCP `call_api` ile çağrılırken `confirm=true` zorunludur."
+      responses:
+        "204": { description: "OK" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /net/shares:
+    get:
+      tags: [Network]
+      summary: "Port paylaşımları"
+      description: "Kapsam / erişim: API token'a açık."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { shares: { type: array, items: { $ref: "#/components/schemas/NetShare" } }, count: { type: integer } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Network]
+      summary: "Port paylaşımı oluştur"
+      description: "Kapsam / erişim: API token'a açık."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [client_id, port], properties: { name: { type: string }, client_id: { type: string }, port: { type: integer }, proto: { type: string, enum: [tcp, udp] }, to: { type: array, items: { $ref: "#/components/schemas/Grantee" } }, expires_in_sec: { type: integer } } }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NetShare" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /net/shares/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    patch:
+      tags: [Network]
+      summary: "Port paylaşımını güncelle"
+      description: "Kapsam / erişim: API token'a açık."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, properties: { name: { type: string }, to: { type: array, items: { $ref: "#/components/schemas/Grantee" } }, expires_in_sec: { type: integer, description: "0 = no expiry" } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NetShare" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    delete:
+      tags: [Network]
+      summary: "Port paylaşımını sil"
+      description: "Kapsam / erişim: API token'a açık. MCP `call_api` ile çağrılırken `confirm=true` zorunludur."
+      responses:
+        "204": { description: "OK" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /net/session:
+    get:
+      tags: [Network]
+      summary: "Zorven Net oturum bilgisi"
+      description: "API token kimliği gerekir. Kapsam / erişim: API token'a açık."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /net/tun/rules:
+    get:
+      tags: [Network]
+      summary: "Tünel bölgesi kuralları"
+      description: "Kapsam / erişim: API token'a açık. Owner/admin rolü gerekir."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { rules: { type: array, items: { $ref: "#/components/schemas/TunRule" } }, zone: { type: string } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Network]
+      summary: "TUN kuralı oluştur"
+      description: "Kapsam / erişim: API token'a açık. Owner/admin rolü gerekir."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [name, src, dst], properties: { name: { type: string }, src: { $ref: "#/components/schemas/Grantee" }, dst: { type: string }, proto: { type: string }, ports: { type: string } } }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TunRule" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /net/tun/rules/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    delete:
+      tags: [Network]
+      summary: "TUN kuralını sil"
+      description: "Kapsam / erişim: API token'a açık. Owner/admin rolü gerekir. MCP `call_api` ile çağrılırken `confirm=true` zorunludur."
+      responses:
+        "204": { description: "OK" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /net/network:
+    get:
+      tags: [Network]
+      summary: "Özel ağ adres aralığı"
+      description: "Kapsam / erişim: API token'a açık."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    put:
+      tags: [Network]
+      summary: "Özel ağ adres aralığını ayarla"
+      description: "Kapsam / erişim: API token'a açık. Owner/admin rolü gerekir."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [cidr], properties: { cidr: { type: string, example: 10.99.0.0/16 } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { cidr: { type: string }, resolver: { type: string } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /captcha/platform-config:
+    get:
+      tags: [Captcha]
+      summary: "Platform CAPTCHA sitesi etkin mi (Zorven kaydı için)"
+      description: "Kimlik gerektirmez (widget uçları IP başına hız sınırlıdır)."
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { enabled: { type: boolean }, sitekey: { type: string } } }
+
+  /captcha/challenge:
+    post:
+      tags: [Captcha]
+      summary: "Widget: PoW sorgusu al"
+      description: "Widget `/captcha/v1/api.js` tarafından çağrılır. CORS: Origin, sitenin alan listesine göre denetlenir (izinsiz: 403 `origin_not_allowed`). `signals` isteğe bağlıdır; otomasyon belirtileri zorluğu artırır. Kimlik gerektirmez (widget uçları IP başına hız sınırlıdır)."
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [sitekey], properties: { sitekey: { type: string }, signals: { type: object, additionalProperties: true } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { token: { type: string }, nonce: { type: string }, difficulty: { type: integer }, expires_at: { type: string, format: date-time } } }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { description: "rate_limited" }
+
+  /captcha/solve:
+    post:
+      tags: [Captcha]
+      summary: "Widget: PoW çözümünü gönder"
+      description: "Çözüm doğruysa imzalı, TEK kullanımlık, 300 sn geçerli, site + hostname bağlı yanıt jetonu döner. Sitede `pass_cookie` açıksa `pass` (geçiş çerezi değeri) da döner. Otomasyon belirtileri: 403 `automated`. Kimlik gerektirmez (widget uçları IP başına hız sınırlıdır)."
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [token, counter], properties: { token: { type: string }, counter: { type: string, description: "SHA-256(nonce || decimal counter) leading-zero-bits" }, signals: { type: object, additionalProperties: true } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { response: { type: string }, expires_at: { type: string, format: date-time }, pass: { type: string }, pass_ttl_seconds: { type: integer } } }
+        "400": { description: "invalid_token | expired | already_used | invalid_solution" }
+        "403": { description: "origin_not_allowed | origin_mismatch | automated" }
+        "429": { description: "rate_limited" }
+
+  /captcha/renew:
+    post:
+      tags: [Captcha]
+      summary: "Widget: geçiş çerezi ile PoW'suz yanıt al"
+      description: "Geçerli `zcap_pass` (imza + site + süre) karşılığında yeni tek kullanımlık yanıt verir. IP bağı yoktur. Kimlik gerektirmez (widget uçları IP başına hız sınırlıdır)."
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [sitekey, pass], properties: { sitekey: { type: string }, pass: { type: string } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { response: { type: string }, expires_at: { type: string, format: date-time } } }
+        "400": { description: "invalid_token | expired" }
+        "403": { description: "origin_not_allowed" }
+        "429": { description: "rate_limited" }
+
+  /captcha/siteverify:
+    post:
+      tags: [Captcha]
+      summary: "Yanıt jetonunu doğrula (siteverify)"
+      description: "Turnstile uyumludur. Gövde form (`application/x-www-form-urlencoded`) ya da JSON olabilir. Başarısız doğrulama da HTTP 200 + `success:false` döner. Hata kodları: missing-input-secret, invalid-input-secret, missing-input-response, invalid-input-response, timeout-or-duplicate, internal-error. Sunucudan sunucuya; kimlik gerektirmez, `secret` ile yetkilenir."
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: { type: object, required: [secret, response], properties: { secret: { type: string }, response: { type: string }, remoteip: { type: string } } }
+          application/json:
+            schema: { type: object, required: [secret, response], properties: { secret: { type: string }, response: { type: string }, remoteip: { type: string } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { success: { type: boolean }, challenge_ts: { type: string, format: date-time }, hostname: { type: string }, "error-codes": { type: array, items: { type: string } } } }
+
+  /captcha/sites:
+    get:
+      tags: [Captcha]
+      summary: "CAPTCHA sitelerini listele"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı). Yazma owner/admin; okuma member. Her site için bugün ve son 7 gün sayaçları (`stats`) döner; gizli anahtar dönmez."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { sites: { type: array, items: { type: object, properties: { id: { type: string }, name: { type: string }, site_key: { type: string }, secret: { type: string, description: "zcsec_..., only on create/rotate" }, domains: { type: array, items: { type: string } }, difficulty: { type: integer, minimum: 14, maximum: 22 }, pass_cookie: { type: object, properties: { enabled: { type: boolean }, ttl_minutes: { type: integer, minimum: 5, maximum: 43200 } } }, created_at: { type: string, format: date-time }, updated_at: { type: string, format: date-time }, stats: { type: object, properties: { today: { $ref: "#/components/schemas/CaptchaTotals" }, last_7_days: { $ref: "#/components/schemas/CaptchaTotals" } } } } } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Captcha]
+      summary: "CAPTCHA sitesi oluştur"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı). Yazma owner/admin; okuma member. Yanıttaki `secret` (zcsec_...) YALNIZCA bu yanıtta gösterilir; veritabanında yalnızca özeti saklanır."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [name], properties: { name: { type: string }, domains: { type: array, items: { type: string } }, difficulty: { type: integer, minimum: 14, maximum: 22, default: 17 }, pass_cookie: { type: object, properties: { enabled: { type: boolean, default: false }, ttl_minutes: { type: integer, minimum: 5, maximum: 43200, default: 1440 } } } } }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { type: object, properties: { id: { type: string }, name: { type: string }, site_key: { type: string }, secret: { type: string, description: "zcsec_..., only on create/rotate" }, domains: { type: array, items: { type: string } }, difficulty: { type: integer, minimum: 14, maximum: 22 }, pass_cookie: { type: object, properties: { enabled: { type: boolean }, ttl_minutes: { type: integer, minimum: 5, maximum: 43200 } } }, created_at: { type: string, format: date-time }, updated_at: { type: string, format: date-time }, stats: { type: object, properties: { today: { $ref: "#/components/schemas/CaptchaTotals" }, last_7_days: { $ref: "#/components/schemas/CaptchaTotals" } } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /captcha/sites/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    patch:
+      tags: [Captcha]
+      summary: "CAPTCHA sitesini güncelle"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı). Yazma owner/admin; okuma member."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, properties: { name: { type: string }, domains: { type: array, items: { type: string } }, difficulty: { type: integer, minimum: 14, maximum: 22 }, pass_cookie: { type: object, properties: { enabled: { type: boolean }, ttl_minutes: { type: integer, minimum: 5, maximum: 43200 } } } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { id: { type: string }, name: { type: string }, site_key: { type: string }, secret: { type: string, description: "zcsec_..., only on create/rotate" }, domains: { type: array, items: { type: string } }, difficulty: { type: integer, minimum: 14, maximum: 22 }, pass_cookie: { type: object, properties: { enabled: { type: boolean }, ttl_minutes: { type: integer, minimum: 5, maximum: 43200 } } }, created_at: { type: string, format: date-time }, updated_at: { type: string, format: date-time }, stats: { type: object, properties: { today: { $ref: "#/components/schemas/CaptchaTotals" }, last_7_days: { $ref: "#/components/schemas/CaptchaTotals" } } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    delete:
+      tags: [Captcha]
+      summary: "CAPTCHA sitesini sil"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı). Yazma owner/admin; okuma member."
+      responses:
+        "204": { description: "OK" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /captcha/sites/{id}/rotate-secret:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    post:
+      tags: [Captcha]
+      summary: "Gizli anahtarı yenile"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı). Yazma owner/admin; okuma member. Yeni `secret` yalnızca bu yanıtta gösterilir; eskisi hemen geçersiz olur."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { id: { type: string }, name: { type: string }, site_key: { type: string }, secret: { type: string, description: "zcsec_..., only on create/rotate" }, domains: { type: array, items: { type: string } }, difficulty: { type: integer, minimum: 14, maximum: 22 }, pass_cookie: { type: object, properties: { enabled: { type: boolean }, ttl_minutes: { type: integer, minimum: 5, maximum: 43200 } } }, created_at: { type: string, format: date-time }, updated_at: { type: string, format: date-time }, stats: { type: object, properties: { today: { $ref: "#/components/schemas/CaptchaTotals" }, last_7_days: { $ref: "#/components/schemas/CaptchaTotals" } } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /secrets:
+    get:
+      tags: [Secrets]
+      summary: "Secret'ları listele (değer yok)"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı)."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { secrets: { type: array, items: { $ref: "#/components/schemas/Secret" } }, count: { type: integer } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Secrets]
+      summary: "Secret oluştur"
+      description: "Değer şifrelenir ve bir daha okunamaz. Politikalarda `{{secret:ad}}` ile kullanılır. Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı). Owner/admin rolü gerekir."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [name, value], properties: { name: { type: string }, value: { type: string } } }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Secret" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /secrets/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    delete:
+      tags: [Secrets]
+      summary: "Secret sil"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı). Owner/admin rolü gerekir. MCP `call_api` ile çağrılırken `confirm=true` zorunludur."
+      responses:
+        "204": { description: "OK" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api-tokens:
+    get:
+      tags: [Tokens]
+      summary: "API token'larını listele"
+      description: "Kapsam / erişim: yalnızca panel oturumu. OAuth `full` kapsamına da KAPALI (`403 full_scope_excluded`)."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { tokens: { type: array, items: { $ref: "#/components/schemas/APIToken" } }, count: { type: integer } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Tokens]
+      summary: "API token oluştur"
+      description: "Token düz metni yalnızca bu yanıtta bir kez döner. Pro+ plan gerekir. Kapsam / erişim: yalnızca panel oturumu. OAuth `full` kapsamına da KAPALI (`403 full_scope_excluded`)."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [name, scopes], properties: { name: { type: string }, scopes: { type: array, items: { type: string } }, expires_in_days: { type: [integer, "null"], minimum: 0, maximum: 3650 }, expires_at: { type: [string, "null"], format: date-time } } }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /api-tokens/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    delete:
+      tags: [Tokens]
+      summary: "API token'ı iptal et"
+      description: "Kapsam / erişim: yalnızca panel oturumu. OAuth `full` kapsamına da KAPALI (`403 full_scope_excluded`). MCP `call_api` ile çağrılırken `confirm=true` zorunludur."
+      responses:
+        "204": { description: "OK" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api-tokens/{id}/rotate:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    post:
+      tags: [Tokens]
+      summary: "API token'ı döndür"
+      description: "Kapsam / erişim: yalnızca panel oturumu. OAuth `full` kapsamına da KAPALI (`403 full_scope_excluded`). MCP `call_api` ile çağrılırken `confirm=true` zorunludur."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /tokens:
+    get:
+      tags: [Tokens]
+      summary: "API token'larını listele (takma ad)"
+      description: "Kapsam / erişim: yalnızca panel oturumu. OAuth `full` kapsamına da KAPALI (`403 full_scope_excluded`)."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { tokens: { type: array, items: { $ref: "#/components/schemas/APIToken" } }, count: { type: integer } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Tokens]
+      summary: "API token oluştur (takma ad)"
+      description: "Token düz metni yalnızca bu yanıtta bir kez döner. Pro+ plan gerekir. Kapsam / erişim: yalnızca panel oturumu. OAuth `full` kapsamına da KAPALI (`403 full_scope_excluded`)."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [name, scopes], properties: { name: { type: string }, scopes: { type: array, items: { type: string } }, expires_in_days: { type: [integer, "null"], minimum: 0, maximum: 3650 }, expires_at: { type: [string, "null"], format: date-time } } }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /tokens/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    delete:
+      tags: [Tokens]
+      summary: "API token'ı iptal et"
+      description: "Kapsam / erişim: yalnızca panel oturumu. OAuth `full` kapsamına da KAPALI (`403 full_scope_excluded`). MCP `call_api` ile çağrılırken `confirm=true` zorunludur."
+      responses:
+        "204": { description: "OK" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /tokens/{id}/rotate:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    post:
+      tags: [Tokens]
+      summary: "API token'ı döndür"
+      description: "Kapsam / erişim: yalnızca panel oturumu. OAuth `full` kapsamına da KAPALI (`403 full_scope_excluded`). MCP `call_api` ile çağrılırken `confirm=true` zorunludur."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /team/members:
+    get:
+      tags: [Team]
+      summary: "Ekip üyeleri"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı)."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { members: { type: array, items: { $ref: "#/components/schemas/TeamMember" } }, count: { type: integer } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /team/members/invite:
+    post:
+      tags: [Team]
+      summary: "Üye davet et"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı). Owner/admin rolü gerekir."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [email], properties: { email: { type: string, format: email }, name: { type: string }, role: { type: string, enum: [admin, member] } } }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TeamMember" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /team/members/{id}/role:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    patch:
+      tags: [Team]
+      summary: "Üye rolünü değiştir"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı). Owner/admin rolü gerekir."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [role], properties: { role: { type: string, enum: [admin, member] } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { success: { type: boolean } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /team/members/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    delete:
+      tags: [Team]
+      summary: "Üyeyi çıkar"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı). Owner/admin rolü gerekir. MCP `call_api` ile çağrılırken `confirm=true` zorunludur."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { success: { type: boolean } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /team/members/{id}/resend:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    post:
+      tags: [Team]
+      summary: "Daveti yeniden gönder"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı). Owner/admin rolü gerekir."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { success: { type: boolean }, email_sent: { type: boolean } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /team/members/{id}/tokens:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Team]
+      summary: "Üyenin istemci token'ları"
+      description: "Kapsam / erişim: yalnızca panel oturumu. OAuth `full` kapsamına da KAPALI (`403 full_scope_excluded`). Owner/admin rolü gerekir."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Client" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Team]
+      summary: "Üye adına istemci token'ı oluştur"
+      description: "Kapsam / erişim: yalnızca panel oturumu. OAuth `full` kapsamına da KAPALI (`403 full_scope_excluded`). Owner/admin rolü gerekir."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, properties: { name: { type: string } } }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /team/members/{id}/tokens/{client_id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+      - { name: client_id, in: path, required: true, schema: { type: string } }
+    delete:
+      tags: [Team]
+      summary: "Üyenin istemci token'ını iptal et"
+      description: "Kapsam / erişim: yalnızca panel oturumu. OAuth `full` kapsamına da KAPALI (`403 full_scope_excluded`). Owner/admin rolü gerekir. MCP `call_api` ile çağrılırken `confirm=true` zorunludur."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { success: { type: boolean } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /invitations:
+    get:
+      tags: [Team]
+      summary: "Bana gelen davetler"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı)."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { invitations: { type: array, items: { type: object, additionalProperties: true } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /invitations/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Team]
+      summary: "Davet ayrıntısı"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı)."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /invitations/{id}/accept:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    post:
+      tags: [Team]
+      summary: "Daveti kabul et"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı)."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /invitations/{id}/decline:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    post:
+      tags: [Team]
+      summary: "Daveti reddet"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı)."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { success: { type: boolean } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /mail/info:
+    get:
+      tags: [Mail]
+      summary: "Posta kutusu bilgisi"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı)."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { enabled: { type: boolean }, address: { type: string }, unseen: { type: integer } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /mail/messages:
+    get:
+      tags: [Mail]
+      summary: "Mesajları listele"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı)."
+      parameters:
+        - { name: box, in: query, schema: { type: string }, description: "folder" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/MailMessage" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /mail/messages/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Mail]
+      summary: "Mesaj getir"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı)."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MailMessage" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Mail]
+      summary: "Mesajı sil"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı). MCP `call_api` ile çağrılırken `confirm=true` zorunludur."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { success: { type: boolean } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /mail/messages/{id}/move:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    post:
+      tags: [Mail]
+      summary: "Mesajı klasöre taşı"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı)."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [folder], properties: { folder: { type: string } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { success: { type: boolean }, folder: { type: string } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /mail/folders:
+    get:
+      tags: [Mail]
+      summary: "Klasörler"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı)."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { folders: { type: array, items: { type: string } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /mail/attachments/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Mail]
+      summary: "Ek dosyayı indir"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı)."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /mail/send:
+    post:
+      tags: [Mail]
+      summary: "E-posta gönder"
+      description: "Harici adrese gönderim yalnızca Enterprise planda; aksi halde `403 external_mail_not_allowed`. Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı). MCP `call_api` ile çağrılırken `confirm=true` zorunludur."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [to, subject, body], properties: { to: { type: string }, subject: { type: string }, body: { type: string }, in_reply_to: { type: string }, from: { type: string }, template: { type: string }, attachments: { type: array, items: { type: object, properties: { filename: { type: string }, content_type: { type: string }, content_base64: { type: string } } } } } }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { type: object, properties: { success: { type: boolean }, message_id: { type: string } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /mail/app-passwords:
+    get:
+      tags: [Mail]
+      summary: "Posta uygulama parolaları"
+      description: "Kapsam / erişim: yalnızca panel oturumu. OAuth `full` kapsamına da KAPALI (`403 full_scope_excluded`)."
+      parameters:
+        - { name: mailbox, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Mail]
+      summary: "Uygulama parolası oluştur"
+      description: "Kapsam / erişim: yalnızca panel oturumu. OAuth `full` kapsamına da KAPALI (`403 full_scope_excluded`)."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, properties: { label: { type: string, maxLength: 60 }, mailbox: { type: string } } }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /mail/app-passwords/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    delete:
+      tags: [Mail]
+      summary: "Uygulama parolasını iptal et"
+      description: "Kapsam / erişim: yalnızca panel oturumu. OAuth `full` kapsamına da KAPALI (`403 full_scope_excluded`). MCP `call_api` ile çağrılırken `confirm=true` zorunludur."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { success: { type: boolean } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /mail/mobileconfig:
+    get:
+      tags: [Mail]
+      summary: "iOS/macOS posta profili"
+      description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı)."
+      parameters:
+        - { name: mailbox, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/x-apple-aspen-config:
+              schema: { type: string, format: binary }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /admin/stats:
+    get:
+      tags: ["Platform admin"]
+      summary: "Platform istatistikleri"
+      description: "Kapsam / erişim: yalnızca gerçek platform yöneticisi (panel oturumu veya OAuth `full`); aksi halde `403 forbidden`."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /admin/tcp-pool:
+    get:
+      tags: ["Platform admin"]
+      summary: "TCP port havuzu"
+      description: "Kapsam / erişim: yalnızca gerçek platform yöneticisi (panel oturumu veya OAuth `full`); aksi halde `403 forbidden`."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /admin/tenants:
+    get:
+      tags: ["Platform admin"]
+      summary: "Kiracıları listele"
+      description: "Kapsam / erişim: yalnızca gerçek platform yöneticisi (panel oturumu veya OAuth `full`); aksi halde `403 forbidden`."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { type: object, additionalProperties: true } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /admin/clients:
+    get:
+      tags: ["Platform admin"]
+      summary: "Tüm istemciler"
+      description: "Kapsam / erişim: yalnızca gerçek platform yöneticisi (panel oturumu veya OAuth `full`); aksi halde `403 forbidden`."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { type: object, additionalProperties: true } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /admin/hostnames:
+    get:
+      tags: ["Platform admin"]
+      summary: "Tüm hostname'ler"
+      description: "Kapsam / erişim: yalnızca gerçek platform yöneticisi (panel oturumu veya OAuth `full`); aksi halde `403 forbidden`."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { type: object, additionalProperties: true } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /admin/abuse-reports:
+    get:
+      tags: ["Platform admin"]
+      summary: "Kötüye kullanım raporları"
+      description: "Kapsam / erişim: yalnızca gerçek platform yöneticisi (panel oturumu veya OAuth `full`); aksi halde `403 forbidden`."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { reports: { type: array, items: { type: object, additionalProperties: true } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /admin/clients/notify-update:
+    post:
+      tags: ["Platform admin"]
+      summary: "İstemcilere güncelleme bildir"
+      description: "Kapsam / erişim: yalnızca gerçek platform yöneticisi (panel oturumu veya OAuth `full`); aksi halde `403 forbidden`."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { notified: { type: integer } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /admin/switch-tenant:
+    post:
+      tags: ["Platform admin"]
+      summary: "Kiracı değiştir"
+      description: "Kapsam / erişim: yalnızca gerçek platform yöneticisi (panel oturumu veya OAuth `full`); aksi halde `403 forbidden`."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [tenant_id], properties: { tenant_id: { type: string } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /admin/abuse/freeze:
+    post:
+      tags: ["Platform admin"]
+      summary: "Hostname/tüneli dondur"
+      description: "Kapsam / erişim: yalnızca gerçek platform yöneticisi (panel oturumu veya OAuth `full`); aksi halde `403 forbidden`. MCP `call_api` ile çağrılırken `confirm=true` zorunludur."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [frozen], properties: { fqdn: { type: string }, tunnel_id: { type: string }, frozen: { type: boolean } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { ok: { type: boolean }, frozen: { type: boolean } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /.well-known/oauth-authorization-server:
+    servers:
+      - url: https://zorven.app
+    get:
+      tags: ["OAuth & MCP"]
+      summary: "OAuth yetkilendirme sunucusu meta verisi (RFC 8414)"
+      description: "`grant_types_supported`: authorization_code, refresh_token; `code_challenge_methods_supported`: S256; `token_endpoint_auth_methods_supported`: none; `scopes_supported`: kapsam listesi (`full` dahil); `resource_indicators_supported`: true. Kimlik doğrulama gerekmez."
+      security: []
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/OAuthServerMetadata" } } } }
+
+  /.well-known/oauth-protected-resource:
+    servers:
+      - url: https://zorven.app
+    get:
+      tags: ["OAuth & MCP"]
+      summary: "Korunan kaynak meta verisi (RFC 9728)"
+      description: "Yönetim kaynağı `https://<alan>/mcp` ve ona ait yetkilendirme sunucusunu duyurur. MCP uç noktasının 401 yanıtındaki `WWW-Authenticate` başlığı bu adrese işaret eder."
+      security: []
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+
+  /.well-known/jwks.json:
+    servers:
+      - url: https://zorven.app
+    get:
+      tags: ["OAuth & MCP"]
+      summary: "Access token imza anahtarları (JWKS)"
+      description: "`at+jwt` access token imzalarını doğrulamak için kamusal anahtar kümesi."
+      security: []
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+
+  /oauth/register:
+    servers:
+      - url: https://zorven.app
+    post:
+      tags: ["OAuth & MCP"]
+      summary: "Dinamik istemci kaydı (RFC 7591)"
+      description: "Yalnızca kamusal istemci (`token_endpoint_auth_method=none`). PKCE S256 zorunludur. Dönen `client_id` yetkilendirme akışında kullanılır."
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [redirect_uris]
+              properties:
+                client_name: { type: string }
+                redirect_uris: { type: array, items: { type: string } }
+                grant_types: { type: array, items: { type: string, enum: [authorization_code, refresh_token] } }
+                response_types: { type: array, items: { type: string, enum: [code] } }
+                token_endpoint_auth_method: { type: string, enum: [none] }
+      responses:
+        "201": { description: Created, content: { application/json: { schema: { type: object, properties: { client_id: { type: string }, client_name: { type: string }, redirect_uris: { type: array, items: { type: string } } } } } } }
+        "400": { description: invalid_client_metadata / invalid_redirect_uri }
+
+  /oauth/authorize:
+    servers:
+      - url: https://zorven.app
+    get:
+      tags: ["OAuth & MCP"]
+      summary: "Yetkilendirme isteği (authorization_code + PKCE)"
+      description: "Tarayıcı yönlendirmesidir; kullanıcıyı panelin onay sayfasına gönderir ve onaydan sonra `redirect_uri`'ye `code`, `state` ve `iss` ile döner. `code_challenge_method=S256` zorunludur. `scope` içinde `full` istenirse veya kullanıcı onay ekranında işaretlerse step-up gerekir: panel oturumu son 5 dakikada açılmamışsa `403 reauth_required` ve yeniden giriş."
+      security: []
+      parameters:
+        - { name: response_type, in: query, required: true, schema: { type: string, enum: [code] } }
+        - { name: client_id, in: query, required: true, schema: { type: string } }
+        - { name: redirect_uri, in: query, required: true, schema: { type: string } }
+        - { name: code_challenge, in: query, required: true, schema: { type: string } }
+        - { name: code_challenge_method, in: query, required: true, schema: { type: string, enum: [S256] } }
+        - { name: scope, in: query, schema: { type: string, example: "mcp:read tunnels:write" } }
+        - { name: state, in: query, schema: { type: string } }
+        - { name: resource, in: query, schema: { type: string, example: "https://zorven.app/mcp" } }
+      responses:
+        "302": { description: Redirect }
+        "400": { description: invalid_request / invalid_scope }
+
+  /oauth/token:
+    servers:
+      - url: https://zorven.app
+    post:
+      tags: ["OAuth & MCP"]
+      summary: "Token uç noktası"
+      description: "`authorization_code` (code + `code_verifier`) veya `refresh_token` verilir. Access token `at+jwt`, 1 saat (`full` için 30 dakika). Refresh token döner; yeniden kullanımda aile iptal edilir, 30 gün (`full` için 7 gün, kayan; grant 30 günden eskiyse yenileme reddedilir)."
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [grant_type]
+              properties:
+                grant_type: { type: string, enum: [authorization_code, refresh_token] }
+                code: { type: string }
+                code_verifier: { type: string }
+                redirect_uri: { type: string }
+                client_id: { type: string }
+                refresh_token: { type: string }
+                resource: { type: string, example: "https://zorven.app/mcp" }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/OAuthTokenResponse" } } } }
+        "400": { description: "invalid_request / invalid_grant / invalid_scope" }
+
+  /oauth/revoke:
+    servers:
+      - url: https://zorven.app
+    post:
+      tags: ["OAuth & MCP"]
+      summary: "Token iptali (RFC 7009)"
+      description: "Refresh token'ı (ve bağlı grant'ı) iptal eder."
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: { type: object, required: [token], properties: { token: { type: string }, client_id: { type: string } } }
+      responses:
+        "200": { description: OK }
+
+  /mcp:
+    servers:
+      - url: https://zorven.app
+    post:
+      tags: ["OAuth & MCP"]
+      summary: "MCP isteği (JSON-RPC, streamable HTTP)"
+      description: "Yönetim MCP uç noktası. `Authorization: Bearer` ile API token (`zrv_api_...`) veya OAuth access token. 401 yanıtı `WWW-Authenticate: Bearer resource_metadata=\"...\"` taşır. `full` kapsamlı token ile `list_api_endpoints` ve `call_api` araçları açılır; `call_api` yalnızca `/api/v1` uçlarını çağırır, DELETE ve yıkıcı fiillerde `confirm=true` ister, yanıtı 256 KB ile sınırlar ve hariç uçlarda `403 full_scope_excluded` döner."
+      security:
+        - bearerAuth: []
+        - oauth2: [mcp:read]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true, description: JSON-RPC 2.0 }
+      responses:
+        "200": { description: OK }
+        "401": { description: "Unauthorized (WWW-Authenticate: Bearer resource_metadata=...)" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    get:
+      tags: ["OAuth & MCP"]
+      summary: "MCP akışı (SSE, streamable HTTP)"
+      description: "Yönetim MCP uç noktası. `Authorization: Bearer` ile API token (`zrv_api_...`) veya OAuth access token. 401 yanıtı `WWW-Authenticate: Bearer resource_metadata=\"...\"` taşır. `full` kapsamlı token ile `list_api_endpoints` ve `call_api` araçları açılır; `call_api` yalnızca `/api/v1` uçlarını çağırır, DELETE ve yıkıcı fiillerde `confirm=true` ister, yanıtı 256 KB ile sınırlar ve hariç uçlarda `403 full_scope_excluded` döner."
+      security:
+        - bearerAuth: []
+        - oauth2: [mcp:read]
+      responses:
+        "200": { description: OK }
+        "401": { description: "Unauthorized (WWW-Authenticate: Bearer resource_metadata=...)" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
 components:
   securitySchemes:
     bearerAuth:
@@ -664,6 +3160,28 @@ components:
       scheme: bearer
       bearerFormat: zrv_api_...
       description: "Panelde oluşturulan API token'ı. `Authorization: Bearer zrv_api_...`"
+    oauth2:
+      type: oauth2
+      description: "OAuth 2.1 (authorization_code + PKCE S256). Yalnızca /mcp uç noktası ve /api/v1 (OAuth erişim token'ıyla) için."
+      flows:
+        authorizationCode:
+          authorizationUrl: https://zorven.app/oauth/authorize
+          tokenUrl: https://zorven.app/oauth/token
+          refreshUrl: https://zorven.app/oauth/token
+          scopes:
+            mcp:read: "Salt okuma"
+            mcp:manage: "Okuma + yönetim yazma"
+            clients:read: Clients (read)
+            clients:write: Clients (write)
+            tunnels:read: Tunnels (read)
+            tunnels:write: Tunnels (write)
+            tunnels:delete: "Tünel silme (yıkıcı)"
+            hostnames:read: Hostnames (read)
+            hostnames:write: Hostnames (write)
+            hostnames:delete: "Hostname silme (yıkıcı)"
+            analytics:read: Analytics (read)
+            mcp: "Yalnızca tünel MCP kaynakları"
+            full: "Tam erişim: panel oturumuyla aynı yetki (step-up gerekir)"
 
   parameters:
     PathID:
@@ -720,6 +3238,15 @@ components:
           schema: { $ref: "#/components/schemas/Error" }
 
   schemas:
+    CaptchaTotals:
+      type: object
+      properties:
+        challenge: { type: integer }
+        solve: { type: integer }
+        verify_ok: { type: integer }
+        verify_fail: { type: integer }
+        renewals: { type: integer }
+        unique_passes: { type: integer }
     Error:
       type: object
       properties:
@@ -762,6 +3289,8 @@ components:
         fqdn: { type: string, example: "api.zorven.app" }
         type: { type: string, enum: [global, scoped, legacy, custom], description: "global = kısa ad, scoped = kiracı adı" }
         verified: { type: boolean }
+        suspended_reason: { type: string, enum: [plan_limit], description: "Doluysa ad plan sınırı nedeniyle askıda (erişim kapalı, silinmedi)" }
+        suspended_at: { type: string, format: date-time }
         created_at: { type: string, format: date-time }
 
     IPRule:
@@ -873,3 +3402,207 @@ components:
         effective_bandwidth_limit_bytes: { type: [integer, "null"], description: "Ek GB dahil aylık trafik limiti; null = sınırsız" }
         created_at: { type: string, format: date-time }
         plan_details: { $ref: "#/components/schemas/Plan" }
+
+    Ok:
+      type: object
+      properties:
+        ok: { type: boolean }
+
+    Project:
+      type: object
+      properties:
+        id: { type: string }
+        tenant_id: { type: string }
+        name: { type: string }
+        slug: { type: string }
+        created_at: { type: string, format: date-time }
+
+    PolicyBinding:
+      type: object
+      properties:
+        policy_id: { type: string }
+        tunnel_id: { type: string }
+        hostname: { type: string }
+
+    Policy:
+      type: object
+      properties:
+        id: { type: string }
+        tenant_id: { type: string }
+        project_id: { type: string }
+        name: { type: string }
+        config: { type: object, additionalProperties: true }
+        enabled: { type: boolean }
+        priority: { type: integer }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        bindings:
+          type: array
+          items: { $ref: "#/components/schemas/PolicyBinding" }
+
+    Device:
+      allOf:
+        - $ref: "#/components/schemas/Client"
+        - type: object
+          properties:
+            tunnels:
+              type: array
+              items: { $ref: "#/components/schemas/Tunnel" }
+            tags: { type: object, additionalProperties: { type: string } }
+
+    Secret:
+      type: object
+      properties:
+        id: { type: string }
+        tenant_id: { type: string }
+        project_id: { type: string }
+        name: { type: string }
+        key_version: { type: integer }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    APIToken:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        token_id: { type: string }
+        token_prefix: { type: string }
+        scopes: { type: array, items: { type: string } }
+        last_used_at: { type: [string, "null"], format: date-time }
+        expires_at: { type: [string, "null"], format: date-time }
+        revoked_at: { type: [string, "null"], format: date-time }
+        created_at: { type: string, format: date-time }
+
+    TeamMember:
+      type: object
+      properties:
+        id: { type: string }
+        user_id: { type: string }
+        email: { type: string }
+        name: { type: string }
+        role: { type: string, enum: [owner, admin, member] }
+        status: { type: string }
+        tokens_count: { type: integer }
+        email_sent: { type: boolean }
+        created_at: { type: string, format: date-time }
+
+    MailMessage:
+      type: object
+      properties:
+        id: { type: string }
+        direction: { type: string, enum: [inbound, outbound] }
+        from: { type: string }
+        to: { type: string }
+        subject: { type: string }
+        text_body: { type: string }
+        html_body: { type: string }
+        message_id: { type: string }
+        in_reply_to: { type: string }
+        seen: { type: boolean }
+        received_at: { type: string, format: date-time }
+
+    TunnelAlert:
+      type: object
+      properties:
+        tunnel_id: { type: string }
+        enabled: { type: boolean }
+        error_rate_pct: { type: integer }
+        window_min: { type: integer }
+        min_requests: { type: integer }
+        notify_email: { type: string }
+        state: { type: string, enum: [ok, firing] }
+        last_changed_at: { type: [string, "null"], format: date-time }
+        last_notified_at: { type: [string, "null"], format: date-time }
+
+    TunnelSecurity:
+      type: object
+      properties:
+        tunnel_id: { type: string }
+        config: { type: object, additionalProperties: true }
+        updated_at: { type: string, format: date-time }
+        bot:
+          type: object
+          description: "Bot koruması (proof-of-work doğrulama). mode=always ve hız sınırı Pro+; alt planda always -> suspicious, rate uygulanmaz (ayar silinmez)."
+          properties:
+            mode: { type: string, enum: [off, suspicious, always] }
+            difficulty: { type: integer, minimum: 12, maximum: 22, default: 18, description: "PoW bit sayısı (12-22, varsayılan 18)" }
+            ttl_minutes: { type: integer, minimum: 5, maximum: 10080, default: 60, description: "Doğrulama çerezi süresi, dakika (5-10080, varsayılan 60)" }
+            exclude_paths: { type: array, maxItems: 32, items: { type: string }, description: "Hariç tutulan yollar (en fazla 32, `*` yalnız sonda)" }
+            allow_verified_bots: { type: boolean, default: true, description: "Doğrulanmış arama motoru botları geçer (varsayılan true)" }
+            block_empty_ua: { type: boolean, default: false, description: "User-Agent'ı boş istekleri engelle (varsayılan false)" }
+        rate:
+          type: object
+          description: "Hız sınırı (tünel+IP, pencere başına). Pro+."
+          properties:
+            enabled: { type: boolean }
+            requests: { type: integer, minimum: 1, maximum: 100000, default: 120, description: "Pencere başına istek (1-100000, varsayılan 120)" }
+            window_seconds: { type: integer, minimum: 1, maximum: 3600, default: 60, description: "Pencere süresi, saniye (1-3600, varsayılan 60)" }
+            action: { type: string, enum: [block, challenge], default: block, description: "Sınır aşılınca eylem (varsayılan block)" }
+            exclude_paths: { type: array, maxItems: 32, items: { type: string }, description: "Hariç tutulan yollar (en fazla 32, `*` yalnız sonda)" }
+
+    PathRoute:
+      type: object
+      properties:
+        id: { type: string }
+        fqdn: { type: string }
+        path_prefix: { type: string }
+        tunnel_id: { type: string }
+        created_at: { type: string, format: date-time }
+
+    Grantee:
+      type: object
+      required: [type, id]
+      properties:
+        type: { type: string, enum: [user, group, device] }
+        id: { type: string }
+
+    NetShare:
+      type: object
+      properties:
+        id: { type: string }
+        owner_client_id: { type: string }
+        name: { type: string }
+        proto: { type: string }
+        port: { type: integer }
+        grantees: { type: array, items: { $ref: "#/components/schemas/Grantee" } }
+        expires_at: { type: [string, "null"], format: date-time }
+        ephemeral: { type: boolean }
+        created_at: { type: string, format: date-time }
+
+    TunRule:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        src: { $ref: "#/components/schemas/Grantee" }
+        dst: { type: string }
+        proto: { type: string }
+        ports: { type: string }
+        src_name: { type: string }
+        dst_name: { type: string }
+
+    OAuthServerMetadata:
+      type: object
+      properties:
+        issuer: { type: string }
+        authorization_endpoint: { type: string }
+        token_endpoint: { type: string }
+        registration_endpoint: { type: string }
+        revocation_endpoint: { type: string }
+        jwks_uri: { type: string }
+        response_types_supported: { type: array, items: { type: string } }
+        grant_types_supported: { type: array, items: { type: string } }
+        code_challenge_methods_supported: { type: array, items: { type: string } }
+        token_endpoint_auth_methods_supported: { type: array, items: { type: string } }
+        scopes_supported: { type: array, items: { type: string } }
+        resource_indicators_supported: { type: boolean }
+
+    OAuthTokenResponse:
+      type: object
+      properties:
+        access_token: { type: string }
+        token_type: { type: string, example: Bearer }
+        expires_in: { type: integer, description: "3600; 1800 for the full scope" }
+        refresh_token: { type: string }
+        scope: { type: string }

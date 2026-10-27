@@ -8,9 +8,44 @@ import (
 	crand "crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
+
+// ReasonTerms, Filter.Reason degerini ayirir: virgulle ayrilmis oge listesi; her
+// oge tam eslesme ya da sonu '*' ise on-ek eslesmesidir ("waf:*,geo:*").
+func ReasonTerms(filter string) (exact, prefixes []string) {
+	for _, t := range strings.Split(filter, ",") {
+		t = strings.TrimSpace(t)
+		switch {
+		case t == "":
+		case strings.HasSuffix(t, "*"):
+			if p := strings.TrimSuffix(t, "*"); p != "" {
+				prefixes = append(prefixes, p)
+			}
+		default:
+			exact = append(exact, t)
+		}
+	}
+	return
+}
+
+// MatchReason, reject_reason degerinin filtreye uyup uymadigi.
+func MatchReason(filter, reason string) bool {
+	exact, prefixes := ReasonTerms(filter)
+	for _, e := range exact {
+		if e == reason {
+			return true
+		}
+	}
+	for _, p := range prefixes {
+		if strings.HasPrefix(reason, p) {
+			return true
+		}
+	}
+	return false
+}
 
 // DefaultCapacity, kontratla ayni: 1000 kayit, ~200 bayt/kayit -> ~200 KB tavan.
 const DefaultCapacity = 1000

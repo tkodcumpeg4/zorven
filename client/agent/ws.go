@@ -41,6 +41,14 @@ func (cs *clientSession) handleWSOpen(m protocol.WSOpen) {
 		}
 	}
 
+	// Sunucu yolu yuzde-kodlamasini koruyarak (EscapedPath) gonderir; HTTP
+	// istekleriyle ayni dogrulama uygulanir ve yol ikinci kez kodlanmaz.
+	if !validLocalPath(m.Path) {
+		cs.sendWSAccept(m.ReqID, 0, nil, protocol.CodeLocalUnreachable, "gecersiz istek yolu")
+		return
+	}
+	reqURL := wsRequestURL(host, m.Path, m.Query)
+
 	conn, err := (&net.Dialer{Timeout: wsDialTimeout}).Dial("tcp", host)
 	if err != nil {
 		cs.sendWSAccept(m.ReqID, 0, nil, protocol.CodeLocalUnreachable, "yerel servise baglanilamadi: "+err.Error())
@@ -51,7 +59,7 @@ func (cs *clientSession) handleWSOpen(m protocol.WSOpen) {
 	// tarayicidan gelenler korunur ki Accept degeri tarayicida dogrulansin).
 	req := &http.Request{
 		Method: http.MethodGet,
-		URL:    &url.URL{Scheme: "http", Host: host, Path: m.Path, RawQuery: m.Query},
+		URL:    reqURL,
 		Host:   host,
 		Header: http.Header(m.Headers),
 	}
@@ -164,4 +172,18 @@ func (cs *clientSession) closeAllWS() {
 	for _, c := range conns {
 		c.Close()
 	}
+}
+
+// wsRequestURL, yerel upgrade isteginin URL'si. escapedPath kodlanmis yoldur
+// (%2F, %40 korunur): Path cozulmus hali, RawPath ozgun kodlama olur; boylece
+// istek satirina yol ikinci kez kodlanmadan yazilir. Cozulemeyen yol (eski
+// sunucunun cozulmus yolu, ham '%' iceren) eski davranisa duser.
+func wsRequestURL(host, escapedPath, query string) *url.URL {
+	u := &url.URL{Scheme: "http", Host: host, RawQuery: query}
+	if p, err := url.PathUnescape(escapedPath); err == nil {
+		u.Path, u.RawPath = p, escapedPath
+	} else {
+		u.Path = escapedPath
+	}
+	return u
 }

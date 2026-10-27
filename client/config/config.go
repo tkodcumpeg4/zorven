@@ -24,6 +24,8 @@ type Config struct {
 	// service install --enable-*). Varsayilan KAPALI. Sunucudan degistirilemez.
 	EnableTerminal bool `json:"enable_terminal,omitempty"`
 	EnableScreen   bool `json:"enable_screen,omitempty"`
+	// Language: CLI dili (tr/en/ja). Bossa ortamdan/isletim sisteminden secilir.
+	Language string `json:"language,omitempty"`
 }
 
 // legacyDefaultLocalURLs, eski surumlerin config dosyasina KENDILIGINDEN
@@ -150,6 +152,10 @@ func SaveFile(path string, cfg Config) error {
 	// WriteFile mevcut dosyanin iznini DEGISTIRMEZ: eskiden gevsek izinle
 	// olusmus bir dosyada token herkese okunur kalirdi. Her yazimda daralt.
 	_ = os.Chmod(path, 0o600)
+	// Windows'ta chmod ACL'i daraltmaz; dosyaya korumali DACL uygulanir.
+	if err := restrictFile(path, isSystemPath(path)); err != nil {
+		return fmt.Errorf("ayar dosyasi izinleri daraltilamadi: %w", err)
+	}
 	return nil
 }
 
@@ -193,4 +199,20 @@ func SetServerSystem(server string) error {
 	cfg, _ := LoadFile(SystemPath())
 	cfg.ServerAddr = strings.TrimSpace(server)
 	return SaveSystem(cfg)
+}
+
+// WriteSecretFile, gizli veriyi (or. cihaz ozel anahtari) 0600 izniyle yazar;
+// Windows'ta korumali DACL (yalniz SYSTEM, Administrators, sahibi) uygular.
+func WriteSecretFile(path string, data []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("dizin olusturulamadi: %w", err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return fmt.Errorf("dosya yazilamadi: %w", err)
+	}
+	_ = os.Chmod(path, 0o600)
+	if err := restrictFile(path, isSystemPath(path)); err != nil {
+		return fmt.Errorf("dosya izinleri daraltilamadi: %w", err)
+	}
+	return nil
 }

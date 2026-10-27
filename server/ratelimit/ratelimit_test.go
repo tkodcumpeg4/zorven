@@ -118,3 +118,29 @@ func TestRetryAfterIsAtLeastOneSecond(t *testing.T) {
 		t.Errorf("sifir hizda RetryAfter() = %v, en az 1sn olmaliydi", got)
 	}
 }
+
+func TestNormKeyIPv6Prefix(t *testing.T) {
+	cases := map[string]string{
+		"2001:db8:1:2:aaaa::1":       "2001:db8:1:2::/64",
+		"ip:2001:db8:1:2:bbbb::9":    "ip:2001:db8:1:2::/64",
+		"tun_x|2001:db8:1:2:cccc::7": "tun_x|2001:db8:1:2::/64",
+		"203.0.113.5":                "203.0.113.5",
+		"ip:203.0.113.5":             "ip:203.0.113.5",
+		"::ffff:203.0.113.5":         "::ffff:203.0.113.5",
+		"ten_abc":                    "ten_abc",
+		"hdr:X-Key:2001:db8::1":      "hdr:X-Key:2001:db8::1",
+	}
+	for in, want := range cases {
+		if got := NormKey(in); got != want {
+			t.Errorf("NormKey(%q) = %q, beklenen %q", in, got, want)
+		}
+	}
+	l := New(0.001, 1)
+	defer l.Close()
+	if !l.Allow("2001:db8:1:2::1") || l.Allow("2001:db8:1:2::2") {
+		t.Fatal("ayni /64 icindeki adresler ayni kovayi paylasmali")
+	}
+	if !l.Allow("2001:db8:1:3::1") {
+		t.Fatal("farkli /64 ayri kova olmali")
+	}
+}

@@ -284,6 +284,14 @@ function exportData(fmt: 'csv' | 'json') {
   a.href = url; a.download = `zorven-loglar-${Date.now()}.${ext}`; a.click()
   URL.revokeObjectURL(url)
 }
+
+// reject_reason metni; ZTNA Z3 dinamik nedenleri (waf:<kural>, waf_log:<kural>, geo:<ulke>) on-ekten cozulur.
+function rejectText(r: string): string {
+  if (r.startsWith('waf_log:')) return t('tunsec.reasonWafLog', { rule: r.slice(8) })
+  if (r.startsWith('waf:')) return t('tunsec.reasonWaf', { rule: r.slice(4) })
+  if (r.startsWith('geo:')) return t('tunsec.reasonGeo', { country: r.slice(4) })
+  return t(`requests.reject.${r}`)
+}
 </script>
 
 <template>
@@ -414,7 +422,7 @@ function exportData(fmt: 'csv' | 'json') {
           <div><dt class="label-sys mb-1">{{ t('requests.time') }}</dt><dd class="font-mono text-xs">{{ new Date(selected.ts).toLocaleString(dateLocale()) }}</dd></div>
           <div><dt class="label-sys mb-1">{{ t('requests.methodStatus') }}</dt><dd class="flex items-center gap-2"><MethodBadge :method="selected.method" /><StatusCode :code="selected.status" /></dd></div>
           <div><dt class="label-sys mb-1">{{ t('requests.hostname') }}</dt><dd class="break-all font-mono text-xs text-fg-muted">{{ selected.hostname || hostOf(selected.tunnel_id) }}</dd></div>
-          <div v-if="selected.reject_reason"><dt class="label-sys mb-1">{{ t('requests.rejectReason') }}</dt><dd class="flex items-center gap-2 text-xs"><RejectBadge :reason="selected.reject_reason" /><span class="text-fg-muted">{{ t(`requests.reject.${selected.reject_reason}`) }}</span></dd></div>
+          <div v-if="selected.reject_reason"><dt class="label-sys mb-1">{{ t('requests.rejectReason') }}</dt><dd class="flex items-center gap-2 text-xs"><RejectBadge :reason="selected.reject_reason" /><span class="text-fg-muted">{{ rejectText(selected.reject_reason) }}</span></dd></div>
           <div><dt class="label-sys mb-1">{{ t('requests.colPath') }}</dt><dd class="break-all font-mono text-xs">{{ selected.path }}</dd></div>
           <div><dt class="label-sys mb-1">{{ t('requests.colDuration') }}</dt><dd class="font-mono text-xs tabular-nums">{{ duration(selected.duration_ms) }}</dd></div>
           <div><dt class="label-sys mb-1">{{ t('requests.clientIp') }}</dt><dd class="font-mono text-xs text-fg-muted">{{ selected.client_ip || '—' }}</dd></div>

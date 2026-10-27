@@ -76,7 +76,7 @@ onMounted(async () => {
 })
 
 // --- Detaylı ayarlar modalı (Genel + Protokol + Erişim + IP) ---
-type SettingsTab = 'general' | 'protocol' | 'access' | 'ip' | 'ha' | 'traffic' | 'metrics' | 'stats' | 'raw'
+type SettingsTab = 'general' | 'protocol' | 'access' | 'ip' | 'ha' | 'traffic' | 'mcp' | 'security' | 'metrics' | 'stats' | 'raw'
 const accessTunnel = ref<Tunnel | null>(null) // açık modalın tüneli
 const settingsTab = ref<SettingsTab>('general')
 const accessLoading = ref(false)
@@ -163,9 +163,11 @@ const replicaSaving = ref(false)
 const settingsTabs = computed<SettingsTab[]>(() => {
   // member: erisim/IP/HA/trafik/UDP ayarlari sunucuda owner/admin'e ozel (403) — sekmeler gizlenir.
   const base: SettingsTab[] = isPrivileged.value
-    ? ['general', 'protocol', 'access', 'stats', 'ip', 'ha', 'traffic', 'metrics']
+    ? ['general', 'protocol', 'access', 'security', 'stats', 'ip', 'ha', 'traffic', 'metrics']
     : ['general', 'protocol', 'stats', 'metrics']
   const p = accessTunnel.value?.proto
+  // MCP modu yalnizca HTTP tunellerinde (uyeler yalniz okur; panel kendi icinde kisitlar).
+  if (p === 'http' || !p) base.splice(base.indexOf('metrics'), 0, 'mcp')
   return isPrivileged.value && (p === 'tcp' || p === 'udp') ? [...base, 'raw'] : base
 })
 
@@ -381,7 +383,7 @@ const alertForm = reactive({ enabled: false, error_rate_pct: 10, window_min: 5, 
 
 async function openSettings(tn: Tunnel, tab: SettingsTab = 'general') {
   accessTunnel.value = tn
-  settingsTab.value = !isPrivileged.value && ['access', 'ip', 'ha', 'traffic', 'raw'].includes(tab) ? 'general' : tab
+  settingsTab.value = !isPrivileged.value && ['access', 'security', 'ip', 'ha', 'traffic', 'raw'].includes(tab) ? 'general' : tab
   accessLoading.value = true
   accessForm.mode = 'none'
   accessForm.enabled = true
@@ -1637,6 +1639,12 @@ async function remove(tn: Tunnel) {
             </div>
           </template>
         </div>
+
+        <!-- GUVENLIK: WAF + Geo (ZTNA Z3) -->
+        <TunnelSecurityPanel v-else-if="settingsTab === 'security' && accessTunnel" :tunnel-id="accessTunnel.id" :privileged="isPrivileged" :proto="accessTunnel.proto || 'http'" />
+
+        <!-- MCP MODU (M3/M4) -->
+        <TunnelMcpPanel v-else-if="settingsTab === 'mcp' && accessTunnel" :tunnel-id="accessTunnel.id" :privileged="isPrivileged" />
 
         <!-- METRİKLER -->
         <!-- UDP + OYUN SUNUCUSU (FAZ 4 / F24) -->

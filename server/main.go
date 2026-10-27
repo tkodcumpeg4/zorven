@@ -26,15 +26,17 @@ import (
 	"github.com/tkodcumpeg4/zorven/server/api"
 	"github.com/tkodcumpeg4/zorven/server/auth"
 	"github.com/tkodcumpeg4/zorven/server/bandwidth"
+	"github.com/tkodcumpeg4/zorven/server/botguard"
+	"github.com/tkodcumpeg4/zorven/server/captcha"
 	"github.com/tkodcumpeg4/zorven/server/door"
 	"github.com/tkodcumpeg4/zorven/server/entitlements"
 	"github.com/tkodcumpeg4/zorven/server/events"
 	"github.com/tkodcumpeg4/zorven/server/ingress"
-	"github.com/tkodcumpeg4/zorven/server/mcpserver"
-	"github.com/tkodcumpeg4/zorven/server/oauthas"
 	"github.com/tkodcumpeg4/zorven/server/ipfilter"
 	"github.com/tkodcumpeg4/zorven/server/mail"
+	"github.com/tkodcumpeg4/zorven/server/mcpserver"
 	"github.com/tkodcumpeg4/zorven/server/netctl"
+	"github.com/tkodcumpeg4/zorven/server/oauthas"
 	"github.com/tkodcumpeg4/zorven/server/ratelimit"
 	"github.com/tkodcumpeg4/zorven/server/rawproxy"
 	"github.com/tkodcumpeg4/zorven/server/reqlog"
@@ -42,10 +44,11 @@ import (
 	"github.com/tkodcumpeg4/zorven/server/session"
 	"github.com/tkodcumpeg4/zorven/server/sqliteimport"
 	"github.com/tkodcumpeg4/zorven/server/store"
-	"github.com/tkodcumpeg4/zorven/server/updates"
 	"github.com/tkodcumpeg4/zorven/server/store/pgstore"
 	"github.com/tkodcumpeg4/zorven/server/tlscert"
 	"github.com/tkodcumpeg4/zorven/server/tunnel"
+	"github.com/tkodcumpeg4/zorven/server/tunsec"
+	"github.com/tkodcumpeg4/zorven/server/updates"
 	"github.com/tkodcumpeg4/zorven/server/visitorauth"
 	"github.com/tkodcumpeg4/zorven/shared/protocol"
 )
@@ -156,13 +159,14 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 			// Geo/IP (FAZ 1 Part 2 / F03a). Zorven veritabani DAGITMAZ; yol
 			// isletmeciden gelir. Tanimsizsa ozellik kapali kalir ve Geo kosullari
 			// eslesmez — istek normal akisina devam eder.
-			if geoPath := strings.TrimSpace(os.Getenv("ZORVEN_GEOIP_DB")); geoPath != "" {
-				if err := router.SetGeoResolver(geoPath); err != nil {
-					log.Warn("geoip veritabani acilamadi, Geo kosullari devre disi",
-						"yol", geoPath, "hata", err)
-				} else {
-					log.Info("geoip veritabani yuklendi", "yol", geoPath)
-				}
+			// ZTNA Z3: yol ZORVEN_GEOIP_DB (vars. /app/data/GeoLite2-Country.mmdb).
+			// Dosya yoksa hata degildir: ulke "unknown" sayilir ve dosya sonradan
+			// konursa/degisirse (mtime) yeniden baslatmadan yuklenir. Ag cagrisi YOK.
+			geoPath := firstNonEmpty(strings.TrimSpace(os.Getenv("ZORVEN_GEOIP_DB")), defaultGeoIPPath)
+			if router.SetGeoPath(geoPath) {
+				log.Info("geoip veritabani yuklendi", "yol", geoPath)
+			} else {
+				log.Info("geoip veritabani yok, ulke 'unknown' sayilacak (dosya konunca otomatik yuklenir)", "yol", geoPath)
 			}
 			// IP listeleri (F03b/c/d): tor_exit, hosting, reputation. Zorven liste
 			// DAGITMAZ; kaynaklar isletmeciden gelir. Tanimsizsa kosullar eslesmez.
@@ -194,7 +198,7 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 			go healthChecker.Run(ctx)
 
 			requests := reqlog.New(5000)
-			captures := reqlog.NewCaptureStore(0) // FAZ 2: opt-in istek yakalama deposu
+			captures := reqlog.NewCaptureStore(0)            // FAZ 2: opt-in istek yakalama deposu
 			setupCaptures(ctx, captures, st, os.Getenv, log) // K2: kalici govde yakalama
 			broker := events.New()
 
@@ -205,6 +209,10 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				return st.InsertRequestLogs(pctx, batch)
 			}, log)
 			go logPersister.Run(ctx)
+
+			// MCP tunel modu cagri loglari (yalniz ust veri), toplu yazim.
+			mcpLogger := ingress.NewMCPLogger(st.InsertMCPCalls, log)
+			go mcpLogger.Run(ctx)
 
 			// Ziyaretci erisim olaylari (Basic/OAuth giris istatistikleri): istek
 			// yolunu bloklamadan toplu yazilir.
@@ -220,6 +228,8 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 			}
 
 			entitlementSvc := entitlements.NewService(st)
+			// Z3: WAF engelleme kipi + Geo Pro+ (ingress bellekteki plan dizgisiyle denetler).
+			router.SecurityGate = entitlements.ProOrAbove
 			bandwidthRecorder := bandwidth.NewLocalRecorder(st)
 			defer bandwidthRecorder.Close()
 
@@ -258,6 +268,7 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 			netMgr := netctl.New(netStore, api.NewNetDirectory(st), nil, log)
 			netMgr.Usage = bandwidthRecorder
 			go netMgr.Run(ctx)
+			setupNetDirect(ctx, netMgr, os.Getenv, log) // W2: STUN + dogrudan P2P yol koordinasyonu
 
 			apiSrv := &api.Server{
 				Net:   netMgr,
@@ -410,16 +421,16 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 			apiLimiter := ratelimit.New(30, 60)
 
 			guarded := &api.Middleware{
-				Key:          key,
-				Limiter:      adminLimiter,
-				APILimiter:   apiLimiter,
-				Log:          log,
-				Next:         control,
-				Store:        st,
-				Entitlements: entitlementSvc,
-				Sessions:     sessions,
-				BetterAuth:   betterAuthVerifier,
-				TrustedHosts: api.TrustedOriginHosts(apiSrv.PlatformDomain, controlHosts),
+				Key:            key,
+				Limiter:        adminLimiter,
+				APILimiter:     apiLimiter,
+				Log:            log,
+				Next:           control,
+				Store:          st,
+				Entitlements:   entitlementSvc,
+				Sessions:       sessions,
+				BetterAuth:     betterAuthVerifier,
+				TrustedHosts:   api.TrustedOriginHosts(apiSrv.PlatformDomain, controlHosts),
 				PlatformDomain: apiSrv.PlatformDomain,
 				PublicPaths: map[string]bool{
 					"/api/v1/health":               true,
@@ -445,8 +456,10 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				PlatformDomain:    apiSrv.PlatformDomain,
 				Captures:          captures,
 				PortHost:          portCfg.Host,
+				MCPLog:            mcpLogger,
 			}
 			apiSrv.Captures = captures
+			apiSrv.MCPProbe = proxy.MCPProbe
 
 			// Web ile kapi acma (ham TCP/UDP tunelleri): grant onbellegi + reddedilen
 			// baglanti sayaclari. Plan kapisi (acikta no-op); rawMgr asagida kurulur, iptalde
@@ -530,6 +543,10 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 			)
 			proxy.Visitor = visitorMgr
 			proxy.BasicSecret = deriveKey([]byte(visitorSecret), keyPurposeBasicAuth)
+			// Bot korumasi (B1-B3): __zv_bot cerezi ve PoW sorgusu icin ayri amac anahtari
+			// (botguard bunu cerez/sorgu olarak ikiye boler); TLS parmak izi deposu.
+			proxy.BotKey = deriveKey([]byte(visitorSecret), keyPurposeBot)
+			proxy.TLSFP = botguard.NewTLSFPStore()
 			doorSvc.TokenKey = deriveKey([]byte(visitorSecret), keyPurposeDoorAddr)
 			proxy.AccessEvents = accessPersister
 			visitorMgr.OnEvent = proxy.RecordVisitorEvent
@@ -543,6 +560,42 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				tuns, err := st.ListReservedPortTunnels(lctx)
 				if err != nil {
 					return nil, err
+				}
+				// Z3: tunel ulke kurallari (SNI-modu ham tuneller dahil, hepsi tek sorgu).
+				// Plan kapisi (Pro+) kiraci basina bir kez sorulur; gecici hatada onceki
+				// harita korunur (fail-stale) — bos haritaya gecmek korumayi kaldirirdi.
+				if secs, serr := st.ListTunnelSecurities(lctx); serr == nil {
+					planOK := map[string]bool{}
+					next := map[string]*tunsec.Compiled{}
+					stale := false
+					for id, ts := range secs {
+						c := tunsec.Compile(tunsec.Parse(ts.Config))
+						if !c.GeoActive() {
+							continue
+						}
+						ok, seen := planOK[ts.TenantID]
+						if !seen {
+							ferr := entitlementSvc.CheckFeature(lctx, ts.TenantID, entitlements.FeatureTunnelSecurity)
+							var ee *entitlements.EntitlementError
+							switch {
+							case ferr == nil:
+								ok = true
+							case errors.As(ferr, &ee):
+								ok = false
+							default:
+								stale = true
+							}
+							planOK[ts.TenantID] = ok
+						}
+						if ok {
+							next[id] = c
+						}
+					}
+					if !stale {
+						rawMgr.SetSecurity(next)
+					}
+				} else {
+					log.Warn("rawproxy: tunel guvenligi okunamadi, onceki ayar korunuyor", "hata", serr)
 				}
 				// UDP sinirlari (F24) ayni yenilemede tek sorguyla okunur; hata olursa
 				// dinleyiciler varsayilan sinirlarla calismaya devam eder.
@@ -580,6 +633,16 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 			})
 			rawMgr.Door = doorSvc
 			rawMgr.Usage = bandwidthRecorder
+			// Z3: ham TCP/UDP icin tunel ulke kurali (ayni mmdb cozumleyicisi).
+			rawMgr.Geo = router
+			// Z2: yetki/politika/posture/guvenlik ayari degisince ham akislar ve
+			// acik ziyaretci WebSocket'leri yeniden degerlendirilir.
+			apiSrv.OnAuthzChange = func(tenantID string) {
+				rawMgr.Reevaluate(tenantID)
+				proxy.ReevaluateVisitors(tenantID)
+			}
+			apiSrv.GeoDBLoaded = router.GeoLoaded
+			go proxy.RunVisitorReevaluator(ctx, time.Minute)
 			rawMgr.Start(ctx)
 
 			// Gecici tunel supurucusu (FAZ 2 / F07): suresi dolan tunelleri
@@ -713,6 +776,24 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				log.Info("Analytics (Umami) upstream proxy etkin", "upstream", analyticsUpstream, "hosts", analyticsHosts)
 			}
 
+			// Zorven CAPTCHA: anahtar HKDF ile ayri amaclidir; platform sitesi (Zorven kaydi)
+			// yalniz ZORVEN_CAPTCHA_PLATFORM_SITEKEY + _SECRET ikisi de varsa etkin.
+			captchaSvc := captcha.New(captcha.Config{
+				Key:             deriveKey([]byte(visitorSecret), keyPurposeCaptcha),
+				PlatformSiteKey: strings.TrimSpace(os.Getenv("ZORVEN_CAPTCHA_PLATFORM_SITEKEY")),
+				PlatformSecret:  strings.TrimSpace(os.Getenv("ZORVEN_CAPTCHA_PLATFORM_SECRET")),
+				PlatformDomains: splitCSV(os.Getenv("ZORVEN_CAPTCHA_PLATFORM_DOMAINS")),
+				Store: func() store.CaptchaStore {
+					cs, _ := st.(store.CaptchaStore)
+					return cs
+				}(),
+			})
+			apiSrv.Captcha = captchaSvc
+			go captchaSvc.Run(ctx)
+			if captchaSvc.PlatformEnabled() {
+				log.Info("CAPTCHA platform sitesi etkin")
+			}
+
 			dash := dashboardHandler()
 			marketing := marketingHandler()
 			// Guncellemeler sayfalari, RSS ve /u/announcements (abonelikten cik):
@@ -798,6 +879,20 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 					issuer = firstNonEmpty(issuer, "https://"+apiSrv.PlatformDomain)
 					consentBase = firstNonEmpty(consentBase, "https://panel."+apiSrv.PlatformDomain)
 				}
+				// mcpUserInfo: kullanicinin DOGRULANMIS e-postasi + kiraci uyeligi.
+				mcpUserInfo := func(uctx context.Context, tenantID, userID string) (string, bool, error) {
+					var email string
+					var verified bool
+					if err := pgSt.Pool().QueryRow(uctx, `SELECT coalesce("email",''), coalesce("emailVerified",false) FROM "user" WHERE "id" = $1`, userID).
+						Scan(&email, &verified); err != nil {
+						return "", false, err
+					}
+					if !verified {
+						email = ""
+					}
+					role, err := pgSt.GetMemberRole(uctx, tenantID, userID)
+					return email, err == nil && role != "", nil
+				}
 				registerLimiter := ratelimit.New(0.1, 5) // IP basina dakikada ~6 kayit
 				defer registerLimiter.Close()
 				tokenLimiter := ratelimit.New(2, 30)
@@ -811,12 +906,7 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 						if betterAuthVerifier == nil {
 							return oauthas.Session{}, false
 						}
-						token := ""
-						if c, err := r.Cookie("better-auth.session_token"); err == nil && c.Value != "" {
-							token = c.Value
-						} else if c, err := r.Cookie("__Secure-better-auth.session_token"); err == nil && c.Value != "" {
-							token = c.Value
-						}
+						token := auth.SessionCookieValue(r)
 						if token == "" {
 							return oauthas.Session{}, false
 						}
@@ -824,19 +914,28 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 						if err != nil || sess == nil {
 							return oauthas.Session{}, false
 						}
-						return oauthas.Session{UserID: sess.UserID, Email: sess.Email, Name: sess.Name}, true
+						return oauthas.Session{UserID: sess.UserID, Email: sess.Email, Name: sess.Name, AuthTime: sess.CreatedAt}, true
 					},
-					Orgs:            pgSt.ListUserOrgs,
-					OriginTrusted:   guarded.OriginTrusted,
-					ClientIP:        ipOf,
-					Audit:           apiSrv.AuditExternal,
-					RegisterLimiter: registerLimiter,
-					TokenLimiter:    tokenLimiter,
+					Orgs:                  pgSt.ListUserOrgs,
+					ResolveResource:       mcpResolveResource(router),
+					UserInfo:              mcpUserInfo,
+					OriginTrusted:         guarded.OriginTrusted,
+					ClientIP:              ipOf,
+					Audit:                 apiSrv.AuditExternal,
+					RegisterLimiter:       registerLimiter,
+					RegisterGlobalLimiter: ratelimit.New(1, 30), // tum kaynaklar: dakikada ~60
+					TokenLimiter:          tokenLimiter,
 				})
 				if oerr != nil {
 					return fmt.Errorf("oauth yetkilendirme sunucusu kurulamadi: %w", oerr)
 				}
 				oauthSrv, oauthVerifier = srv, srv
+				// Tunel MCP modu: ayni AS tunel kaynaklarinin token'larini dogrular.
+				proxy.MCPVerifier = mcpTokenAdapter{srv: srv}
+				proxy.MCPIssuer = issuer
+				proxy.MCPUsers = mcpUserInfo
+				apiSrv.MCPOAuthReady = issuer != ""
+				apiSrv.MCPRevokeGrants = srv.RevokeByResource
 				go func() {
 					t := time.NewTicker(time.Hour)
 					defer t.Stop()
@@ -923,6 +1022,15 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 							return
 						}
 						visitorMgr.HandleCallback(w, r)
+					case captchaPublic(r.URL.Path):
+						// Zorven CAPTCHA: widget (api.js), sorgu/cozum/yenileme ve siteverify
+						// KIMLIKSIZ. Widget uclari IP basina hiz sinirli; siteverify sunucudan
+						// sunucuya oldugu icin kendi (gecersiz-secret) sinirina sahiptir.
+						if _, s2s := api.IsCaptchaPublicPath(r.URL.Path); !s2s && !publicLimiter.Allow(ipOf(r)) {
+							tooManyRequests(w)
+							return
+						}
+						apiRoutes.ServeHTTP(w, r)
 					case r.URL.Path == "/api/v1/abuse" && r.Method == http.MethodPost:
 						// Kötüye kullanım bildirimi: PUBLIC (kimlik doğrulama yok).
 						// IP başına hız sınırlı: bildirim spam'ini engelle.
@@ -978,6 +1086,12 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				ReadHeaderTimeout: 5 * time.Second,
 				IdleTimeout:       60 * time.Second,
 				MaxHeaderBytes:    1 << 20, // 1 MB baslik siniri (slowloris/DoS korumasi)
+				// B3: kapanan baglantinin TLS parmak izi girdisini serbest birak.
+				ConnState: func(c net.Conn, st http.ConnState) {
+					if st == http.StateClosed || st == http.StateHijacked {
+						proxy.TLSFP.Forget(c.RemoteAddr().String())
+					}
+				},
 				// WriteTimeout YOK: tunel baglantilari uzun omurludur,
 				// yazma zaman asimi onlari koparirdi.
 			}
@@ -1058,6 +1172,10 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 					// iste. Diger tum hostlar (panel, marketing, normal tuneller) icin nil
 					// doneriz => taban yapilandirma kullanilir, hicbir sey degismez.
 					GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+						// B3: ClientHello parmak izi (yalniz tunel hostlari); bot skoru okur.
+						if !isPlatformHost(hello.ServerName) {
+							proxy.TLSFP.Record(hello)
+						}
 						// Platform hostlari (panel vb.) bir kiraci kaydina gore asla
 						// istemci sertifikasi istemez (K1: panel DoS / ele gecirme).
 						if isPlatformHost(hello.ServerName) {
@@ -1340,6 +1458,9 @@ func resolveSessionManager(ctx context.Context, st store.Store) (*session.Manage
 }
 
 // settingSessionSecret, oturum imza anahtarinin settings'teki adi.
+// defaultGeoIPPath, ZORVEN_GEOIP_DB tanimsizken aranan MaxMind/DB-IP Country mmdb yolu.
+const defaultGeoIPPath = "/app/data/GeoLite2-Country.mmdb"
+
 const settingSessionSecret = "session_secret"
 
 // --- client ----------------------------------------------------------------
@@ -1709,4 +1830,21 @@ func udpLimitsOf(c store.TunnelUDP) rawproxy.UDPLimits {
 		MaxFlowPPS:  c.MaxFlowPPS,
 		MaxFlows:    c.MaxFlows,
 	}
+}
+
+// captchaPublic, kimliksiz CAPTCHA uclari mi (api.IsCaptchaPublicPath + preflight).
+func captchaPublic(path string) bool {
+	ok, _ := api.IsCaptchaPublicPath(path)
+	return ok
+}
+
+// splitCSV, virgulle ayrilmis listeyi kirpip bos ogeleri atarak boler.
+func splitCSV(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

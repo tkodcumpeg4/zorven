@@ -28,6 +28,11 @@ import (
 const (
 	ScopeNetRead  = "net:read"
 	ScopeNetWrite = "net:write"
+	// ScopeNetConnect, WireGuard ag oturumu acma (zorven access): bu bir okuma
+	// degil, paylasilan servislere ag erisimidir. Genel "read" genislemesine
+	// GIRMEZ; acikca verilen net:read / net:write / net:connect, "write" ve
+	// "*"/"admin" token'lari icerir (mevcut zorven access token'lari bozulmaz).
+	ScopeNetConnect = "net:connect"
 )
 
 func (s *Server) netGate(w http.ResponseWriter, r *http.Request) (string, bool) {
@@ -124,6 +129,14 @@ func (s *Server) listNetShares(w http.ResponseWriter, r *http.Request) {
 		}
 		// Alicilar baskasinin paylasimindaki cevrimici dugumleri gormez.
 		if !v.CanManage {
+			// Alici yalniz KENDI oturum dugumlerinin yolunu gorur (baskalarininki degil).
+			var own []netctl.NodeInfo
+			for _, n := range v.Connected {
+				if n.Kind == netctl.KindSession && n.UserID != "" && n.UserID == caller.UserID {
+					own = append(own, n)
+				}
+			}
+			v.Path = netctl.SummarizePaths(own)
 			v.Connected = []netctl.NodeInfo{}
 			v.Grantees = nil
 		}
@@ -324,7 +337,7 @@ func (s *Server) netSession(w http.ResponseWriter, r *http.Request) {
 			"ag oturumu yalnizca API token ile acilabilir (zorven access)")
 		return
 	}
-	if !requireScope(w, r, ScopeNetRead) {
+	if !requireScope(w, r, ScopeNetConnect) {
 		return
 	}
 	tenantID, ok := s.netGate(w, r)
@@ -357,7 +370,7 @@ func (s *Server) netSession(w http.ResponseWriter, r *http.Request) {
 	defer c.CloseNow()
 	c.SetReadLimit(protocol.WSReadLimit)
 	s.runNetSession(r.Context(), c, netctl.Identity{
-		TenantID: tenantID, Kind: netctl.KindSession, UserID: caller.UserID, Role: role,
+		TenantID: tenantID, Kind: netctl.KindSession, UserID: caller.UserID, Role: role, Punch: true,
 	})
 }
 
@@ -422,7 +435,8 @@ func (s *Server) runNetSession(ctx context.Context, c *websocket.Conn, id netctl
 			continue
 		}
 		switch t {
-		case protocol.TypeNetRegister, protocol.TypeNetResync:
+		case protocol.TypeNetRegister, protocol.TypeNetResync,
+			protocol.TypeNetEndpoints, protocol.TypeNetPunchReq, protocol.TypeNetStatus:
 			_ = nc.HandleControl(ctx, t, data)
 		}
 	}

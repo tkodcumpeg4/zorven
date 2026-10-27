@@ -32,7 +32,7 @@ func TestOriginTrustedSchemePortAndLoopback(t *testing.T) {
 		{"prod-non-default-port-same", "zorven.app", "panel.zorven.app:8443", "https://panel.zorven.app:8443", true},
 		{"prod-non-default-port-missing", "zorven.app", "panel.zorven.app:8443", "https://panel.zorven.app", false},
 		{"dev-staging-ok", "e2e.test", "panel.e2e.test:18443", "https://panel.e2e.test:18443", true},
-		{"dev-staging-http-port-mismatch", "e2e.test", "panel.e2e.test:18443", "http://panel.e2e.test:18443", true},
+		{"dev-staging-http-over-tls", "e2e.test", "panel.e2e.test:18443", "http://panel.e2e.test:18443", false}, // TLS istegine http Origin: sema dusurme
 		{"dev-staging-wrong-port", "e2e.test", "panel.e2e.test:18443", "https://panel.e2e.test:9999", false},
 		{"dev-loopback-ok", "e2e.test", "panel.e2e.test:18443", "http://localhost:3000", true},
 		{"dev-localhost-domain-loopback", "localhost", "localhost:8443", "http://localhost:3000", true},

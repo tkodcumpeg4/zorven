@@ -90,7 +90,7 @@ func TestDiscoverUnixLoginShellBeforeSh(t *testing.T) {
 	// zsh/bash yok: giris kabugu (fish) sh'ten once varsayilan.
 	d := fakeDeps("linux",
 		map[string]string{
-			"/etc/passwd": "svc:x:5:5::/home/svc:/usr/bin/fish\n",
+			"/etc/passwd":   "svc:x:5:5::/home/svc:/usr/bin/fish\n",
 			"/usr/bin/fish": "",
 		},
 		map[string]string{"sh": "/bin/sh"},
@@ -104,7 +104,7 @@ func TestDiscoverUnixLoginShellBeforeSh(t *testing.T) {
 func TestDiscoverUnixIgnoresNologin(t *testing.T) {
 	d := fakeDeps("linux",
 		map[string]string{
-			"/etc/passwd":      "svc:x:5:5::/nonexistent:/usr/sbin/nologin\n",
+			"/etc/passwd":       "svc:x:5:5::/nonexistent:/usr/sbin/nologin\n",
 			"/usr/sbin/nologin": "",
 		},
 		map[string]string{"sh": "/bin/sh"},

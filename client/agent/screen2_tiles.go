@@ -6,6 +6,9 @@ import (
 	"image"
 	"image/jpeg"
 	"image/png"
+	"runtime"
+	"sync"
+	"sync/atomic"
 
 	"github.com/tkodcumpeg4/zorven/shared/protocol"
 )
@@ -16,7 +19,7 @@ const (
 	// screen2MaxRectDim, tek dikdortgenin en buyuk kenari: buyuk guncellemeler
 	// (anahtar kare) bu boyutlu parcalara bolunur ki mesajlar kucuk kalsin ve
 	// kodlama gerektiginde ince taneli bolunebilsin.
-	screen2MaxRectDim = 512
+	screen2MaxRectDim = 256
 	// screen2MaxPayload, tek dikdortgen yukunun hedef siniri; asilirsa dikdortgen
 	// ikiye bolunerek yeniden kodlanir.
 	screen2MaxPayload = 200 << 10
@@ -108,18 +111,35 @@ func splitRect(r image.Rectangle, maxDim int) []image.Rectangle {
 	return out
 }
 
-// goTileEncoder, stdlib JPEG/PNG ile TileEncoder uygular.
+// goTileEncoder, stdlib JPEG/PNG ile TileEncoder uygular. Goroutine-guvenlidir:
+// cagri basina tamponlar havuzdan alinir (paralel karo kodlama icin).
 type goTileEncoder struct {
-	buf bytes.Buffer
-	png png.Encoder
+	png     png.Encoder
+	scratch sync.Pool // *tileScratch
 }
 
+type tileScratch struct {
+	buf bytes.Buffer
+	op  *image.RGBA // PNG icin opak kopya (buyuyerek yeniden kullanilir)
+}
+
+// pngBufPool, png.EncoderBufferPool uygular.
+type pngBufPool struct{ p sync.Pool }
+
+func (b *pngBufPool) Get() *png.EncoderBuffer {
+	v, _ := b.p.Get().(*png.EncoderBuffer)
+	return v
+}
+func (b *pngBufPool) Put(v *png.EncoderBuffer) { b.p.Put(v) }
+
 func newGoTileEncoder() *goTileEncoder {
-	return &goTileEncoder{png: png.Encoder{CompressionLevel: png.BestSpeed}}
+	e := &goTileEncoder{png: png.Encoder{CompressionLevel: png.BestSpeed, BufferPool: &pngBufPool{}}}
+	e.scratch.New = func() any { return &tileScratch{} }
+	return e
 }
 
 // Encode, r bolgesini kodlar: duz renk -> solid; az renk -> PNG; aksi JPEG.
-// Donen yuk, sonraki cagriya kadar gecerli DEGIL: kopyadir.
+// Donen yuk cagirana aittir (kopyadir). Es zamanli cagrilabilir.
 func (e *goTileEncoder) Encode(img *image.RGBA, r image.Rectangle, quality int) (uint8, []byte, error) {
 	sub := img.SubImage(r).(*image.RGBA)
 	if c, ok := solidColor(sub); ok {
@@ -127,27 +147,115 @@ func (e *goTileEncoder) Encode(img *image.RGBA, r image.Rectangle, quality int) 
 		binary.BigEndian.PutUint32(p, c)
 		return protocol.Screen2EncSolid, p, nil
 	}
-	e.buf.Reset()
+	sc := e.scratch.Get().(*tileScratch)
+	defer e.scratch.Put(sc)
+	sc.buf.Reset()
 	if fewColors(sub, screen2PNGColors) {
 		// Yakalayicinin alfa kanali guvenilmez olabilir (GDI): opak kopya kodla.
-		op := image.NewRGBA(image.Rect(0, 0, r.Dx(), r.Dy()))
-		for y := 0; y < r.Dy(); y++ {
-			src := sub.Pix[y*sub.Stride : y*sub.Stride+r.Dx()*4]
-			dst := op.Pix[y*op.Stride : y*op.Stride+r.Dx()*4]
+		w, h := r.Dx(), r.Dy()
+		if sc.op == nil || cap(sc.op.Pix) < w*h*4 {
+			sc.op = &image.RGBA{}
+			sc.op.Pix = make([]byte, w*h*4)
+		}
+		sc.op.Pix = sc.op.Pix[:w*h*4]
+		sc.op.Stride, sc.op.Rect = w*4, image.Rect(0, 0, w, h)
+		for y := 0; y < h; y++ {
+			src := sub.Pix[y*sub.Stride : y*sub.Stride+w*4]
+			dst := sc.op.Pix[y*sc.op.Stride : y*sc.op.Stride+w*4]
 			copy(dst, src)
 			for x := 3; x < len(dst); x += 4 {
 				dst[x] = 0xff
 			}
 		}
-		if err := e.png.Encode(&e.buf, op); err != nil {
+		if err := e.png.Encode(&sc.buf, sc.op); err != nil {
 			return 0, nil, err
 		}
-		return protocol.Screen2EncPNG, append([]byte(nil), e.buf.Bytes()...), nil
+		return protocol.Screen2EncPNG, append([]byte(nil), sc.buf.Bytes()...), nil
 	}
-	if err := jpeg.Encode(&e.buf, sub, &jpeg.Options{Quality: quality}); err != nil {
+	if err := jpeg.Encode(&sc.buf, sub, &jpeg.Options{Quality: quality}); err != nil {
 		return 0, nil, err
 	}
-	return protocol.Screen2EncJPEG, append([]byte(nil), e.buf.Bytes()...), nil
+	return protocol.Screen2EncJPEG, append([]byte(nil), sc.buf.Bytes()...), nil
+}
+
+// screen2EncodeWorkers, paralel karo kodlama is parcacigi sayisi:
+// GOMAXPROCS-1, en az 1, en cok 8.
+func screen2EncodeWorkers() int {
+	return max(1, min(runtime.GOMAXPROCS(0)-1, 8))
+}
+
+// encodeRectsParallel, dikdortgenleri enc ile kodlar; cikti SIRASI rects
+// sirasidir. Yuk cok buyukse dikdortgen ikiye bolunup yeniden kodlanir.
+// enc es zamanli cagrilabilir olmalidir (goTileEncoder oyledir).
+func encodeRectsParallel(enc TileEncoder, img *image.RGBA, rects []image.Rectangle, q, workers int) ([]protocol.Screen2Rect, error) {
+	var one func(r image.Rectangle, out []protocol.Screen2Rect) ([]protocol.Screen2Rect, error)
+	one = func(r image.Rectangle, out []protocol.Screen2Rect) ([]protocol.Screen2Rect, error) {
+		e, payload, err := enc.Encode(img, r, q)
+		if err != nil {
+			return out, err
+		}
+		if len(payload) > screen2MaxPayload && (r.Dx() > tileSize || r.Dy() > tileSize) {
+			a, b := r, r
+			if r.Dx() >= r.Dy() {
+				m := r.Min.X + r.Dx()/2
+				a.Max.X, b.Min.X = m, m
+			} else {
+				m := r.Min.Y + r.Dy()/2
+				a.Max.Y, b.Min.Y = m, m
+			}
+			if out, err = one(a, out); err != nil {
+				return out, err
+			}
+			return one(b, out)
+		}
+		return append(out, protocol.Screen2Rect{
+			X: uint16(r.Min.X), Y: uint16(r.Min.Y), W: uint16(r.Dx()), H: uint16(r.Dy()),
+			Enc: e, Payload: payload,
+		}), nil
+	}
+	if workers > len(rects) {
+		workers = len(rects)
+	}
+	if workers <= 1 {
+		out := make([]protocol.Screen2Rect, 0, len(rects))
+		for _, r := range rects {
+			var err error
+			if out, err = one(r, out); err != nil {
+				return nil, err
+			}
+		}
+		return out, nil
+	}
+	res := make([][]protocol.Screen2Rect, len(rects))
+	errs := make([]error, len(rects))
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				i := int(next.Add(1)) - 1
+				if i >= len(rects) {
+					return
+				}
+				res[i], errs[i] = one(rects[i], nil)
+			}
+		}()
+	}
+	wg.Wait()
+	total := 0
+	for i := range res {
+		if errs[i] != nil {
+			return nil, errs[i]
+		}
+		total += len(res[i])
+	}
+	out := make([]protocol.Screen2Rect, 0, total)
+	for _, r := range res {
+		out = append(out, r...)
+	}
+	return out, nil
 }
 
 // solidColor, bolgenin tek renk olup olmadigini soyler; renk R,G,B,0xff (RGBA, big-endian).

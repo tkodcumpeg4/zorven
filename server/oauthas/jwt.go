@@ -67,7 +67,7 @@ func parseJWT(pub ed25519.PublicKey, tok string) (claims, error) {
 		return claims{}, ErrInvalidToken
 	}
 	var h jwtHeader
-	if json.Unmarshal(hb, &h) != nil || h.Alg != "EdDSA" || h.Kid != keyID(pub) {
+	if json.Unmarshal(hb, &h) != nil || h.Alg != "EdDSA" || h.Typ != "at+jwt" || h.Kid != keyID(pub) {
 		return claims{}, ErrInvalidToken
 	}
 	sig, err := b64.DecodeString(parts[2])
@@ -83,4 +83,38 @@ func parseJWT(pub ed25519.PublicKey, tok string) (claims, error) {
 		return claims{}, ErrInvalidToken
 	}
 	return c, nil
+}
+
+// UpstreamIdentity, MCP tunelinin upstream sunucusuna X-Zorven-Identity ile
+// iletilen kisa omurlu (60 sn) imzali kimligin icerigi. typ="upstream+jwt" oldugu
+// icin access token olarak ASLA kabul edilmez.
+type UpstreamIdentity struct {
+	Subject    string
+	Email      string
+	TenantID   string
+	TunnelID   string
+	ClientID   string
+	Scope      string
+	AuthMethod string
+}
+
+// UpstreamTokenTTL, upstream kimliginin omru.
+const UpstreamTokenTTL = 60 * time.Second
+
+// UpstreamAudience, upstream kimliginin aud degeri.
+const UpstreamAudience = "zorven-upstream"
+
+func signUpstream(priv ed25519.PrivateKey, iss string, id UpstreamIdentity, now time.Time, jti string) (string, error) {
+	pub := priv.Public().(ed25519.PublicKey)
+	h, _ := json.Marshal(jwtHeader{Alg: "EdDSA", Typ: "upstream+jwt", Kid: keyID(pub)})
+	p, err := json.Marshal(map[string]any{
+		"iss": iss, "aud": UpstreamAudience, "sub": id.Subject, "email": id.Email, "tid": id.TenantID,
+		"tunnel": id.TunnelID, "client_id": id.ClientID, "scope": id.Scope, "amr": id.AuthMethod,
+		"iat": now.Unix(), "exp": now.Add(UpstreamTokenTTL).Unix(), "jti": jti,
+	})
+	if err != nil {
+		return "", err
+	}
+	in := b64.EncodeToString(h) + "." + b64.EncodeToString(p)
+	return in + "." + b64.EncodeToString(ed25519.Sign(priv, []byte(in))), nil
 }

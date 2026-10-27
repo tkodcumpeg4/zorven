@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/tkodcumpeg4/zorven/server/entitlements"
@@ -45,7 +46,11 @@ type oauthEnv struct {
 	as     *oauthas.Server
 	st     *oauthStore
 	oauth  *oauthas.MemStore
+	mw     *Middleware
 	called map[string]int
+	// explicit, onay ekraninin acikca sectigi kapsamlar (nil = istemci secmedi).
+	explicit []string
+	mcpAudit *[]string
 }
 
 func newOAuthEnv(t *testing.T, ent entitlements.EntitlementService) *oauthEnv {
@@ -56,7 +61,7 @@ func newOAuthEnv(t *testing.T, ent entitlements.EntitlementService) *oauthEnv {
 	if ent != nil {
 		mw.Entitlements = ent
 	}
-	env := &oauthEnv{t: t, st: st, oauth: oauthas.NewMemStore(), called: map[string]int{}}
+	env := &oauthEnv{t: t, st: st, mw: mw, oauth: oauthas.NewMemStore(), called: map[string]int{}}
 	srv := &Server{Store: st}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/me", srv.me)
@@ -67,6 +72,19 @@ func newOAuthEnv(t *testing.T, ent entitlements.EntitlementService) *oauthEnv {
 		env.called["list_tunnels"]++
 		writeJSON(w, 200, []map[string]any{{"id": "tun_1", "client_id": "c1"}})
 	})
+	mux.HandleFunc("GET /api/v1/tunnels/{id}", func(w http.ResponseWriter, r *http.Request) {
+		if !requireScope(w, r, ScopeTunnelsRead) {
+			return
+		}
+		writeJSON(w, 200, map[string]any{"id": r.PathValue("id"), "public_host": "app--x.example.com"})
+	})
+	mux.HandleFunc("DELETE /api/v1/tunnels/{id}", func(w http.ResponseWriter, r *http.Request) {
+		if !requireScopeAny(w, r, ScopeTunnelsWrite, ScopeTunnelsDelete) {
+			return
+		}
+		env.called["delete_tunnel"]++
+		w.WriteHeader(204)
+	})
 	mux.HandleFunc("POST /api/v1/tunnels", func(w http.ResponseWriter, r *http.Request) {
 		if !requireScope(w, r, ScopeTunnelsWrite) {
 			return
@@ -74,13 +92,44 @@ func newOAuthEnv(t *testing.T, ent entitlements.EntitlementService) *oauthEnv {
 		env.called["create_tunnel"]++
 		writeJSON(w, 201, map[string]any{"id": "tun_2"})
 	})
+	// Panel-only uclar (tokenPublicRoutes disinda): full testleri icin.
+	mux.HandleFunc("GET /api/v1/team/members", func(w http.ResponseWriter, r *http.Request) {
+		u, _ := userFromContext(r.Context())
+		if u == nil || (u.Role != "owner" && u.Role != "admin") {
+			writeJSONError(w, 403, "forbidden", "yalniz owner/admin")
+			return
+		}
+		writeJSON(w, 200, map[string]any{"role": u.Role, "email": u.Email, "scoped": func() bool { _, ok := apiScopesFromContext(r.Context()); return ok }()})
+	})
+	mux.HandleFunc("GET /api/v1/admin/stats", func(w http.ResponseWriter, r *http.Request) {
+		if !isPlatformAdmin(r.Context()) {
+			writeJSONError(w, 403, "forbidden", "platform admin degil")
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true})
+	})
+	mux.HandleFunc("POST /api/v1/api-tokens", func(w http.ResponseWriter, r *http.Request) {
+		env.called["api_token_create"]++
+		writeJSON(w, 201, map[string]any{"api_token": "zrv_api_x"})
+	})
+	mux.HandleFunc("DELETE /api/v1/organization", func(w http.ResponseWriter, r *http.Request) {
+		env.called["org_delete"]++
+		w.WriteHeader(204)
+	})
+	mux.HandleFunc("GET /api/v1/mail/app-passwords", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, []any{}) })
+	mux.HandleFunc("POST /api/v1/terminal-ticket", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, map[string]any{"ticket": "t"}) })
+	mux.HandleFunc("GET /api/v1/policies", func(w http.ResponseWriter, r *http.Request) {
+		u, _ := userFromContext(r.Context())
+		pr, _ := projectFromContext(r.Context())
+		writeJSON(w, 200, map[string]any{"role": u.Role, "project": pr})
+	})
 	mw.Next = mux
 
 	as, err := oauthas.New(oauthas.Config{
 		Store: env.oauth, SigningSeed: bytes.Repeat([]byte{3}, 32),
 		Session: func(r *http.Request) (oauthas.Session, bool) {
 			if u := r.Header.Get("X-Test-User"); u != "" {
-				return oauthas.Session{UserID: u}, true
+				return oauthas.Session{UserID: u, AuthTime: time.Now()}, true
 			}
 			return oauthas.Session{}, false
 		},
@@ -94,7 +143,16 @@ func newOAuthEnv(t *testing.T, ent entitlements.EntitlementService) *oauthEnv {
 		t.Fatal(err)
 	}
 	env.as = as
-	h := mcpserver.New(mcpserver.Config{API: mw, Version: "t", OAuth: as})
+	var amu sync.Mutex
+	h := mcpserver.New(mcpserver.Config{API: mw, Version: "t", OAuth: as,
+		Audit: func(tenant, actor, ip, action, target, detail string) {
+			if env.mcpAudit == nil {
+				return
+			}
+			amu.Lock()
+			*env.mcpAudit = append(*env.mcpAudit, action+"|"+target+"|"+actor+"|"+detail)
+			amu.Unlock()
+		}})
 	top := http.NewServeMux()
 	top.Handle("/mcp", h)
 	top.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -129,7 +187,7 @@ func (e *oauthEnv) token(scope string) (access, refresh, clientID string) {
 	resource := e.ts.URL + "/mcp"
 	dec, _ := json.Marshal(map[string]any{"client_id": clientID, "redirect_uri": redirect, "response_type": "code",
 		"code_challenge": challenge, "code_challenge_method": "S256", "state": "s", "scope": scope,
-		"resource": resource, "decision": "allow", "tenant_id": "ten_x"})
+		"resource": resource, "decision": "allow", "tenant_id": "ten_x", "scopes": e.explicit})
 	req, _ := http.NewRequest("POST", e.ts.URL+"/oauth/consent/decision", bytes.NewReader(dec))
 	req.Header.Set("X-Test-User", "usr_1")
 	req.Header.Set("Origin", "https://panel.example")
@@ -318,4 +376,56 @@ type denyEntitlements struct {
 
 func (denyEntitlements) CheckFeature(context.Context, string, entitlements.Feature) error {
 	return context.DeadlineExceeded
+}
+
+func TestMCPOAuth_DeleteScopeSeparateAndDefaultOff(t *testing.T) {
+	args := map[string]any{"tunnel_id": "tun_1", "confirm": true, "confirm_name": "app--x.example.com"}
+	// 1) Onay ekrani yikici kapsami secmediyse (explicit nil): verilmez, arac gorunmez.
+	env := newOAuthEnv(t, allowEntitlements{})
+	at, _, _ := env.token("mcp:read tunnels:delete")
+	cs, err := env.connect(at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	if toolNames(t, cs)["delete_tunnel"] {
+		t.Fatal("varsayilan KAPALI olan silme kapsami verildi")
+	}
+
+	// 2) Acikca secilirse arac gorunur ve silme calisir; yazma araclari yine yok.
+	env2 := newOAuthEnv(t, allowEntitlements{})
+	env2.explicit = []string{"tunnels:delete"}
+	at2, _, _ := env2.token("tunnels:delete")
+	cs2, err := env2.connect(at2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs2.Close()
+	names := toolNames(t, cs2)
+	if !names["delete_tunnel"] || names["create_tunnel"] || names["update_tunnel"] || names["delete_domain"] {
+		t.Fatalf("araclar: %v", names)
+	}
+	res, err := cs2.CallTool(context.Background(), &mcp.CallToolParams{Name: "delete_tunnel", Arguments: map[string]any{"tunnel_id": "tun_1"}})
+	if err == nil && !res.IsError {
+		t.Fatal("onaysiz silme calisti")
+	}
+	if env2.called["delete_tunnel"] != 0 {
+		t.Fatal("onaysiz DELETE REST'e ulasti")
+	}
+	res, err = cs2.CallTool(context.Background(), &mcp.CallToolParams{Name: "delete_tunnel", Arguments: args})
+	if err != nil || res.IsError || env2.called["delete_tunnel"] != 1 {
+		t.Fatalf("delete_tunnel: %v %+v", err, res)
+	}
+
+	// 3) mcp:manage tek basina silemez: arac yok ve REST da 403 verir.
+	env3 := newOAuthEnv(t, allowEntitlements{})
+	at3, _, _ := env3.token("mcp:manage")
+	cs3, err := env3.connect(at3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs3.Close()
+	if toolNames(t, cs3)["delete_tunnel"] {
+		t.Fatal("mcp:manage silme aracini gosterdi")
+	}
 }

@@ -402,3 +402,19 @@ func TestRevokeNodeRemovesPeer(t *testing.T) {
 		t.Fatal("iptal edilen dugumun baglantisi kapanmali")
 	}
 }
+
+func TestValidKey32Canonical(t *testing.T) {
+	good := "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	if !validKey32(good) {
+		t.Fatal("kanonik anahtar kabul edilmeli")
+	}
+	for _, bad := range []string{
+		"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB=",   // sifir olmayan dolgu biti
+		"AAAAAAAAAAAAAAAAAAAAAAAA\nAAAAAAAAAAAAAAAAAAA=", // satir sonu
+		"AAAA",
+	} {
+		if validKey32(bad) {
+			t.Errorf("kanonik olmayan anahtar reddedilmeli: %q", bad)
+		}
+	}
+}

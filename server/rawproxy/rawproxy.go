@@ -11,11 +11,13 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/tkodcumpeg4/zorven/server/bandwidth"
 	"github.com/tkodcumpeg4/zorven/server/ipfilter"
 	"github.com/tkodcumpeg4/zorven/server/tunnel"
+	"github.com/tkodcumpeg4/zorven/server/tunsec"
 	"github.com/tkodcumpeg4/zorven/shared/protocol"
 )
 
@@ -86,11 +88,31 @@ type Manager struct {
 	// doorConns, grant ile kabul edilen acik baglantilar (grant iptalinde kesilir).
 	doorConns connRegistry
 
+	// Geo, IP -> ulke cozumleyicisi (ZTNA Z3; nil = ulke her zaman "unknown").
+	Geo tunsec.CountryResolver
+	// sec: tunel kimligi -> derlenmis Geo ayari (SetSecurity). live: kabul edilen
+	// TUM acik akislar (Reevaluate icin).
+	sec  atomic.Pointer[map[string]*tunsec.Compiled]
+	live liveRegistry
+
 	// tcpStats, tunel kimligi -> *tcpStat (tcpstats.go).
 	tcpStats sync.Map
 
+	// limits, eszamanli baglanti ve bosta kalma sinirlari (limits.go). nil = varsayilan.
+	limitsOnce sync.Once
+	limits     *connLimits
+
 	// openStream nil degilse bridgeTCP ajan akisini Hub yerine buradan alir (testler).
 	openStream func(ctx context.Context, ti TunnelInfo, remote string) (bridgeStream, bool, error)
+}
+
+func (m *Manager) connLimits() *connLimits {
+	m.limitsOnce.Do(func() {
+		if m.limits == nil {
+			m.limits = newConnLimits()
+		}
+	})
+	return m.limits
 }
 
 // ctx, baslatilmamis yoneticide (testler) bile bos olmayan bir context doner.
@@ -237,6 +259,13 @@ func (m *Manager) bridgeTCP(conn net.Conn, ti TunnelInfo) {
 		m.Log.Warn("rawproxy: IP engellendi", "ip", ip, "tunnel", ti.TunnelID)
 		return
 	}
+	lim := m.connLimits()
+	release, okLim := lim.acquire(ti.TunnelID, ip)
+	if !okLim {
+		m.Log.Debug("rawproxy: eszamanli baglanti siniri", "ip", ip, "tunnel", ti.TunnelID)
+		return
+	}
+	defer release()
 
 	var sess *tunnel.Session
 	online := true
@@ -251,6 +280,12 @@ func (m *Manager) bridgeTCP(conn net.Conn, ti TunnelInfo) {
 
 	ctx, cancel := context.WithCancel(m.ctx())
 	defer cancel()
+
+	// Z2: kabul edilen her baglanti yeniden degerlendirme icin kaydedilir.
+	defer m.registerLive(ti, ip, ti.Port > 0, func() {
+		cancel()
+		conn.Close()
+	})()
 
 	// Yalnizca grant sayesinde kabul edildiyse: grant iptalinde veya suresi
 	// dolunca baglanti kesilir.
@@ -307,6 +342,29 @@ func (m *Manager) bridgeTCP(conn net.Conn, ti TunnelInfo) {
 	began := time.Now()
 	defer func() { st.closeConn(time.Since(began)) }()
 
+	// Bosta kalma: iki yonde de lim.idle boyunca veri yoksa baglanti kapanir.
+	var lastAct atomic.Int64
+	touch := func() { lastAct.Store(time.Now().UnixNano()) }
+	touch()
+	if lim.idle > 0 {
+		go func() {
+			tk := time.NewTicker(idleCheckEvery(lim.idle))
+			defer tk.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-tk.C:
+					if time.Since(time.Unix(0, lastAct.Load())) >= lim.idle {
+						cancel()
+						conn.Close()
+						return
+					}
+				}
+			}
+		}()
+	}
+
 	// ziyaretci -> ajan
 	go func() {
 		defer meter.Flush() // bridge donduktan sonra gelen son baytlar da yazilir
@@ -322,6 +380,7 @@ func (m *Manager) bridgeTCP(conn net.Conn, ti TunnelInfo) {
 				}
 				st.bytesIn.Add(int64(n))
 				meter.Add(int64(n), 0)
+				touch()
 			}
 			if rerr != nil {
 				break
@@ -340,6 +399,7 @@ func (m *Manager) bridgeTCP(conn net.Conn, ti TunnelInfo) {
 			n, werr := conn.Write(data)
 			st.bytesOut.Add(int64(n))
 			meter.Add(0, int64(n))
+			touch()
 			if werr != nil {
 				return
 			}
@@ -372,4 +432,16 @@ func hostOf(addr string) string {
 		return h
 	}
 	return addr
+}
+
+// idleCheckEvery, bosta kalma denetim araligi (sure/4, 1 sn - 1 dk arasi).
+func idleCheckEvery(idle time.Duration) time.Duration {
+	d := idle / 4
+	if d < time.Second {
+		d = time.Second
+	}
+	if d > time.Minute {
+		d = time.Minute
+	}
+	return d
 }

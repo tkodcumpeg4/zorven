@@ -28,6 +28,10 @@ type fixture struct {
 	orgs  []Org
 	seed  []byte
 	login string // X-Test-User
+	// authAge, panel oturumunun ne kadar once acildigi (0 = simdi, taze);
+	// unknownAuth true ise AuthTime bilinmiyor (sifir deger).
+	authAge     time.Duration
+	unknownAuth bool
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -42,7 +46,11 @@ func newFixture(t *testing.T) *fixture {
 			if u == "" {
 				return Session{}, false
 			}
-			return Session{UserID: u, Email: u + "@example.com"}, true
+			ss := Session{UserID: u, Email: u + "@example.com", AuthTime: f.now.Add(-f.authAge)}
+			if f.unknownAuth {
+				ss.AuthTime = time.Time{}
+			}
+			return ss, true
 		},
 		Orgs: func(_ context.Context, userID string) ([]Org, error) {
 			if userID == "usr_2" {
@@ -603,5 +611,31 @@ func TestPruneAndMatch(t *testing.T) {
 func TestNewRequiresSeed(t *testing.T) {
 	if _, err := New(Config{Store: NewMemStore(), SigningSeed: []byte("short")}); err == nil {
 		t.Fatal("kisa tohum reddedilmeli")
+	}
+}
+
+// Kod ikinci kez kullanilinca o kodla verilmis grant iptal edilir (RFC 6749 4.1.2).
+func TestCodeReuseRevokesGrant(t *testing.T) {
+	f := newFixture(t)
+	redirect := "https://claude.ai/api/mcp/auth_callback"
+	cid := f.register(redirect)
+	verifier, challenge := pkce()
+	q := f.authzQuery(cid, redirect, challenge, "mcp:read")
+	code, _ := f.consent(q, "ten_a", nil, "allow")
+	form := url.Values{"grant_type": {"authorization_code"}, "code": {code}, "client_id": {cid}, "redirect_uri": {redirect}, "code_verifier": {verifier}}
+	if out, st := f.token(form); st != 200 || out["access_token"] == nil {
+		t.Fatalf("ilk degisim: %d %v", st, out)
+	}
+	if _, st := f.token(form); st != 400 {
+		t.Fatal("ikinci kullanim reddedilmeli")
+	}
+	gs, err := f.st.ListGrants(context.Background(), "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, g := range gs {
+		if g.ClientID == cid && g.Active() {
+			t.Fatalf("tekrar kullanimdan sonra grant aktif kalmamali: %+v", g)
+		}
 	}
 }

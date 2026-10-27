@@ -37,7 +37,12 @@ const (
 
 type winClipboard struct{}
 
-func newClipboardBackend() clipboardBackend { return winClipboard{} }
+func newClipboardBackend() clipboardBackend {
+	if h := serviceHelper(); h != nil {
+		return helperClipboard{h} // servis: pano kullanici oturumundadir
+	}
+	return winClipboard{}
+}
 
 // clipboardSupported, bu platformda pano var mi (Hello'da ilan edilir).
 func clipboardSupported() bool { return true }

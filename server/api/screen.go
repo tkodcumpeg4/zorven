@@ -426,7 +426,7 @@ func screenModeLegacy(requested string) string {
 
 // screenControl, panelin screen2 icin yolladigi JSON kontrol mesaji.
 type screenControl struct {
-	kind  string // keyframe | settings | view_only
+	kind  string // keyframe | settings | view_only | video (value=supported, layer=mode)
 	opts  tunnel.Screen2Options
 	value bool   // view_only degeri
 	text  string // clipboard metni
@@ -446,6 +446,8 @@ func parseScreenControl(data []byte) (screenControl, bool) {
 		Value    bool   `json:"value"`
 		Text     string `json:"text"`
 		Layer    string `json:"layer"`
+		Mode     string `json:"mode"`
+		Supports bool   `json:"supported"`
 	}
 	if json.Unmarshal(data, &m) != nil {
 		return screenControl{}, false
@@ -453,6 +455,8 @@ func parseScreenControl(data []byte) (screenControl, bool) {
 	switch m.Type {
 	case "keyframe":
 		return screenControl{kind: "keyframe"}, true
+	case "video":
+		return screenControl{kind: "video", value: m.Supports, layer: m.Mode}, true
 	case "view_only":
 		return screenControl{kind: "view_only", value: m.Value}, true
 	case "clipboard":
@@ -636,6 +640,8 @@ func (s *Server) serveScreen2Shared(ctx context.Context, cancel context.CancelFu
 				v.keyframe()
 			case "settings":
 				v.applySettings(c)
+			case "video":
+				v.setVideoPrefs(c.value, c.layer)
 			case "view_only":
 				v.setViewOnly(c.value)
 			case "clipboard":

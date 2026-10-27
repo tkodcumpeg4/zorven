@@ -17,6 +17,8 @@ type ScreenAux struct {
 	Cursor    *protocol.ScreenCursor
 	Shape     *protocol.ScreenCursorShape
 	Clipboard *protocol.ScreenClipboard
+	// Stats, ajanin canli olcum ozeti (FeatureScreen2Stats).
+	Stats *protocol.Screen2Stats
 }
 
 // SupportsScreenCursor, istemci imlec katmanini pazarlamis mi.
@@ -61,6 +63,15 @@ func (s *Session) routeScreenAux(t protocol.MessageType, data []byte) {
 			return
 		}
 		sid, msg.Shape = m.SessionID, &m
+	case protocol.TypeScreen2Stats:
+		if !s.screen2Stats {
+			return
+		}
+		var m protocol.Screen2Stats
+		if json.Unmarshal(data, &m) != nil || !m.Valid() {
+			return
+		}
+		sid, msg.Stats = m.SessionID, &m
 	case protocol.TypeScreenClipboard:
 		if !s.screenClipboard {
 			return

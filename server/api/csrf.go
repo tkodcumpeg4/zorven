@@ -147,6 +147,10 @@ func (m *Middleware) originTrusted(r *http.Request) bool {
 	if scheme != "https" && IsProductionDomain(m.PlatformDomain) {
 		return false
 	}
+	// Istek TLS ile geldiyse (gelistirme dahil) http Origin sema dusurmedir.
+	if scheme != "https" && r.TLS != nil && !isLoopbackHost(oh) {
+		return false
+	}
 	// Port: kontrol host'lari tek dinleyicide servis edilir; Origin portu
 	// istegin Host portuyla (belirtilmemisse Origin semasinin varsayilaniyla)
 	// ayni olmali. Farkli portta calisan baska bir servis panel Origin'i olamaz.

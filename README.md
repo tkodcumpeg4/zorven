@@ -197,11 +197,24 @@ repository:
 - Plan-based log retention
 - Per-plan short-name quota and suspension of names after a plan downgrade
 - Device tags (metadata labels on devices)
+- Enterprise identity: per-tenant OIDC/SAML identity provider, group-to-role mapping, enforced SSO, IdP sign-in for tunnel visitors
+- Tenant certificate authority and device client certificates (device mTLS, signed device posture)
+- Device posture conditions, time-window policies and mid-session re-evaluation; policy-derived private network access control and its access log
+- Suspicious-email tracking (disposable-domain and random-looking address detection with a risk score) and periodic email re-verification
+- Platform user list (platform console Users tab with risk badges, filters, CSV export and forced re-verification)
 - Platform plan management (changing a tenant's plan; plan labels in the platform console)
 - Hosted marketing site and billing screens
 
 The core defines the integration seams as interfaces; without the commercial
 layer everything runs unlimited on a single node.
+
+## Third-party data
+
+Country-level geolocation (tunnel Geo rules) reads a local MMDB file; no IP is
+sent to any third party. Fetch it with `scripts/geo-update.sh`, which downloads
+the free DB-IP Lite Country database (a monthly cron is enough).
+
+IP Geolocation by DB-IP (https://db-ip.com), licensed under CC BY 4.0.
 
 ## Contributing
 

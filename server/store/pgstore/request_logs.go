@@ -151,7 +151,22 @@ func (s *Store) QueryRequestLogs(ctx context.Context, f reqlog.Filter) ([]reqlog
 	}
 
 	if f.Reason != "" {
-		add("reject_reason = $%d", f.Reason)
+		exact, prefixes := reqlog.ReasonTerms(f.Reason)
+		var ors []string
+		if len(exact) > 0 {
+			args = append(args, exact)
+			ors = append(ors, fmt.Sprintf("reject_reason = ANY($%d)", len(args)))
+		}
+		for _, p := range prefixes {
+			// LIKE ozel karakterleri kacirilir; ayrica SQL'e dizge gomulmez.
+			esc := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(p) + "%"
+			args = append(args, esc)
+			ors = append(ors, fmt.Sprintf("reject_reason LIKE $%d", len(args)))
+		}
+		if len(ors) == 0 {
+			ors = append(ors, "false")
+		}
+		where = append(where, "("+strings.Join(ors, " OR ")+")")
 	} else if f.Rejected {
 		where = append(where, "reject_reason <> ''")
 	}

@@ -3,7 +3,6 @@ package netctl
 import (
 	"context"
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
@@ -47,6 +46,20 @@ type Manager struct {
 	// atanmalidir.
 	Usage bandwidth.UsageSource
 
+	// W2 dogrudan yol: Punch false ise sunucu disco/aday koordinasyonu yapmaz
+	// (yalniz relay). Stun/StunPort NetRegistered ile istemciye bildirilir.
+	Punch    bool
+	Stun     []string
+	StunPort int
+	// AllowLoopbackEndpoints: aday olarak loopback kabul edilir (yalniz testler).
+	AllowLoopbackEndpoints bool
+
+	// W3 Mod B (OS TUN): Tun false ise wg_tun pazarlanmaz (ZORVEN_NET_TUN=off).
+	Tun bool
+	// Z5: ALog false ise erisim gunlugu (wg_alog) pazarlanmaz.
+	ALog        bool
+	alogLimiter accessLimiter
+
 	mu      sync.RWMutex
 	tenants map[string]*tenant
 	pubs    map[string]string // wg_pub -> tenantID (global benzersizlik)
@@ -59,6 +72,8 @@ type tenant struct {
 	byIP     map[netip.Addr]*node
 	byClient map[string]*node
 	shares   map[string]*Share
+	rules    map[string]*TunRule // W3: Mod B izin kurallari
+	slug     string              // W3: DNS soneki (kurulus kisa adi), tembel
 	epoch    int64
 }
 
@@ -74,9 +89,25 @@ type node struct {
 	sentPeer map[string]string
 	sentIn   map[string]string
 	sentOut  map[string]string
+	sentACL  string // W3: son gonderilen ACL imzasi ("" = hic gonderilmedi)
+	sentDNS  string
+
+	// tun: dugum Mod B'de (OS TUN). Her kayitta (yeni oturum) false'tan baslar.
+	tun bool
+	// lastALog: son kabul edilen net_access_log (hiz siniri).
+	lastALog time.Time
 
 	relayed atomic.Int64
 	denied  atomic.Int64
+
+	// W2 (yalniz m.mu altinda): disco anahtari, UDP adaylari, esler icin
+	// raporlanan yol durumu.
+	discoPub   string
+	punch      bool
+	endpoints  []string
+	epAt       time.Time
+	paths      map[string]pathStat
+	punchReqAt map[string]time.Time
 }
 
 // New, yoneticiyi kurar. vis nil ise OpenVisibility{dir} kullanilir.
@@ -89,7 +120,7 @@ func New(st Store, dir Directory, vis Visibility, log *slog.Logger) *Manager {
 	}
 	return &Manager{
 		st: st, dir: dir, vis: vis, log: log,
-		MTU: protocol.WGDefaultMTU, Pool: DefaultPool, Now: time.Now,
+		MTU: protocol.WGDefaultMTU, Pool: DefaultPool, Now: time.Now, Tun: true, ALog: true,
 		tenants: map[string]*tenant{}, pubs: map[string]string{},
 	}
 }
@@ -111,10 +142,29 @@ func (m *Manager) tenantLocked(ctx context.Context, id string) (*tenant, error) 
 	if t, ok := m.tenants[id]; ok {
 		return t, nil
 	}
+	pool := m.Pool
+	ts, hasTun := m.st.(TunStore)
+	if hasTun {
+		if p, ok, err := ts.GetNetwork(ctx, id); err != nil {
+			return nil, err
+		} else if ok && ValidateNetworkCIDR(p) == nil {
+			pool = p
+		}
+	}
 	t := &tenant{
-		id: id, alloc: newAlloc(m.Pool),
+		id: id, alloc: newAlloc(pool),
 		nodes: map[string]*node{}, byIP: map[netip.Addr]*node{},
-		byClient: map[string]*node{}, shares: map[string]*Share{},
+		byClient: map[string]*node{}, shares: map[string]*Share{}, rules: map[string]*TunRule{},
+	}
+	if hasTun {
+		rs, err := ts.ListTunRules(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		for i := range rs {
+			r := rs[i]
+			t.rules[r.ID] = &r
+		}
 	}
 	nodes, err := m.st.ListNodes(ctx, id)
 	if err != nil {
@@ -139,7 +189,36 @@ func (m *Manager) tenantLocked(ctx context.Context, id string) (*tenant, error) 
 		t.shares[s.ID] = &s
 	}
 	m.tenants[id] = t
+	if m.Hooks.Prepare != nil {
+		m.Hooks.Prepare(ctx, id)
+	}
 	return t, nil
+}
+
+// gateOK, ek cihaz-baglami kapisi (Hooks.Gate); kanca yoksa her zaman true.
+func (m *Manager) gateOK(tenantID string, s *Share, sub Subject) bool {
+	return m.Hooks.Gate == nil || m.Hooks.Gate(tenantID, s.OwnerClientID, sub)
+}
+
+// Recompute (Z2), kiracinin netmap'ini yeniden hesaplar: politika/posture/zaman
+// degisince erisimi kalkan dugumler eslerden cikarilir ve relay gorunurlugu kapanir.
+func (m *Manager) Recompute(tenantID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if t, ok := m.tenants[tenantID]; ok {
+		m.recomputeLocked(t)
+	}
+}
+
+// TenantIDs, bellekte yuklu kiracilar (periyodik yeniden degerlendirme icin).
+func (m *Manager) TenantIDs() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]string, 0, len(m.tenants))
+	for id := range m.tenants {
+		out = append(out, id)
+	}
+	return out
 }
 
 // --- kimlik / baglanti ---------------------------------------------------------
@@ -152,6 +231,12 @@ type Identity struct {
 	ClientName string // device adi (DNS adi turetmek icin)
 	UserID     string // session
 	Role       string // session
+	// Punch: tasiyici bu baglantida dogrudan yolu (wg_punch) pazarladi.
+	Punch bool
+	// Tun: tasiyici bu baglantida Mod B'yi (wg_tun) pazarladi.
+	Tun bool
+	// ALog: tasiyici bu baglantida erisim gunlugunu (wg_alog) pazarladi.
+	ALog bool
 }
 
 // NodeConn, tek bir WSS baglantisinin dugum tarafi.
@@ -231,6 +316,16 @@ func (c *NodeConn) HandleControl(ctx context.Context, t protocol.MessageType, da
 			c.sendErr(ErrorCode(err), err.Error())
 			return err
 		}
+	case protocol.TypeNetEndpoints, protocol.TypeNetPunchReq, protocol.TypeNetStatus:
+		c.handlePunchControl(ctx, t, data)
+	case protocol.TypeNetMode:
+		var md protocol.NetMode
+		if err := jsonUnmarshal(data, &md); err != nil {
+			return err
+		}
+		c.handleMode(ctx, md)
+	case protocol.TypeNetAccessLog:
+		c.handleAccessLog(ctx, data)
 	case protocol.TypeNetResync:
 		n := c.node.Load()
 		if n == nil {
@@ -259,9 +354,8 @@ func (c *NodeConn) HandleControl(ctx context.Context, t protocol.MessageType, da
 }
 
 func (c *NodeConn) register(ctx context.Context, reg protocol.NetRegister) error {
-	pubRaw, err := base64.StdEncoding.DecodeString(reg.WGPub)
-	if err != nil || len(pubRaw) != 32 {
-		return invalid("invalid_key", "wg acik anahtari 32 bayt base64 olmali")
+	if !validKey32(reg.WGPub) {
+		return invalid("invalid_key", "wg acik anahtari 32 bayt kanonik base64 olmali")
 	}
 	pub := reg.WGPub
 	m := c.m
@@ -337,12 +431,26 @@ func (c *NodeConn) register(ctx context.Context, reg protocol.NetRegister) error
 	}
 	n.ob = c.ob
 	n.sentFull = false
+	n.discoPub, n.punch, n.endpoints, n.paths, n.punchReqAt = "", false, nil, nil, nil
+	n.tun, n.sentACL, n.sentDNS = false, "", ""
+	n.lastALog = time.Time{}
+	if m.Punch && c.id.Punch && validKey32(reg.DiscoPub) {
+		n.discoPub, n.punch = reg.DiscoPub, true
+	}
 	c.node.Store(n)
 
-	c.sendJSON(protocol.NetRegistered{
+	nr := protocol.NetRegistered{
 		Type: protocol.TypeNetRegistered, NodeID: n.rec.ID, IP: n.rec.IP.String(),
 		Name: n.rec.Name, MTU: m.MTU, Kind: n.rec.Kind,
-	}, protocol.TypeNetRegistered)
+	}
+	if n.punch {
+		nr.Punch, nr.Stun, nr.StunPort = true, m.Stun, m.StunPort
+	}
+	if m.Tun && c.id.Tun && n.rec.Kind == KindDevice {
+		nr.Tun, nr.Pool = true, t.alloc.pool.String()
+		nr.ALog = m.ALog && c.id.ALog
+	}
+	c.sendJSON(nr, protocol.TypeNetRegistered)
 	m.recomputeLocked(t)
 	return nil
 }
@@ -384,7 +492,9 @@ func (c *NodeConn) Close() {
 		return // baska bir baglanti devraldi
 	}
 	n.ob = nil
+	n.tun = false
 	n.vis.Store(nil)
+	n.endpoints, n.paths = nil, nil
 	switch n.rec.Kind {
 	case KindSession:
 		m.removeNodeLocked(t, n, false)
@@ -469,7 +579,7 @@ func (c *NodeConn) Relay(dstID uint64, payload []byte) {
 func (n *node) asPeer() protocol.NetPeer {
 	return protocol.NetPeer{
 		NodeID: n.rec.ID, WGPub: n.rec.WGPub, IP: n.rec.IP.String(),
-		Name: n.rec.Name, Kind: n.rec.Kind, Online: n.ob != nil,
+		Name: n.rec.Name, Kind: n.rec.Kind, Online: n.ob != nil, DiscoPub: n.discoPub, Tun: n.tun,
 	}
 }
 
@@ -511,7 +621,7 @@ func (m *Manager) desiredLocked(t *tenant, x *node, now time.Time) (peers map[st
 		if owner == x {
 			so := protocol.NetShareOut{ID: s.ID, Name: s.Name, Port: s.Port, Proto: s.Proto, ExpiresUnix: exp}
 			for _, y := range t.nodes {
-				if y == x || !m.matches(s, y.sub) {
+				if y == x || !m.matches(s, y.sub) || !m.gateOK(t.id, s, y.sub) {
 					continue
 				}
 				peers[y.rec.WGPub] = y.asPeer()
@@ -519,7 +629,7 @@ func (m *Manager) desiredLocked(t *tenant, x *node, now time.Time) (peers map[st
 			}
 			sort.Strings(so.Allow)
 			out[s.ID] = so
-		} else if m.matches(s, x.sub) {
+		} else if m.matches(s, x.sub) && m.gateOK(t.id, s, x.sub) {
 			peers[owner.rec.WGPub] = owner.asPeer()
 			in[s.ID] = protocol.NetShareIn{
 				ID: s.ID, Name: s.Name, OwnerName: owner.rec.Name, OwnerIP: owner.rec.IP.String(),
@@ -534,11 +644,20 @@ func (m *Manager) desiredLocked(t *tenant, x *node, now time.Time) (peers map[st
 func (m *Manager) recomputeLocked(t *tenant) {
 	now := m.Now()
 	t.epoch++
+	var tunRules []TunRule // Mod B kurallari: recompute basina bir kez turetilir
 	for _, x := range t.nodes {
 		if x.ob == nil {
 			continue
 		}
 		peers, in, out := m.desiredLocked(t, x, now)
+		var acl []protocol.NetACLRule
+		var dnsRecs []protocol.NetDNSRecord
+		if x.tun {
+			if tunRules == nil {
+				tunRules = m.tunRulesLocked(t)
+			}
+			acl, dnsRecs = m.tunDesiredLocked(t, tunRules, x, peers, out)
+		}
 
 		visSet := make(map[uint32]struct{}, len(peers))
 		for _, p := range peers {
@@ -595,6 +714,20 @@ func (m *Manager) recomputeLocked(t *tenant) {
 				changed = true
 			}
 		}
+		// W3: Mod B dugumlerine ACL + DNS (Mod A'ya donuste bosaltilir).
+		newACL, newDNS := "", ""
+		if x.tun {
+			newACL = sig(acl)
+			newDNS = sig([]any{t.slug, dnsRecs})
+		}
+		if newACL != x.sentACL || !x.sentFull && newACL != "" {
+			nm.ACLSet, nm.ACL = true, acl
+			changed = true
+		}
+		if x.tun && (newDNS != x.sentDNS || !x.sentFull) {
+			nm.DNS = m.tunDNS(t, t.slug, dnsRecs)
+			changed = true
+		}
 		if !x.sentFull {
 			nm.Full = true
 			changed = true
@@ -609,6 +742,7 @@ func (m *Manager) recomputeLocked(t *tenant) {
 		if x.ob.Ctrl(b) {
 			x.sentFull = true
 			x.sentPeer, x.sentIn, x.sentOut = newPeer, newIn, newOut
+			x.sentACL, x.sentDNS = newACL, newDNS
 		}
 	}
 }
@@ -886,7 +1020,7 @@ func (c *NodeConn) deviceShareDelete(ctx context.Context, req protocol.NetShareD
 func (n *node) info() NodeInfo {
 	return NodeInfo{
 		ID: n.rec.ID, Kind: n.rec.Kind, ClientID: n.rec.ClientID, UserID: n.sub.UserID, Name: n.rec.Name,
-		IP: n.rec.IP.String(), Online: n.ob != nil, LastSeen: n.rec.LastSeen, RelayedBytes: n.relayed.Load(),
+		IP: n.rec.IP.String(), Online: n.ob != nil, LastSeen: n.rec.LastSeen, RelayedBytes: n.relayed.Load(), Tun: n.tun,
 	}
 }
 
@@ -946,9 +1080,14 @@ func (m *Manager) Shares(ctx context.Context, tenantID string) ([]ShareInfo, err
 		}
 		for _, y := range t.nodes {
 			if y != owner && y.ob != nil && m.matches(s, y.sub) {
-				si.Connected = append(si.Connected, y.info())
+				ni := y.info()
+				if owner != nil && owner.ob != nil {
+					ni.Path, ni.RTTMs = pathBetween(owner, y)
+				}
+				si.Connected = append(si.Connected, ni)
 			}
 		}
+		si.Path = SummarizePaths(si.Connected)
 		sort.Slice(si.Connected, func(i, j int) bool { return si.Connected[i].Name < si.Connected[j].Name })
 		out = append(out, si)
 	}
@@ -1013,6 +1152,11 @@ func (m *Manager) Run(ctx context.Context) {
 				last = time.Now()
 			}
 			m.Sweep(ctx, roles)
+			if roles {
+				if as, ok := m.st.(AccessStore); ok {
+					_ = as.PruneAccess(ctx, time.Now().Add(-AccessRetention))
+				}
+			}
 		}
 	}
 }

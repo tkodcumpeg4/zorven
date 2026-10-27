@@ -17,16 +17,32 @@ func (s *Session) negotiateNet(mgr *netctl.Manager, features []string) []string 
 	if mgr == nil || s.TenantID == "" {
 		return nil
 	}
-	var net, relay bool
+	var net, relay, punch, tun, alog bool
 	for _, f := range features {
 		net = net || f == protocol.FeatureWGNet
 		relay = relay || f == protocol.FeatureWGRelay
+		punch = punch || f == protocol.FeatureWGPunch
+		tun = tun || f == protocol.FeatureWGTun
+		alog = alog || f == protocol.FeatureWGALog
 	}
 	if !net || !relay {
 		return nil
 	}
 	s.netMgr = mgr
-	return []string{protocol.FeatureWGNet, protocol.FeatureWGRelay}
+	out := []string{protocol.FeatureWGNet, protocol.FeatureWGRelay}
+	if punch && mgr.Punch {
+		s.netPunch = true
+		out = append(out, protocol.FeatureWGPunch)
+	}
+	if tun && mgr.Tun {
+		s.netTun = true
+		out = append(out, protocol.FeatureWGTun)
+		if alog && mgr.ALog {
+			s.netALog = true
+			out = append(out, protocol.FeatureWGALog)
+		}
+	}
+	return out
 }
 
 func (s *Session) handleNet(ctx context.Context, t protocol.MessageType, data []byte) error {
@@ -40,6 +56,7 @@ func (s *Session) handleNet(ctx context.Context, t protocol.MessageType, data []
 		ob := netctl.NewOutbox()
 		nc = s.netMgr.Attach(netctl.Identity{
 			TenantID: s.TenantID, Kind: netctl.KindDevice, ClientID: s.ClientID, ClientName: s.ClientName,
+			Punch: s.netPunch, Tun: s.netTun, ALog: s.netALog,
 		}, ob)
 		s.netConn = nc
 		go func() {

@@ -125,6 +125,9 @@ func applyInput(msg protocol.ScreenInput, rect displayRect) inputResult {
 		// Servis oturum 0'da calisir; sessionPrecheck'e takilmamali.
 		return sendSAS()
 	}
+	if h := serviceHelper(); h != nil {
+		return h.Input(msg, rect) // servis: girdiyi kullanici oturumundaki yardimci enjekte eder
+	}
 	if pre := sessionPrecheck(); pre.State != protocol.InputStateOK {
 		return pre
 	}

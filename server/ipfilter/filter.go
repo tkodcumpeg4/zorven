@@ -111,10 +111,10 @@ func (e *Engine) InvalidateTenant(ctx context.Context, tenantID string) error {
 // CheckAllowed, gelen istegin IP adresinin tünel izin listesine uygun olup olmadığını kontrol eder.
 //
 // Dönüş kuralları:
-// - Plan ozelligi/entitlement ingress tarafinda SORGULANMAZ: mevcut kurallar her zaman
-//   uygulanir (fail-closed). Entitlement yalniz API'de kural olusturma/etkinlestirmede denetlenir.
-// - Kiracı/Tünel için tanımlı aktif kural yoksa -> true (varsayılan açık)
-// - Kural tanımlıysa: clientIP en az bir kural ile eşleşirse -> true, aksi halde -> false
+//   - Plan ozelligi/entitlement ingress tarafinda SORGULANMAZ: mevcut kurallar her zaman
+//     uygulanir (fail-closed). Entitlement yalniz API'de kural olusturma/etkinlestirmede denetlenir.
+//   - Kiracı/Tünel için tanımlı aktif kural yoksa -> true (varsayılan açık)
+//   - Kural tanımlıysa: clientIP en az bir kural ile eşleşirse -> true, aksi halde -> false
 func (e *Engine) CheckAllowed(ctx context.Context, tenantID, tunnelID, clientIPStr string) (bool, error) {
 	e.mu.RLock()
 	tenantRules, exists := e.rules[tenantID]

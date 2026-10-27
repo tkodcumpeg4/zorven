@@ -41,30 +41,30 @@
           </g>
         </g>
       </svg></div>
-    <h1 class="auth-title">Zorven'e Bağlan</h1>
-    <p class="auth-sub">Hesabına bağlan; açık tünelleri ve logları izle. Tünel oluşturma ve tüm ayarlar <b>web panelinden</b> yapılır.</p>
+    <h1 class="auth-title" data-i18n="auth.title">Zorven'e Bağlan</h1>
+    <p class="auth-sub" data-i18n-html="auth.sub">Hesabına bağlan; açık tünelleri ve logları izle. Tünel oluşturma ve tüm ayarlar <b>web panelinden</b> yapılır.</p>
 
     <div class="auth-tabs">
-      <button class="auth-tab is-active" data-pane="token" type="button">Token ile</button>
-      <button class="auth-tab" data-pane="browser" type="button">Tarayıcıdan</button>
+      <button class="auth-tab is-active" data-pane="token" type="button" data-i18n="auth.tabToken">Token ile</button>
+      <button class="auth-tab" data-pane="browser" type="button" data-i18n="auth.tabBrowser">Tarayıcıdan</button>
     </div>
 
     <div id="authToken">
       <input id="tokenInput" class="input mono" type="password" placeholder="zrv_live_…" autocomplete="off" spellcheck="false">
       <p id="tokenErr" class="err" hidden></p>
-      <button id="btnTokenConnect" class="btn btn-primary" style="margin-top:12px" type="button">Bağlan</button>
-      <p class="hint">Token'ı web panelinde <b>İstemciler</b> bölümünden alabilirsin.</p>
+      <button id="btnTokenConnect" class="btn btn-primary" style="margin-top:12px" type="button" data-i18n="auth.connect">Bağlan</button>
+      <p class="hint" data-i18n-html="auth.tokenHint">Token'ı web panelinde <b>İstemciler</b> bölümünden alabilirsin.</p>
     </div>
 
     <div id="authBrowser" hidden>
-      <button id="btnBrowserLogin" class="btn btn-primary" type="button">Tarayıcıdan Giriş Yap</button>
+      <button id="btnBrowserLogin" class="btn btn-primary" type="button" data-i18n="auth.browserLogin">Tarayıcıdan Giriş Yap</button>
       <div id="browserWaiting" hidden style="text-align:center;margin-top:16px">
-        <p class="hint" style="margin-bottom:2px">Tarayıcıda açılan sayfada bu kodu onayla:</p>
+        <p class="hint" style="margin-bottom:2px" data-i18n="auth.codePrompt">Tarayıcıda açılan sayfada bu kodu onayla:</p>
         <div class="usercode" id="userCode">····-····</div>
-        <p class="hint"><span class="spinner"></span>&nbsp; Onay bekleniyor…</p>
+        <p class="hint"><span class="spinner"></span>&nbsp; <span data-i18n="auth.waiting">Onay bekleniyor…</span></p>
       </div>
       <p id="browserErr" class="err" hidden></p>
-      <p class="hint">Tarayıcıda <b>zorven.app</b> açılır; giriş yapıp kodu onayladığında uygulama otomatik bağlanır.</p>
+      <p class="hint" data-i18n-html="auth.browserHint">Tarayıcıda <b>zorven.app</b> açılır; giriş yapıp kodu onayladığında uygulama otomatik bağlanır.</p>
     </div>
   </div>
 </section>
@@ -103,8 +103,8 @@
       </svg></span>
     <span class="brand-name">Zorven</span>
     <div class="topbar-actions">
-      <button id="btnLogs" class="btn-ghost" type="button">Loglar</button>
-      <button id="btnLogout" class="btn-ghost" type="button">Çıkış</button>
+      <button id="btnLogs" class="btn-ghost" type="button" data-i18n="top.logs">Loglar</button>
+      <button id="btnLogout" class="btn-ghost" type="button" data-i18n="top.logout">Çıkış</button>
     </div>
   </header>
 
@@ -112,61 +112,96 @@
     <div class="card">
       <div class="hero-top">
         <div>
-          <span id="connBadge" class="badge badge-stopped">Bağlı Değil</span>
-          <p class="muted" style="margin-top:8px">Zorven istemci durumu — tünel &amp; ağ</p>
+          <span id="connBadge" class="badge badge-stopped" data-i18n="state.stopped">Bağlı Değil</span>
+          <p class="muted" style="margin-top:8px" data-i18n="conn.subtitle">Zorven istemci durumu — tünel &amp; ağ</p>
         </div>
-        <button id="btnConn" class="btn btn-primary" style="width:auto;padding:10px 20px" type="button">Bağlan</button>
+        <button id="btnConn" class="btn btn-primary" style="width:auto;padding:10px 20px" type="button" data-i18n="conn.connect">Bağlan</button>
       </div>
       <p id="connMsg" class="err" hidden></p>
       <div id="activeSessions" class="active-sessions" hidden></div>
     </div>
 
     <div class="card">
-      <h2 class="label-sys">Açık Tüneller</h2>
-      <div id="tunnelList"><div class="empty">Yükleniyor…</div></div>
+      <h2 class="label-sys" data-i18n="tunnels.title">Açık Tüneller</h2>
+      <div id="tunnelList"><div class="empty" data-i18n="tunnels.loading">Yükleniyor…</div></div>
     </div>
 
-    <div class="card">
-      <h2 class="label-sys">Canlı Donanım</h2>
-      <div class="metrics">
-        <div class="metric"><div class="metric-head"><span>CPU</span><span id="cpuVal" class="mono">—</span></div><div class="meter"><div id="cpuBar" class="meter-fill"></div></div></div>
-        <div class="metric"><div class="metric-head"><span>RAM</span><span id="ramVal" class="mono">—</span></div><div class="meter"><div id="ramBar" class="meter-fill"></div></div></div>
-        <div class="metric"><div class="metric-head"><span>Disk</span><span id="diskVal" class="mono">—</span></div><div class="meter"><div id="diskBar" class="meter-fill"></div></div></div>
+    <div class="card" id="ntCard">
+      <div class="hero-top">
+        <div>
+          <h2 class="label-sys nt-title">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c2.6 2.7 3.9 5.7 3.9 9s-1.3 6.3-3.9 9c-2.6-2.7-3.9-5.7-3.9-9S9.4 5.7 12 3z"/></svg>
+            <span data-i18n="nt.title">Tam Ağ Katmanı</span>
+          </h2>
+          <span id="ntBadge" class="badge badge-stopped" data-i18n="nt.off">Kapalı</span>
+        </div>
+        <button id="btnNtToggle" class="btn btn-primary" style="width:auto;padding:10px 20px" type="button" disabled data-i18n="nt.btnOn">Aç</button>
+      </div>
+      <p class="muted" style="margin-top:8px" data-i18n-html="nt.desc">Cihaza sanal ağ arayüzü ekler; yetkili eşlere IP veya <span class="mono">&lt;cihaz&gt;.zorven.internal</span> adıyla her uygulamadan erişirsiniz.</p>
+      <div id="ntDetails" class="nt-grid" hidden>
+        <div><small data-i18n="nt.ip">IP</small><span id="ntIP" class="mono">—</span></div>
+        <div><small data-i18n="nt.pool">Havuz</small><span id="ntPool" class="mono">—</span></div>
+        <div><small data-i18n="nt.iface">Arayüz</small><span id="ntIface" class="mono">—</span></div>
+        <div><small data-i18n="nt.dns">DNS</small><span id="ntDNS" class="mono">—</span></div>
+      </div>
+      <div id="ntPeers" class="nt-peers" hidden></div>
+      <p id="ntErr" class="err" hidden></p>
+      <p id="ntHint" class="hint" hidden></p>
+      <div id="ntActions" class="nt-actions" hidden>
+        <button id="btnNtInstall" class="btn-ghost" type="button" hidden data-i18n="nt.install">Servisi kur (yönetici onayı)</button>
+        <button id="btnNtElevate" class="btn-ghost" type="button" hidden data-i18n="nt.elevate">Yönetici olarak yeniden başlat</button>
       </div>
     </div>
 
     <div class="card">
-      <h2 class="label-sys">Ayarlar</h2>
+      <h2 class="label-sys" data-i18n="hw.title">Canlı Donanım</h2>
+      <div class="metrics">
+        <div class="metric"><div class="metric-head"><span data-i18n="hw.cpu">CPU</span><span id="cpuVal" class="mono">—</span></div><div class="meter"><div id="cpuBar" class="meter-fill"></div></div></div>
+        <div class="metric"><div class="metric-head"><span data-i18n="hw.ram">RAM</span><span id="ramVal" class="mono">—</span></div><div class="meter"><div id="ramBar" class="meter-fill"></div></div></div>
+        <div class="metric"><div class="metric-head"><span data-i18n="hw.disk">Disk</span><span id="diskVal" class="mono">—</span></div><div class="meter"><div id="diskBar" class="meter-fill"></div></div></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2 class="label-sys" data-i18n="set.title">Ayarlar</h2>
+      <div class="update-row lang-row">
+        <div class="update-info"><strong data-i18n="set.language">Dil / Language</strong></div>
+        <select id="setLanguage" class="lp-input">
+          <option value="" data-i18n="set.langAuto">Otomatik</option>
+          <option value="tr">Türkçe</option>
+          <option value="en">English</option>
+        </select>
+      </div>
       <label class="toggle">
         <input type="checkbox" id="setAutostart">
         <span class="toggle-track"><span class="toggle-thumb"></span></span>
-        <span class="toggle-text"><strong>Bilgisayar açılınca başlat</strong><small>Oturum açıldığında Zorven arka planda çalışır.</small></span>
+        <span class="toggle-text"><strong data-i18n="set.autostart">Bilgisayar açılınca başlat</strong><small data-i18n="set.autostartDesc">Oturum açıldığında Zorven arka planda çalışır.</small></span>
       </label>
       <label class="toggle">
         <input type="checkbox" id="setHideTray">
         <span class="toggle-track"><span class="toggle-thumb"></span></span>
-        <span class="toggle-text"><strong>Kapatınca sistem tepsisine gizle</strong><small>Pencere kapatılınca uygulama çıkmaz, tepside çalışmaya devam eder.</small></span>
+        <span class="toggle-text"><strong data-i18n="set.hideTray">Kapatınca sistem tepsisine gizle</strong><small data-i18n="set.hideTrayDesc">Pencere kapatılınca uygulama çıkmaz, tepside çalışmaya devam eder.</small></span>
       </label>
       <label class="toggle toggle-warn">
         <input type="checkbox" id="setNoTerminal">
         <span class="toggle-track"><span class="toggle-thumb"></span></span>
-        <span class="toggle-text"><strong>Web CLI / Terminali kapat</strong><small>Dashboard üzerinden uzak komut satırı erişimini engeller.</small></span>
+        <span class="toggle-text"><strong data-i18n="set.noTerminal">Web CLI / Terminali kapat</strong><small data-i18n="set.noTerminalDesc">Dashboard üzerinden uzak komut satırı erişimini engeller.</small></span>
       </label>
       <label class="toggle toggle-warn">
         <input type="checkbox" id="setNoScreen">
         <span class="toggle-track"><span class="toggle-thumb"></span></span>
-        <span class="toggle-text"><strong>Ekran paylaşımını kapat</strong><small>Dashboard üzerinden masaüstü izleme ve kontrolünü engeller.</small></span>
+        <span class="toggle-text"><strong data-i18n="set.noScreen">Ekran paylaşımını kapat</strong><small data-i18n="set.noScreenDesc">Dashboard üzerinden masaüstü izleme ve kontrolünü engeller.</small></span>
       </label>
-      <p id="setSaved" class="hint" style="color:var(--brand)" hidden>✓ Kaydedildi</p>
+      <p id="setSaved" class="hint" style="color:var(--brand)" hidden data-i18n="set.saved">✓ Kaydedildi</p>
       <div class="update-row">
         <div class="update-info">
-          <strong>Sürüm</strong>
+          <strong data-i18n="set.version">Sürüm</strong>
           <small id="verText" class="mono">—</small>
         </div>
-        <button id="btnCheckUpdate" class="btn-ghost" type="button">Güncellemeleri denetle</button>
+        <button id="btnCheckUpdate" class="btn-ghost" type="button" data-i18n="set.checkUpdate">Güncellemeleri denetle</button>
       </div>
       <p id="updMsg" class="hint" hidden></p>
-      <button id="btnInstallUpdate" class="btn btn-primary" style="margin-top:8px" type="button" hidden>Güncelle ve yeniden başlat</button>
+      <button id="btnInstallUpdate" class="btn btn-primary" style="margin-top:8px" type="button" hidden data-i18n="set.installUpdate">Güncelle ve yeniden başlat</button>
     </div>
   </main>
 </div>
@@ -174,26 +209,27 @@
 <!-- ============ LOG PANELİ (tam pencere overlay) ============ -->
 <div id="logPanel" class="log-panel" hidden>
   <div class="lp-bar">
-    <h1 class="lp-title">Canlı Loglar</h1>
-    <select id="lfMethod" class="lp-input"><option value="">Metot: Hepsi</option><option>GET</option><option>POST</option><option>PUT</option><option>PATCH</option><option>DELETE</option><option>OPTIONS</option></select>
-    <select id="lfStatus" class="lp-input"><option value="">Durum: Hepsi</option><option value="2">2xx</option><option value="3">3xx</option><option value="4">4xx</option><option value="5">5xx</option></select>
-    <input id="lfQ" class="lp-input lp-q" placeholder="path ara…">
-    <input id="lfDur" class="lp-input" type="number" min="0" placeholder="min ms" style="width:88px">
-    <button id="lfLive" class="btn-ghost lp-live" type="button">● canlı</button>
-    <button id="lfClear" class="btn-ghost" type="button">Temizle</button>
-    <button id="lfExport" class="btn-ghost" type="button">CSV</button>
-    <span id="lfCount" class="lp-count">0 istek</span>
-    <button id="lfClose" class="btn-ghost lp-close" type="button">✕ Kapat</button>
+    <h1 class="lp-title" data-i18n="log.title">Canlı Loglar</h1>
+    <select id="lfMethod" class="lp-input"><option value="" data-i18n="log.methodAll">Metot: Hepsi</option><option>GET</option><option>POST</option><option>PUT</option><option>PATCH</option><option>DELETE</option><option>OPTIONS</option></select>
+    <select id="lfStatus" class="lp-input"><option value="" data-i18n="log.statusAll">Durum: Hepsi</option><option value="2">2xx</option><option value="3">3xx</option><option value="4">4xx</option><option value="5">5xx</option></select>
+    <input id="lfQ" class="lp-input lp-q" placeholder="path ara…" data-i18n-placeholder="log.searchPh">
+    <input id="lfDur" class="lp-input" type="number" min="0" placeholder="min ms" data-i18n-placeholder="log.minMsPh" style="width:88px">
+    <button id="lfLive" class="btn-ghost lp-live" type="button" data-i18n="log.live">● canlı</button>
+    <button id="lfClear" class="btn-ghost" type="button" data-i18n="log.clear">Temizle</button>
+    <button id="lfExport" class="btn-ghost" type="button" data-i18n="log.csv">CSV</button>
+    <span id="lfCount" class="lp-count">0</span>
+    <button id="lfClose" class="btn-ghost lp-close" type="button" data-i18n="log.close">✕ Kapat</button>
   </div>
   <div class="lp-body">
     <table class="lp-table">
-      <thead><tr><th>Saat</th><th>Metot</th><th>Path</th><th>Durum</th><th>Süre</th></tr></thead>
+      <thead><tr><th data-i18n="log.colTime">Saat</th><th data-i18n="log.colMethod">Metot</th><th data-i18n="log.colPath">Path</th><th data-i18n="log.colStatus">Durum</th><th data-i18n="log.colDuration">Süre</th></tr></thead>
       <tbody id="lfBody"></tbody>
     </table>
-    <div id="lfEmpty" class="lp-empty">Tünel hazır — gelen istekler burada canlı akacak…</div>
+    <div id="lfEmpty" class="lp-empty" data-i18n="log.empty">Tünel hazır — gelen istekler burada canlı akacak…</div>
   </div>
 </div>
 
+<script src="i18n.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

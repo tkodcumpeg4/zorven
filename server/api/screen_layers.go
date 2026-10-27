@@ -36,7 +36,7 @@ const (
 	layerQualityMid     = 75 // aksi halde yuksek katman
 	viewerFPSDefault    = 15
 	viewerFPSMax        = 30
-	agentFPSMax         = 20
+	agentFPSMax         = 30
 
 	// gonderici: bir turda en fazla bu kadar yuk (kuyrukta yer oranina gore azalir).
 	senderMsgBytes = 180 << 10
@@ -280,6 +280,7 @@ func (h *screen2Hub) ingestLocked(b []byte) {
 		return
 	}
 	st := &h.stores[l]
+	now := h.nowT()
 	w, hh := int(m.W), int(m.H)
 	if m.Keyframe && m.First && (st.w != w || st.h != hh) {
 		st.reset(w, hh)
@@ -313,10 +314,16 @@ func (h *screen2Hub) ingestLocked(b []byte) {
 			if !v.dirty[idx] {
 				v.dirty[idx] = true
 				v.dirtyN++
+				if v.dirtySince.IsZero() {
+					v.dirtySince = now
+				}
 			}
 		}
 	}
 	for v := range h.viewers {
+		if v.layer == l && m.EOF {
+			v.fbArrived++
+		}
 		if v.layer == l && v.dirtyN > 0 {
 			v.wakeUp()
 		}
@@ -347,6 +354,11 @@ func (v *screen2Viewer) markAllLocked() {
 		} else {
 			v.dirty[i] = false
 		}
+	}
+	if v.dirtyN == 0 {
+		v.dirtySince = time.Time{}
+	} else if v.dirtySince.IsZero() {
+		v.dirtySince = v.hub.nowT()
 	}
 }
 
@@ -410,6 +422,11 @@ func (v *screen2Viewer) takeBatchLocked(now time.Time, maxBytes int) (b tileBatc
 			return b, v.interval() - el, false
 		}
 	}
+	// Geri bildirim: bekleme yasi (sync turlari tikanma sayilmaz) ve teslim sayaci.
+	if !v.needSync && !v.syncing && !v.dirtySince.IsZero() {
+		v.fbQueueMax = max(v.fbQueueMax, now.Sub(v.dirtySince))
+	}
+	v.fbDelivered++
 	size := 0
 	for i := 0; i < len(v.dirty) && (size < maxBytes || len(b.rects) == 0); i++ {
 		if !v.dirty[i] {
@@ -429,6 +446,11 @@ func (v *screen2Viewer) takeBatchLocked(now time.Time, maxBytes int) (b tileBatc
 		size += len(t.payload) + protocol.Screen2RectHeaderSize
 	}
 	b.w, b.h, b.key, b.layer = uint16(st.w), uint16(st.h), v.needSync, uint8(v.layer)
+	if v.dirtyN > 0 {
+		v.dirtySince = now // kalan karolar simdiden itibaren bekler
+	} else {
+		v.dirtySince = time.Time{}
+	}
 	b.seq = v.seq
 	v.seq++
 	v.syncing = v.needSync && v.dirtyN > 0
@@ -469,6 +491,7 @@ func (v *screen2Viewer) senderLoop() {
 		case !pending:
 		case room < 2:
 			obs = autoBad
+			v.fbBlocked++
 		default:
 			obs = autoOK
 			b, wait, ok = v.takeBatchLocked(now, min(room-1, 5)*senderMsgBytes)

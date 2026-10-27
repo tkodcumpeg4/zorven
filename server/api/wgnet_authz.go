@@ -63,6 +63,15 @@ func (d storeNetDirectory) DeviceName(ctx context.Context, tenantID, clientID st
 	return c.Name, true, nil
 }
 
+// TenantSlug (netctl.SlugResolver): sanal DNS sonekini (kurulus kisa adi) verir.
+func (d storeNetDirectory) TenantSlug(ctx context.Context, tenantID string) (string, error) {
+	t, err := d.st.GetTenant(ctx, tenantID)
+	if err != nil {
+		return "", err
+	}
+	return t.Slug, nil
+}
+
 // ResolveGrantee: kullanici e-postasini / cihaz adini kimlige cevirir (bulunamazsa girdi aynen doner,
 // dogrulama asamasi reddeder).
 func (d storeNetDirectory) ResolveGrantee(ctx context.Context, tenantID string, g netctl.Grantee) (netctl.Grantee, error) {

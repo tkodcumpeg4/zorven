@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"errors"
-	"fmt"
 	"image"
 	"runtime"
 	"sync"
@@ -46,6 +45,9 @@ func (goCapturer) Capture(d int) (*image.RGBA, error) {
 	return platCapture(d)
 }
 
+// Method, yakalama yontemi adi (platMethod: gdi|kbinani|darwin).
+func (goCapturer) Method() string { return platMethod() }
+
 // errScreen2Unsupported, yakalama yapilamayan platformlar icin acik hata.
 var errScreen2Unsupported = errors.New("ekran yakalama bu platformda desteklenmiyor (macOS icin Ekran Kaydi izni ve macOS 14 veya oncesi gerekir)")
 
@@ -67,14 +69,26 @@ type screen2Session struct {
 	send func(ctx context.Context, b []byte) error
 	// onDisplay, izlenen monitor degisince (ve basta) girdi koordinatlari icin cagrilir.
 	onDisplay func(display int, bounds image.Rectangle)
+	// onStats, saniyelik canli olcum ozetini yollar (FeatureScreen2Stats); nil => kapali.
+	onStats func(protocol.Screen2Stats)
+	met     *s2Metrics
+	// lastSrc, yakalama dongusunun son tam goruntusu (ipucu: degisim yok turlari
+	// ve anahtar kare istegi icin); yalniz captureLoop dokunur.
+	lastSrc *image.RGBA
 	// onAttach, yakalama oncesi (Windows girdi masaustune baglanma); nil olabilir.
 	onAttach func()
+	// vid, H.264 video modu (FeatureScreen2Video); nil => yalniz karo.
+	vid *videoCtl
 
 	display  int
 	maxWidth int
 	ctl      *adaptCtl
 
 	keyReq atomic.Bool
+
+	// infoMu, istatistik dongusunun okudugu etkin katman listesi (captureLoop yazar).
+	infoMu sync.Mutex
+	info   []layerInfo
 
 	// Katmanli mod (screen2_layers): bkz. screen2_layers.go.
 	layered bool
@@ -97,11 +111,8 @@ type screen2Stats struct {
 
 func newScreen2Session(id string, streamID uint64, c Capturer, e TileEncoder,
 	send func(context.Context, []byte) error, p screen2Params) *screen2Session {
-	if p.FPS <= 0 || p.FPS > 30 {
+	if p.FPS <= 0 || p.FPS > screen2MaxFPS {
 		p.FPS = 15
-	}
-	if p.FPS > 20 {
-		p.FPS = 20
 	}
 	if p.Quality <= 0 || p.Quality > 100 {
 		p.Quality = 70
@@ -111,6 +122,7 @@ func newScreen2Session(id string, streamID uint64, c Capturer, e TileEncoder,
 		display: p.Display, maxWidth: p.MaxWidth,
 		ctl:   newAdaptCtl(p.Quality, p.FPS),
 		setCh: make(chan screen2Params, 1),
+		met:   newS2Metrics(time.Now()),
 	}
 	if len(p.Layers) > 0 {
 		// Kalite tavani katman bazinda (spec.Quality); denetleyici yalniz dusurur.
@@ -119,6 +131,50 @@ func newScreen2Session(id string, streamID uint64, c Capturer, e TileEncoder,
 		s.layerIn = layerUpdate{set: true, layers: append([]protocol.Screen2LayerSpec(nil), p.Layers...)}
 	}
 	return s
+}
+
+// setLayerInfo, etkin katman kimlik/kalite ozetini (degistiyse) gunceller.
+func (s *screen2Session) setLayerInfo(layers []*layerState) {
+	s.infoMu.Lock()
+	defer s.infoMu.Unlock()
+	same := len(s.info) == len(layers)
+	for i := 0; same && i < len(layers); i++ {
+		same = s.info[i] == layerInfo{layers[i].spec.ID, layers[i].spec.Quality}
+	}
+	if same {
+		return
+	}
+	s.info = s.info[:0:0]
+	for _, st := range layers {
+		s.info = append(s.info, layerInfo{st.spec.ID, st.spec.Quality})
+	}
+}
+
+func (s *screen2Session) layerInfos() []layerInfo {
+	s.infoMu.Lock()
+	defer s.infoMu.Unlock()
+	return append([]layerInfo(nil), s.info...)
+}
+
+// Feedback, sunucunun izleyici teslim ozetini uyarlama denetleyicisine isler
+// (goroutine-guvenli). Mesajda bulunmayan ama kisiti olan katman "tikanmasiz" sayilir.
+func (s *screen2Session) Feedback(m protocol.Screen2Feedback, now time.Time) {
+	if !m.Valid() {
+		return
+	}
+	seen := map[int]bool{}
+	for _, l := range m.Layers {
+		seen[l.ID] = true
+		s.ctl.Feedback(l, m.WindowMs, now)
+	}
+	for _, id := range s.ctl.FeedbackIDs() {
+		if !seen[id] {
+			s.ctl.Feedback(protocol.Screen2FeedbackLayer{ID: id}, m.WindowMs, now)
+		}
+	}
+	if s.vid != nil {
+		s.vid.feedback(m, now)
+	}
 }
 
 // canvasSize, son gonderilen karenin (tuval) boyutu; kare yoksa 0,0.
@@ -147,12 +203,12 @@ func (s *screen2Session) Update(p screen2Params) {
 }
 
 func (s *screen2Session) applyParams(p screen2Params) (displayChanged bool) {
-	mq, mf := s.ctl.maxQ, s.ctl.maxFPS
+	mq, mf := s.ctl.MaxQ(), s.ctl.MaxFPS()
 	if p.Quality > 0 && p.Quality <= 100 {
 		mq = p.Quality
 	}
 	if p.FPS > 0 {
-		mf = min(p.FPS, 20)
+		mf = min(p.FPS, screen2MaxFPS)
 	}
 	s.ctl.SetMax(mq, mf)
 	if p.MaxWidth > 0 {
@@ -165,171 +221,10 @@ func (s *screen2Session) applyParams(p screen2Params) (displayChanged bool) {
 	return false
 }
 
-// run, ctx iptal olana veya kalici hata olusana kadar calisir. Capture hatasi
-// bir kez yeniden denenir (onAttach ile).
-func (s *screen2Session) run(ctx context.Context) error {
-	if s.cap.NumDisplays() == 0 {
-		return errScreen2Unsupported
-	}
-	if s.display < 0 || s.display >= s.cap.NumDisplays() {
-		s.display = 0
-	}
-	s.notifyDisplay()
-	if s.layered {
-		return s.runLayered(ctx)
-	}
-
-	var prev *image.RGBA
-	needKey := true
-	next := time.Now()
-	timer := time.NewTimer(0)
-	defer timer.Stop()
-
-	for {
-		if d := time.Until(next); d > 0 {
-			timer.Reset(d)
-			select {
-			case <-ctx.Done():
-				return nil
-			case <-timer.C:
-			}
-		} else if ctx.Err() != nil {
-			return nil
-		}
-		start := time.Now()
-
-		select {
-		case p := <-s.setCh:
-			if s.applyParams(p) {
-				s.notifyDisplay()
-				needKey = true
-				prev = nil
-			}
-		default:
-		}
-		if s.keyReq.Swap(false) {
-			needKey = true
-		}
-
-		img, err := s.cap.Capture(s.display)
-		if err != nil {
-			if s.onAttach != nil {
-				s.onAttach()
-			}
-			if img, err = s.cap.Capture(s.display); err != nil {
-				return fmt.Errorf("ekran yakalanamadi: %w", err)
-			}
-		}
-		frame := scaleRGBA(img, s.maxWidth)
-		if frame.Rect.Dx() > 65535 || frame.Rect.Dy() > 65535 {
-			return errors.New("ekran cozunurlugu screen2 icin cok buyuk")
-		}
-		if prev != nil && (prev.Rect.Dx() != frame.Rect.Dx() || prev.Rect.Dy() != frame.Rect.Dy()) {
-			needKey = true
-		}
-
-		var rects []image.Rectangle
-		if needKey {
-			rects = splitRect(frame.Rect, screen2MaxRectDim)
-		} else {
-			dirty, tx, ty := diffTiles(prev, frame)
-			for _, r := range mergeDirty(dirty, tx, ty, frame.Rect.Dx(), frame.Rect.Dy()) {
-				rects = append(rects, splitRect(r, screen2MaxRectDim)...)
-			}
-		}
-		prev = frame
-		s.canvas.Store(uint64(frame.Rect.Dx())<<32 | uint64(frame.Rect.Dy()))
-
-		if len(rects) > 0 {
-			wire, err := s.encodeRects(frame, rects)
-			if err != nil {
-				return fmt.Errorf("kare kodlanamadi: %w", err)
-			}
-			msgs, err := protocol.PackScreen2(s.streamID, s.seq, needKey,
-				uint16(frame.Rect.Dx()), uint16(frame.Rect.Dy()), wire, 0)
-			if err != nil {
-				return fmt.Errorf("kare paketlenemedi: %w", err)
-			}
-			s.seq++
-			wstart := time.Now()
-			var n int64
-			for _, m := range msgs {
-				if err := s.send(ctx, m); err != nil {
-					if ctx.Err() != nil {
-						return nil
-					}
-					return err
-				}
-				n += int64(len(m))
-			}
-			s.ctl.Observe(time.Since(wstart))
-			s.statMu.Lock()
-			s.stats.Frames++
-			if needKey {
-				s.stats.Keyframes++
-			}
-			s.stats.Bytes += n
-			s.statMu.Unlock()
-			needKey = false
-		}
-
-		next = start.Add(s.ctl.Interval())
-		if now := time.Now(); next.Before(now) {
-			next = now // yetisemiyoruz: birikmis kareleri yakalamaya calisma
-		}
-	}
-}
-
 func (s *screen2Session) notifyDisplay() {
 	if s.onDisplay != nil {
 		s.onDisplay(s.display, s.cap.Bounds(s.display))
 	}
-}
-
-// encodeRects, dikdortgenleri kodlar; yuk cok buyukse ikiye bolup yeniden kodlar.
-func (s *screen2Session) encodeRects(img *image.RGBA, rects []image.Rectangle) ([]protocol.Screen2Rect, error) {
-	out := make([]protocol.Screen2Rect, 0, len(rects))
-	q := s.ctl.Quality()
-	var enc func(r image.Rectangle) error
-	enc = func(r image.Rectangle) error {
-		e, payload, err := s.enc.Encode(img, r, q)
-		if err != nil {
-			return err
-		}
-		if len(payload) > screen2MaxPayload && (r.Dx() > tileSize || r.Dy() > tileSize) {
-			a, b := r, r
-			if r.Dx() >= r.Dy() {
-				m := r.Min.X + r.Dx()/2
-				a.Max.X, b.Min.X = m, m
-			} else {
-				m := r.Min.Y + r.Dy()/2
-				a.Max.Y, b.Min.Y = m, m
-			}
-			if err := enc(a); err != nil {
-				return err
-			}
-			return enc(b)
-		}
-		out = append(out, protocol.Screen2Rect{
-			X: uint16(r.Min.X), Y: uint16(r.Min.Y), W: uint16(r.Dx()), H: uint16(r.Dy()),
-			Enc: e, Payload: payload,
-		})
-		return nil
-	}
-	for _, r := range rects {
-		if err := enc(r); err != nil {
-			return nil, err
-		}
-	}
-	return out, nil
-}
-
-// scaleRGBA, scaleDown'u *image.RGBA donusuyle sarar (scaleDown her zaman RGBA doner).
-func scaleRGBA(src *image.RGBA, maxWidth int) *image.RGBA {
-	if maxWidth <= 0 {
-		maxWidth = defaultMaxWidth
-	}
-	return scaleDown(src, maxWidth).(*image.RGBA)
 }
 
 // --- screenManager baglantisi ----------------------------------------------
@@ -337,7 +232,16 @@ func scaleRGBA(src *image.RGBA, maxWidth int) *image.RGBA {
 // runScreen2, screen2 oturumunu surdurur ve bitince oturumu kapatir.
 func (sm *screenManager) runScreen2(ctx context.Context, ss *screenSession, p screen2Params) {
 	defer sm.finish(ss)
-	s := newScreen2Session(ss.id, ss.streamID, goCapturer{}, newGoTileEncoder(), sm.cs.sendBinary, p)
+	s := newScreen2Session(ss.id, ss.streamID, newPlatCapturer(), newGoTileEncoder(), sm.cs.sendBinary, p)
+	if sm.cs.screen2Stats {
+		s.onStats = func(st protocol.Screen2Stats) {
+			st.SessionID = ss.id
+			_ = sm.cs.sendControl(ctx, st, protocol.TypeScreen2Stats)
+		}
+	}
+	if sm.cs.screen2Video {
+		s.vid = newVideoCtl(s)
+	}
 	s.onAttach = func() { attachToInputDesktop() }
 	s.onDisplay = func(_ int, b image.Rectangle) {
 		ss.setBounds(displayRect{x: b.Min.X, y: b.Min.Y, w: b.Dx(), h: b.Dy()})
@@ -375,6 +279,18 @@ func (sm *screenManager) screen2Layers(m protocol.Screen2Layers) {
 	if ss != nil {
 		if s := ss.getS2(); s != nil {
 			s.SetLayers(m.Layers, m.Key)
+		}
+	}
+}
+
+// screen2Feedback, sunucunun geri bildirimini oturuma iletir.
+func (sm *screenManager) screen2Feedback(m protocol.Screen2Feedback) {
+	sm.mu.Lock()
+	ss := sm.sessions[m.SessionID]
+	sm.mu.Unlock()
+	if ss != nil {
+		if s := ss.getS2(); s != nil {
+			s.Feedback(m, time.Now())
 		}
 	}
 }

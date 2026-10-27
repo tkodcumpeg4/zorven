@@ -148,6 +148,9 @@ onMounted(load)
         </p>
       </section>
 
+      <!-- Tam ağ katmanı (Mod B) nasıl açılır -->
+      <NetHowtoCard />
+
       <!-- Kaynaklar -->
       <section class="rounded-xl border border-line bg-surface p-5">
         <h2 class="text-sm font-semibold text-fg">{{ t('network.resources') }}</h2>

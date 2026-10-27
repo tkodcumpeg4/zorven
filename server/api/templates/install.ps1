@@ -103,6 +103,29 @@ try {
     return
 }
 
+# 4b. wintun.dll (Windows tam ag katmani / Mod B): manifest sha256 + Authenticode ile dogrula.
+# Basarisizlik kurulumu durdurmaz; servis 'zorven net up' sirasinda imzali manifestle yeniden dener.
+if ($arch -eq "amd64" -or $arch -eq "arm64") {
+    try {
+        $mfJson = (New-Object System.Net.WebClient).DownloadString("${scheme}://$Server/bin/manifest.json")
+        $mf = $mfJson | ConvertFrom-Json
+        $entry = $mf.files."windows/$arch+wintun"
+        if ($entry -and $entry.name -match '^wintun-(amd64|arm64)\.dll$') {
+            $tmpDll = Join-Path $installDir "wintun.dll.tmp"
+            (New-Object System.Net.WebClient).DownloadFile("${scheme}://$Server/bin/$($entry.name)", $tmpDll)
+            $gotSha = (Get-FileHash -Algorithm SHA256 $tmpDll).Hash.ToLower()
+            $sig = Get-AuthenticodeSignature $tmpDll
+            if ($gotSha -ne $entry.sha256) { throw "sha256 uyusmuyor" }
+            if ($sig.Status -ne "Valid") { throw "Authenticode imzasi gecersiz ($($sig.Status))" }
+            Move-Item -Force $tmpDll "$installDir\wintun.dll"
+            Write-Host "   [OK] wintun.dll (tam ag katmani) hazir." -ForegroundColor Green
+        }
+    } catch {
+        Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $installDir "wintun.dll.tmp")
+        Write-Host "   [UYARI] wintun.dll indirilemedi/dogrulanamadi: $_ (Tam ag katmani icin 'zorven net up' yeniden dener)" -ForegroundColor Yellow
+    }
+}
+
 # 5. PATH ortam degiskenine ekle
 Write-Host "`n2. Sistem PATH ortam degiskeni yapilandiriliyor..." -ForegroundColor Cyan
 $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")

@@ -104,6 +104,7 @@ func newAuthProxy(upstream *url.URL, cache sessionCache, gates ...*memberQuotaGa
 		origDirector(req)
 		req.Host = upstream.Host
 		stripForwardHeaders(req.Header)
+		dropTossedAuthCookies(req)
 	}
 	if cache == nil {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -136,6 +137,39 @@ func newAuthProxy(upstream *url.URL, cache sessionCache, gates ...*memberQuotaGa
 		}
 		proxy.ServeHTTP(w, r)
 	})
+}
+
+// dropTossedAuthCookies, cerez atma korumasi: ayni Better Auth cerez adi farkli
+// degerlerle birden cok kez geldiyse (alt alandan atilmis cerez + kurbaninki)
+// Better Auth'a hicbir Better Auth cerezi iletilmez; istek oturumsuz islenir.
+// (Go API tarafindaki karsiligi: auth.SessionCookieValue.)
+func dropTossedAuthCookies(req *http.Request) {
+	cs := req.Cookies()
+	seen := map[string]string{}
+	tossed := false
+	for _, c := range cs {
+		if !isBetterAuthCookie(c.Name) {
+			continue
+		}
+		if v, ok := seen[c.Name]; ok && v != c.Value {
+			tossed = true
+			break
+		}
+		seen[c.Name] = c.Value
+	}
+	if !tossed {
+		return
+	}
+	req.Header.Del("Cookie")
+	for _, c := range cs {
+		if !isBetterAuthCookie(c.Name) {
+			req.AddCookie(&http.Cookie{Name: c.Name, Value: c.Value})
+		}
+	}
+}
+
+func isBetterAuthCookie(name string) bool {
+	return strings.Contains(name, "better-auth.") || strings.HasPrefix(name, "__Host-zorven.")
 }
 
 // stripForwardHeaders, istemcinin gonderdigi (uydurulabilir) iletim basliklarini

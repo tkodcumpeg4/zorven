@@ -45,8 +45,16 @@ const (
 	// ResourcePath, korunan kaynagin (MCP) yolu.
 	ResourcePath = "/mcp"
 
-	codeTTL         = 60 * time.Second
-	refreshTTL      = 30 * 24 * time.Hour
+	codeTTL    = 60 * time.Second
+	refreshTTL = 30 * 24 * time.Hour
+	// Tam erisim (full) kisa omurludur: access 30 dk, refresh 7 gun (kayan), ve
+	// grant 30 gunden eskiyse yenileme reddedilir (yeniden onay + yeniden giris).
+	FullAccessTTL   = 30 * time.Minute
+	FullRefreshTTL  = 7 * 24 * time.Hour
+	FullGrantMaxAge = 30 * 24 * time.Hour
+	// StepUpMaxAge, "full" onayi icin panel oturumunun en fazla ne kadar once
+	// (parola/2FA ile) acilmis olabilecegi.
+	StepUpMaxAge    = 5 * time.Minute
 	grantCacheTTL   = 30 * time.Second
 	maxClients      = 20000
 	maxRedirectURIs = 10
@@ -58,6 +66,19 @@ type Session struct {
 	UserID string
 	Email  string
 	Name   string
+	// AuthTime, bu oturumun ACILDIGI an (Better Auth session.createdAt). Yeniden
+	// giris yeni oturum acar; bu yuzden "taze giris" = AuthTime son StepUpMaxAge
+	// icinde. Sifir deger = bilinmiyor = taze DEGIL.
+	AuthTime time.Time
+}
+
+// fresh, oturum "full" icin yeterince taze acilmis mi.
+func (s Session) fresh(now time.Time) bool {
+	if s.AuthTime.IsZero() {
+		return false
+	}
+	age := now.Sub(s.AuthTime)
+	return age >= -time.Minute && age <= StepUpMaxAge
 }
 
 // Org, kullanicinin uye oldugu organizasyon.
@@ -90,7 +111,18 @@ type Config struct {
 	Audit func(tenantID, actor, ip, action, target, detail string)
 	// RegisterLimiter / TokenLimiter, IP basina hiz sinirlari (nil ise sinirsiz).
 	RegisterLimiter *ratelimit.Limiter
-	TokenLimiter    *ratelimit.Limiter
+	// RegisterGlobalLimiter, anonim dinamik istemci kaydinin (RFC 7591) TUM
+	// kaynaklar icin ortak tavani (anahtar "*"): dagitik/IPv6 adresleriyle IP
+	// basina siniri asan saldirgan istemci tavanini (maxClients) doldurup yeni
+	// MCP kayitlarini durduramasin. nil = yok.
+	RegisterGlobalLimiter *ratelimit.Limiter
+	TokenLimiter          *ratelimit.Limiter
+	// ResolveResource, bir MCP tunel kaynaginin ("host/yol" anahtari) ayarini cozer.
+	// nil ise yalnizca Zorven yonetim kaynagi (/mcp) yetkilendirilebilir.
+	ResolveResource func(ctx context.Context, resourceKey string) (ResourceInfo, bool)
+	// UserInfo, kullanicinin DOGRULANMIS e-postasini ve verilen kiracinin uyesi olup
+	// olmadigini doner (tunel kaynaklarinda erisim karari icin). Hata = erisim yok.
+	UserInfo func(ctx context.Context, tenantID, userID string) (email string, member bool, err error)
 	// Now, test icin saat.
 	Now func() time.Time
 }
@@ -348,7 +380,8 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		oauthErr(w, http.StatusMethodNotAllowed, "invalid_request", "POST gerekli")
 		return
 	}
-	if s.cfg.RegisterLimiter != nil && !s.cfg.RegisterLimiter.Allow(s.ip(r)) {
+	if (s.cfg.RegisterLimiter != nil && !s.cfg.RegisterLimiter.Allow(s.ip(r))) ||
+		(s.cfg.RegisterGlobalLimiter != nil && !s.cfg.RegisterGlobalLimiter.Allow("*")) {
 		w.Header().Set("Retry-After", "60")
 		oauthErr(w, http.StatusTooManyRequests, "temporarily_unavailable", "cok fazla kayit denemesi")
 		return
@@ -454,6 +487,8 @@ func cleanName(s string) string {
 // --- yetkilendirme istegi ----------------------------------------------------
 
 type authzReq struct {
+	// Tunnel, resource bir MCP tunel kaynagi ise cozumlenmis ozeti (yonetim kaynaginda nil).
+	Tunnel      *ResourceInfo
 	Client      Client
 	RedirectURI string
 	State       string
@@ -521,18 +556,40 @@ func (s *Server) parseAuthz(r *http.Request, v url.Values) (*authzReq, *authzErr
 	want := s.Resource(r)
 	res := v.Get("resource")
 	if res == "" {
-		res = want // RFC 8707: istemci vermediyse tek kaynagimiza baglariz
+		res = want // RFC 8707: istemci vermediyse yonetim kaynagimiza baglariz
 	}
-	if strings.TrimRight(res, "/") != want {
-		return req, &authzErr{"invalid_target", "resource bu sunucunun MCP kaynagi olmali: " + want, true}
-	}
-	req.Resource = want
-	scopes, unknown := ParseScopes(v.Get("scope"))
-	if unknown != "" {
-		return req, &authzErr{"invalid_scope", "bilinmeyen kapsam: " + unknown, true}
-	}
-	if len(scopes) == 0 {
-		scopes = []string{ScopeMCPRead}
+	var scopes []string
+	var unknown string
+	if strings.TrimRight(res, "/") == want {
+		req.Resource = want
+		scopes, unknown = ParseScopes(v.Get("scope"))
+		if unknown != "" {
+			return req, &authzErr{"invalid_scope", "bilinmeyen kapsam: " + unknown, true}
+		}
+		if hasScope(scopes, ScopeTunnelAccess) {
+			return req, &authzErr{"invalid_scope", "'mcp' kapsami yalnizca MCP tunel kaynaklari icindir", true}
+		}
+		if len(scopes) == 0 {
+			scopes = []string{ScopeMCPRead}
+		}
+	} else {
+		info, canon, ok := s.resolveTunnel(r.Context(), res)
+		if !ok {
+			return req, &authzErr{"invalid_target", "resource taninmayan veya OAuth korumasi olmayan bir MCP kaynagi", true}
+		}
+		req.Tunnel, req.Resource = &info, canon
+		scopes, unknown = ParseScopes(v.Get("scope"))
+		if unknown != "" {
+			return req, &authzErr{"invalid_scope", "bilinmeyen kapsam: " + unknown, true}
+		}
+		if len(scopes) == 0 {
+			scopes = []string{ScopeTunnelAccess}
+		}
+		for _, sc := range scopes {
+			if sc != ScopeTunnelAccess {
+				return req, &authzErr{"invalid_scope", "MCP tunel kaynaklari yalnizca 'mcp' kapsamini destekler", true}
+			}
+		}
 	}
 	req.Scopes = scopes
 	return req, nil
@@ -633,6 +690,21 @@ func validVerifier(v string) bool {
 	return true
 }
 
+func (s *Server) revokeClientGrants(ctx context.Context, code Code, now time.Time) {
+	if code.ClientID == "" || code.UserID == "" {
+		return
+	}
+	gs, err := s.cfg.Store.ListGrants(ctx, code.UserID, "")
+	if err != nil {
+		return
+	}
+	for _, g := range gs {
+		if g.ClientID == code.ClientID && g.Active() {
+			_ = s.cfg.Store.RevokeGrant(ctx, g.ID, now)
+		}
+	}
+}
+
 func (s *Server) tokenCode(w http.ResponseWriter, r *http.Request) {
 	f := r.PostForm
 	ctx := r.Context()
@@ -647,6 +719,12 @@ func (s *Server) tokenCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	code, err := s.cfg.Store.ConsumeCode(ctx, hashToken(f.Get("code")), now)
+	if errors.Is(err, ErrUsed) {
+		// RFC 6749 4.1.2: kod ikinci kez kullanildiysa (calinmis olabilir) bu
+		// kodla verilmis yetkiler iptal edilir. Kod-grant eslemesi tutulmadigi
+		// icin ayni kullanicinin bu istemciye verdigi aktif grant'lar iptal edilir.
+		s.revokeClientGrants(ctx, code, now)
+	}
 	if err != nil {
 		oauthErr(w, http.StatusBadRequest, "invalid_grant", "kod gecersiz, suresi dolmus veya kullanilmis")
 		return
@@ -664,17 +742,20 @@ func (s *Server) tokenCode(w http.ResponseWriter, r *http.Request) {
 		oauthErr(w, http.StatusBadRequest, "invalid_grant", "PKCE dogrulamasi basarisiz")
 		return
 	}
-	if res := f.Get("resource"); res != "" && strings.TrimRight(res, "/") != code.Resource {
+	if res := f.Get("resource"); res != "" && canonResourceURL(res) != canonResourceURL(code.Resource) {
 		oauthErr(w, http.StatusBadRequest, "invalid_target", "resource yetkilendirme istegiyle eslesmiyor")
 		return
 	}
 	g := Grant{ID: randID("zog_"), UserID: code.UserID, TenantID: code.TenantID, ClientID: code.ClientID,
-		Resource: code.Resource, Scope: code.Scope, CreatedAt: now.UTC()}
+		Resource: code.Resource, Scope: code.Scope, CreatedAt: now.UTC(), StepUpAt: code.StepUpAt}
 	if err := s.cfg.Store.CreateGrant(ctx, g); err != nil {
 		oauthErr(w, http.StatusInternalServerError, "server_error", "grant olusturulamadi")
 		return
 	}
 	s.audit(g.TenantID, "oauth:"+g.UserID, s.ip(r), "oauth.grant", g.ID, "client="+g.ClientID+" scope="+g.Scope)
+	if g.IsFull() {
+		s.audit(g.TenantID, "oauth:"+g.UserID, s.ip(r), "oauth.full_grant", g.ID, "client="+g.ClientID+" step_up_at="+fmtTime(g.StepUpAt))
+	}
 	s.issue(w, r, g, g.Scope)
 }
 
@@ -707,8 +788,16 @@ func (s *Server) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 		oauthErr(w, http.StatusBadRequest, "invalid_grant", "yetki iptal edilmis veya istemci eslesmiyor")
 		return
 	}
-	if res := f.Get("resource"); res != "" && strings.TrimRight(res, "/") != g.Resource {
+	if res := f.Get("resource"); res != "" && canonResourceURL(res) != canonResourceURL(g.Resource) {
 		oauthErr(w, http.StatusBadRequest, "invalid_target", "resource eslesmiyor")
+		return
+	}
+	if g.IsFull() && now.Sub(g.CreatedAt) > FullGrantMaxAge {
+		// Tam erisim kayan yenilemeyle sonsuza uzamaz: 30 gunde bir yeniden onay + yeniden giris.
+		_ = s.cfg.Store.RevokeGrant(ctx, gid, now)
+		s.forget(gid)
+		s.audit(g.TenantID, "oauth:"+g.UserID, s.ip(r), "oauth.full_expired", gid, "client="+g.ClientID)
+		oauthErr(w, http.StatusBadRequest, "invalid_grant", "tam erisim yetkisinin omru doldu; yeniden onaylayin")
 		return
 	}
 	scope := g.Scope
@@ -727,16 +816,24 @@ func (s *Server) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 // issue, access token + yeni refresh token uretir ve yaniti yazar.
 func (s *Server) issue(w http.ResponseWriter, r *http.Request, g Grant, scope string) {
 	now := s.cfg.Now()
+	accessTTL, rtTTL := AccessTokenTTL, refreshTTL
+	if g.IsFull() {
+		// Grant tam erisim tasiyorsa (token daraltilmis olsa da) omurler kisa tutulur.
+		rtTTL = FullRefreshTTL
+		if sc, _ := ParseScopes(scope); HasFull(sc) {
+			accessTTL = FullAccessTTL
+		}
+	}
 	tok, err := signJWT(s.priv, claims{
 		Iss: s.Issuer(r), Sub: g.UserID, Aud: g.Resource, Scope: scope, Tid: g.TenantID,
-		Gid: g.ID, Cid: g.ClientID, Iat: now.Unix(), Exp: now.Add(AccessTokenTTL).Unix(), Jti: randToken(12),
+		Gid: g.ID, Cid: g.ClientID, Iat: now.Unix(), Exp: now.Add(accessTTL).Unix(), Jti: randToken(12),
 	})
 	if err != nil {
 		oauthErr(w, http.StatusInternalServerError, "server_error", "token uretilemedi")
 		return
 	}
 	refresh := "zor_rt_" + randToken(32)
-	if err := s.cfg.Store.SaveRefresh(r.Context(), hashToken(refresh), g.ID, now.Add(refreshTTL)); err != nil {
+	if err := s.cfg.Store.SaveRefresh(r.Context(), hashToken(refresh), g.ID, now.Add(rtTTL)); err != nil {
 		oauthErr(w, http.StatusInternalServerError, "server_error", "refresh token saklanamadi")
 		return
 	}
@@ -745,7 +842,7 @@ func (s *Server) issue(w http.ResponseWriter, r *http.Request, g Grant, scope st
 	writeJSON(w, http.StatusOK, map[string]any{
 		"access_token":  tok,
 		"token_type":    "Bearer",
-		"expires_in":    int(AccessTokenTTL.Seconds()),
+		"expires_in":    int(accessTTL.Seconds()),
 		"refresh_token": refresh,
 		"scope":         scope,
 	})
@@ -817,6 +914,11 @@ type Principal struct {
 	// Scopes, OAuth kapsamlari; APIScopes bunlarin REST kapsamlarina genislemis hali.
 	Scopes    []string
 	APIScopes []string
+	// Full, token "full" (tam erisim) kapsamini tasiyor: API katmani bu kimligi
+	// kullanicinin panel oturumuyla ayni yetkiyle isler (allowlist asilir, rol/politika
+	// kapilari AYNEN gecerli). StepUpAt, onayin dayandigi taze giris zamani.
+	Full     bool
+	StepUpAt *time.Time
 }
 
 type principalKey struct{}
@@ -858,7 +960,7 @@ func (s *Server) Authenticate(r *http.Request, raw string) (Principal, error) {
 		return Principal{}, ErrInvalidToken
 	}
 	return Principal{UserID: c.Sub, TenantID: c.Tid, GrantID: c.Gid, ClientID: c.Cid, ClientName: g.ClientName,
-		Scopes: scopes, APIScopes: APIScopes(scopes)}, nil
+		Scopes: scopes, APIScopes: APIScopes(scopes), Full: HasFull(scopes), StepUpAt: g.StepUpAt}, nil
 }
 
 func (s *Server) grantCached(ctx context.Context, id string, now time.Time) (Grant, error) {
@@ -880,4 +982,11 @@ func (s *Server) grantCached(ctx context.Context, id string, now time.Time) (Gra
 	s.mu.Unlock()
 	_ = s.cfg.Store.TouchGrant(ctx, id, now)
 	return g, nil
+}
+
+func fmtTime(t *time.Time) string {
+	if t == nil {
+		return "-"
+	}
+	return t.UTC().Format(time.RFC3339)
 }

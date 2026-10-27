@@ -30,6 +30,14 @@ const (
 	FeatureWebDoor       Feature = "web_door"       // ham TCP/UDP web ile kapi acma (acikta her zaman acik)
 )
 
+// FeatureTunnelSecurity, tunel WAF engelleme kipi + ulke (Geo) kurallari. Acikta
+// her zaman acik (CheckFeature no-op).
+const FeatureTunnelSecurity Feature = "tunnel_security"
+
+// ProOrAbove, plan kimliginin "Pro ve uzeri" olup olmadigi. Acik surumde plan
+// siniri yoktur: her plan kimligi icin true doner.
+func ProOrAbove(string) bool { return true }
+
 // ScreenStreamSpec, ekran yayini parametreleri. Cekirdekte sinirsiz/1080p.
 type ScreenStreamSpec struct {
 	MaxFPS        int    `json:"max_fps"`

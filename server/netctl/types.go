@@ -141,6 +141,18 @@ type Hooks struct {
 	Audit func(tenantID, actor, action, target, detail string)
 	// Enrich: dugum kimligine ek bilgi (etiket) ekler.
 	Enrich func(ctx context.Context, tenantID string, sub *Subject)
+	// Prepare (Z2): kiraci durumu ilk yuklenirken cagrilir (m.mu altinda; DB
+	// erisimi serbest). Gate'in bellek anlik goruntusunu isitmak icin.
+	Prepare func(ctx context.Context, tenantID string)
+	// Gate (Z2): paylasim ACL'ine EK cihaz-baglami kapisi (posture, zaman penceresi).
+	// ownerClientID = paylasimi yayinlayan cihaz (kaynak). false ise dugum o
+	// paylasimdan GORUNMEZ. m.mu altinda cagrilir: SAF BELLEK olmali, DB/ag yok.
+	Gate func(tenantID, ownerClientID string, sub Subject) bool
+	// TunRules (W3/Z5): ek Mod B kurallari (ticari katman resource politikalarindan
+	// turetir). tunClients = o an Mod B'de (TUN) ve cevrimici cihaz kimlikleri.
+	// Kilit altinda cagrilir: hizli ve bloklamasiz (SAF BELLEK) olmali. Donen
+	// kurallarin Origin alani dolu olmali (SrcDevices/DstDevices ile eslesir).
+	TunRules func(tenantID string, tunClients []string) []TunRule
 }
 
 // NodeInfo, dis dunyaya (API) gosterilen dugum goruntusu.
@@ -155,6 +167,11 @@ type NodeInfo struct {
 	LastSeen time.Time `json:"last_seen,omitempty"`
 	// Iletilen bayt (relay sayaci, yalniz teshis).
 	RelayedBytes int64 `json:"relayed_bytes"`
+	// Tun (W3): dugum Mod B'de (OS TUN, tam ag katmani).
+	Tun bool `json:"tun,omitempty"`
+	// Path (W2, yalniz ShareInfo.Connected'ta): paylasim sahibiyle yol: direct | relay | "".
+	Path  string `json:"path,omitempty"`
+	RTTMs int    `json:"rtt_ms,omitempty"`
 }
 
 // ShareInfo, API goruntusu: share + canli durum.
@@ -165,4 +182,6 @@ type ShareInfo struct {
 	OwnerOnline bool   `json:"owner_online"`
 	// Connected: simdi cevrimici olan, bu paylasima erisebilen dugumler.
 	Connected []NodeInfo `json:"connected"`
+	// Path (W2): bagli alicilarin yol ozeti: direct | relay | mixed | "".
+	Path string `json:"path,omitempty"`
 }

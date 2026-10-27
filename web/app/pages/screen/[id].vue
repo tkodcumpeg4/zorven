@@ -1,5 +1,9 @@
 <script setup lang="ts">
 import type { ScreenCursorPos, ScreenFilesState, ScreenHandle, ScreenInputStatus, ScreenStats, ScreenViewerState } from '~/composables/useScreen'
+import type { AgentStats, BrowserPerf } from '~/lib/screenPerf'
+import { STAGE_KEYS, effectiveQuality, findBottleneck, fmtMs, layerTargetFps } from '~/lib/screenPerf'
+import type { VideoInfo, VideoPref } from '~/lib/screenVideo'
+import { loadVideoPref, saveVideoPref } from '~/lib/screenVideo'
 import { FileTransferError, MAX_FILE_BYTES } from '~/composables/useScreenFiles'
 import type { RemoteFile } from '~/composables/useScreenFiles'
 
@@ -9,6 +13,19 @@ const clientID = route.params.id as string
 const { connect, sendInput } = useScreen()
 const { openUpgrade, formatBytes } = useBilling()
 const { t } = useI18n()
+
+// Istemci Windows servisi mi? Servisler (oturum 0) ekrani yakalayamaz.
+const isWinService = ref(false)
+const isWinClient = ref(false)
+async function loadClientInfo() {
+  try {
+    const list = await useApi().listClients()
+    const c = list.find(x => x.id === clientID)
+    isWinClient.value = (c?.os || '').toLowerCase() === 'windows'
+    isWinService.value = isWinClient.value && !!c?.is_service
+  } catch { /* bilgi alinamadi: bildirim gosterilmez */ }
+}
+const showServiceNotice = computed(() => isWinService.value || (isWinClient.value && state.value === 'error'))
 
 const img = ref<HTMLImageElement>()
 const video = ref<HTMLVideoElement>()
@@ -353,6 +370,35 @@ const inputBadge = computed(() => {
   return map[st] ?? map.unknown
 })
 const showStats = ref(false)
+
+// --- Performans katmani (varsayilan kapali; tercih localStorage'da) ---------
+// H.264 video modu (screen2_video): tercih + durum (bkz. lib/screenVideo.ts).
+const videoMode = ref<VideoPref>('auto')
+const videoInfo = ref<VideoInfo | null>(null)
+watch(videoMode, (m) => { saveVideoPref(m); handle?.sendVideoMode(m) })
+
+const PERF_KEY = 'zorven.screen.perf'
+const showPerf = ref(false)
+const agentStats = ref<AgentStats | null>(null)
+function loadPerfPref() {
+  try { showPerf.value = localStorage.getItem(PERF_KEY) === '1' } catch { /* yok say */ }
+}
+function togglePerf() {
+  showPerf.value = !showPerf.value
+  try { localStorage.setItem(PERF_KEY, showPerf.value ? '1' : '0') } catch { /* yok say */ }
+}
+const browserPerf = computed<BrowserPerf | null>(() => {
+  const s = stats.value
+  if (!s) return null
+  return { recvFps: s.fps, drawFps: s.drawFps, decodeMs: s.decodeMs, queueDepth: s.queueDepth, recvKBps: Math.round(s.kbps / 8) }
+})
+const bottleneck = computed(() => findBottleneck(agentStats.value, browserPerf.value))
+const perfInterval = computed(() => 1000 / Math.max((agentStats.value ? layerTargetFps(agentStats.value) : 0) || 30, 1))
+const perfQuality = computed(() => (agentStats.value ? effectiveQuality(agentStats.value) : null))
+const perfTargetFps = computed(() => (agentStats.value ? layerTargetFps(agentStats.value) : 0))
+function stageBar(avg: number): string {
+  return Math.min(100, Math.round((avg / perfInterval.value) * 100)) + '%'
+}
 // Katmanli yayin: bu izleyicinin kendi etkin durumu (null => eski yayin, ortak ayar).
 const viewerState = ref<ScreenViewerState | null>(null)
 const layerLabel = computed(() => {
@@ -398,7 +444,7 @@ const nativeH = ref(0)
 const frameW = ref(0) // su an gelen karenin boyutu
 const frameH = ref(0)
 const selectedWidth = ref(0) // 0 => tam cozunurluk
-const selectedFps = ref(15) // hedef kare hizi (sunucu 30'da sinirlar)
+const selectedFps = ref(30) // hedef kare hizi (sunucu 30'da sinirlar; ajan agda otomatik dusurur)
 const FPS_OPTIONS = [5, 10, 15, 20, 30]
 
 // Yaygin en-boy oranlari icin standart yukseklik merdivenleri.
@@ -609,8 +655,20 @@ function onKey(kind: string, e: KeyboardEvent) {
   })
 }
 
-function onKeyDown(e: KeyboardEvent) { if (control.value) onKey('keydown', e) }
-function onKeyUp(e: KeyboardEvent) { if (control.value) onKey('keyup', e) }
+function onKeyDown(e: KeyboardEvent) {
+  // Yerel kisayol: Alt+Shift+P performans katmanini acar/kapatir (uzak makineye gitmez).
+  if (e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey && e.code === 'KeyP') {
+    e.preventDefault()
+    e.stopPropagation()
+    if (!e.repeat) togglePerf()
+    return
+  }
+  if (control.value) onKey('keydown', e)
+}
+function onKeyUp(e: KeyboardEvent) {
+  if (e.altKey && e.shiftKey && e.code === 'KeyP') return
+  if (control.value) onKey('keyup', e)
+}
 
 /**
  * Odak kaybinda basili modifier'lari birak.
@@ -637,6 +695,8 @@ async function open(maxWidth: number) {
   codec.value = ''
   errorMsg.value = ''
   stats.value = null // yeni oturum: eski sayaclar yaniltmasin
+  agentStats.value = null
+  videoInfo.value = null
   inputStatus.value = null
   viewerState.value = null
   viewers.value = null
@@ -685,6 +745,9 @@ async function open(maxWidth: number) {
         nativeH.value = h
       },
       onStats: (s) => { stats.value = s },
+      onAgentStats: (a) => { agentStats.value = a },
+      videoMode: () => videoMode.value,
+      onVideoInfo: (i) => { videoInfo.value = i },
       onInputStatus: onInputStatusMsg,
       onCaps: (c) => { caps.value = c },
       onFiles: (f) => { filesState.value = f },
@@ -756,10 +819,13 @@ function onQualityChange() {
 let resizeObs: ResizeObserver | null = null
 
 onMounted(async () => {
+  loadPerfPref()
+  videoMode.value = loadVideoPref()
   window.addEventListener('keydown', onKeyDown, true)
   window.addEventListener('keyup', onKeyUp, true)
   // Sekme/pencere odagi kaybolunca basili modifier'lari birak (Alt+Tab).
   window.addEventListener('blur', releaseModifiers)
+  void loadClientInfo()
   await nextTick()
   if (typeof ResizeObserver !== 'undefined' && stage.value) {
     resizeObs = new ResizeObserver(schedulePlaceCursor)
@@ -834,6 +900,9 @@ onUnmounted(() => {
           </select>
         </label>
 
+        <!-- Karo / video (H.264) modu -->
+        <ScreenVideoControl v-if="isScreen2" v-model="videoMode" :info="videoInfo" />
+
         <!-- Cozunurluk: uzak ekranin en-boy oranina gore uretilen secenekler -->
         <label v-if="nativeW" class="flex items-center gap-1.5">
           <span class="sr-only">{{ t('screen.resolution') }}</span>
@@ -871,6 +940,18 @@ onUnmounted(() => {
         >
           {{ frameW }}×{{ frameH }} · {{ ratioLabel }}
         </span>
+
+        <!-- Performans katmani: ajan + tarayici olcumleri -->
+        <button
+          type="button"
+          class="flex cursor-pointer items-center gap-1.5 rounded border px-2.5 py-1.5 font-mono text-[11px] transition-colors duration-150 hover:bg-surface"
+          :class="showPerf ? 'border-accent text-accent' : 'border-line text-fg-subtle'"
+          :aria-pressed="showPerf"
+          :title="t('screen.perf.toggleHint')"
+          @click="togglePerf"
+        >
+          <Icon name="lucide:gauge" class="size-3.5" aria-hidden="true" />{{ t('screen.perf.toggle') }}
+        </button>
 
         <!-- Akis metrikleri: rozet ozet, tiklayinca ayrinti paneli -->
         <button
@@ -1264,6 +1345,15 @@ onUnmounted(() => {
     </div>
 
     <div
+      v-if="showServiceNotice"
+      class="flex items-start gap-2 rounded-lg border border-line bg-surface px-4 py-3 text-sm text-fg"
+      role="status"
+    >
+      <Icon name="lucide:info" class="mt-0.5 size-4 shrink-0" />
+      <span>{{ t('screen.serviceMode') }}</span>
+    </div>
+
+    <div
       v-if="state === 'error'"
       class="flex items-center justify-between gap-3 rounded-lg border border-danger/30 bg-danger/10 px-4 py-3 text-sm text-danger"
       role="alert"
@@ -1308,6 +1398,103 @@ onUnmounted(() => {
       >
         <img v-if="cursorShape" :src="cursorShape.url" alt="" draggable="false" class="size-full select-none">
         <Icon v-else name="lucide:mouse-pointer-2" class="size-full text-white drop-shadow" />
+      </div>
+
+      <!-- Performans katmani (ajan istatistigi + tarayici olcumleri) -->
+      <div
+        v-if="showPerf"
+        class="absolute right-2 top-2 z-30 w-72 max-w-[calc(100%-1rem)] cursor-default rounded-lg border border-white/15 bg-black/80 p-3 font-mono text-[11px] text-white/90 shadow-lg backdrop-blur"
+        role="region"
+        :aria-label="t('screen.perf.title')"
+        @pointerdown.stop
+        @pointermove.stop
+        @pointerup.stop
+        @wheel.stop
+      >
+        <div class="mb-2 flex items-center justify-between gap-2">
+          <p class="flex items-center gap-1.5 font-semibold">
+            <Icon name="lucide:gauge" class="size-3.5" aria-hidden="true" />{{ t('screen.perf.title') }}
+          </p>
+          <button type="button" class="cursor-pointer text-white/60 hover:text-white" :aria-label="t('screen.perf.close')" @click="togglePerf">
+            <Icon name="lucide:x" class="size-3.5" aria-hidden="true" />
+          </button>
+        </div>
+
+        <template v-if="agentStats">
+          <p class="mb-1 text-white/50">{{ t('screen.perf.agent') }}</p>
+          <dl class="mb-2 grid grid-cols-[1fr_auto] gap-x-3 gap-y-0.5">
+            <dt class="text-white/60">{{ t('screen.perf.method') }}</dt>
+            <dd>{{ agentStats.method || '—' }}</dd>
+            <dt class="text-white/60">{{ t('screen.perf.resolution') }}</dt>
+            <dd>{{ agentStats.src_w }}×{{ agentStats.src_h }} → {{ agentStats.w }}×{{ agentStats.h }}</dd>
+            <dt class="text-white/60">{{ t('screen.perf.sentFps') }}</dt>
+            <dd>{{ agentStats.fps }} / {{ perfTargetFps }}<span class="text-white/50"> ({{ agentStats.max_fps }})</span></dd>
+            <template v-if="agentStats.srv">
+              <dt class="text-white/60">{{ t('screen.perf.delivered') }}</dt>
+              <dd :class="agentStats.srv.skipped > 0 ? 'text-amber-300' : ''">
+                {{ agentStats.srv.fps }} / {{ agentStats.srv.skipped }}<span v-if="agentStats.srv.queue_ms" class="text-white/50"> · {{ agentStats.srv.queue_ms }} ms</span>
+              </dd>
+              <dt class="text-white/60">{{ t('screen.perf.feedback') }}</dt>
+              <dd>{{ agentStats.srv.feedback ? t('screen.perf.feedbackOn') : t('screen.perf.feedbackOff') }}</dd>
+            </template>
+            <dt class="text-white/60">{{ t('screen.perf.captureFps') }}</dt>
+            <dd>{{ agentStats.capture_fps }}</dd>
+            <dt class="text-white/60">{{ t('screen.perf.quality') }}</dt>
+            <dd>{{ perfQuality ? perfQuality.value : agentStats.quality }}<span v-if="perfQuality && perfQuality.ceiling" class="text-white/50"> ({{ perfQuality.ceiling }})</span></dd>
+            <dt class="text-white/60">{{ t('screen.perf.bitrate') }}</dt>
+            <dd>{{ agentStats.kbps }} KB/s</dd>
+            <dt class="text-white/60">{{ t('screen.perf.merged') }} / {{ t('screen.perf.idle') }}</dt>
+            <dd>{{ agentStats.merged }} / {{ agentStats.idle }}</dd>
+          </dl>
+          <table class="mb-2 w-full">
+            <thead>
+              <tr class="text-left text-white/50">
+                <th class="font-normal">{{ t('screen.perf.stage') }}</th>
+                <th class="text-right font-normal">{{ t('screen.perf.avg') }}</th>
+                <th class="text-right font-normal">{{ t('screen.perf.p95') }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template v-for="k in STAGE_KEYS" :key="k">
+                <tr :class="bottleneck.slowest === k ? 'text-amber-300' : ''">
+                  <td>{{ t('screen.perf.stages.' + k) }}</td>
+                  <td class="text-right">{{ fmtMs(agentStats[k].avg) }}</td>
+                  <td class="text-right">{{ fmtMs(agentStats[k].p95) }}</td>
+                </tr>
+                <tr aria-hidden="true">
+                  <td colspan="3" class="pb-1">
+                    <div class="h-0.5 w-full rounded bg-white/10">
+                      <div class="h-0.5 rounded" :class="bottleneck.slowest === k ? 'bg-amber-300' : 'bg-white/50'" :style="{ width: stageBar(agentStats[k].avg) }" />
+                    </div>
+                  </td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </template>
+        <p v-else class="mb-2 text-white/60">{{ t('screen.perf.noAgent') }}</p>
+
+        <ScreenVideoPerf :info="videoInfo" :agent="agentStats" />
+
+        <template v-if="stats">
+          <p class="mb-1 text-white/50">{{ t('screen.perf.browser') }}</p>
+          <dl class="mb-2 grid grid-cols-[1fr_auto] gap-x-3 gap-y-0.5">
+            <dt class="text-white/60">{{ t('screen.perf.recvFps') }}</dt>
+            <dd>{{ stats.fps }}</dd>
+            <dt class="text-white/60">{{ t('screen.perf.drawFps') }}</dt>
+            <dd>{{ stats.drawFps }}</dd>
+            <dt class="text-white/60">{{ t('screen.perf.decodeMs') }}</dt>
+            <dd>{{ fmtMs(stats.decodeMs) }}</dd>
+            <dt class="text-white/60">{{ t('screen.perf.queue') }}</dt>
+            <dd>{{ stats.queueDepth }}</dd>
+            <dt class="text-white/60">{{ t('screen.perf.recvRate') }}</dt>
+            <dd>{{ kbPerSec }} KB/s</dd>
+          </dl>
+        </template>
+
+        <p class="border-t border-white/15 pt-2" :class="bottleneck.kind === 'none' || bottleneck.kind === 'idle' ? 'text-emerald-300' : 'text-amber-300'">
+          <span class="text-white/50">{{ t('screen.perf.hintLabel') }}:</span> {{ t('screen.perf.hint.' + bottleneck.kind, { sent: bottleneck.sent ?? 0, got: bottleneck.got ?? 0 }) }}
+        </p>
       </div>
 
       <p v-if="state === 'connecting'" class="font-mono text-sm text-fg-subtle">{{ t('screen.waitingScreen') }}</p>

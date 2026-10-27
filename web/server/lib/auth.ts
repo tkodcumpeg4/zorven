@@ -18,6 +18,8 @@ const { Pool } = pg
 // Uretimde eksik gizli anahtar/DSN sessizce gelistirme varsayilanina dusmez:
 // acik hata ile baslatma reddedilir. Gelistirmede uyari loglanir.
 const isProd = process.env.NODE_ENV === "production"
+// HTTPS taban adreste (prod ve https://localhost) oturum cerezleri __Host- oneklidir.
+const hostCookies = (process.env.BETTER_AUTH_URL || "https://localhost:8443").startsWith("https://")
 
 function requireEnvOrDevDefault(value: string | undefined, name: string, devDefault: string): string {
   if (value) return value
@@ -288,6 +290,9 @@ export const auth = betterAuth({
   emailVerification: {
     // Kayit aninda otomatik dogrulama maili gonder.
     sendOnSignUp: true,
+    // Dogrulanmamis kullanici giris denerse dogrulama maili yeniden gider; giris 403
+    // EMAIL_NOT_VERIFIED ile reddedilir (requireEmailVerification acik).
+    sendOnSignIn: true,
     // Kullanici linke tiklayinca otomatik oturum acilsin (tekrar giris gerekmesin).
     autoSignInAfterVerification: true,
     sendVerificationEmail: async ({ user, url }) => {
@@ -355,6 +360,24 @@ export const auth = betterAuth({
     },
   },
   advanced: {
+    // Cerez atma (cookie tossing) korumasi: tuneller panelle ayni kayit alaninda
+    // (<ad>.<platform>) calisir; __Secure- onekli cerezi bir tunel sayfasi
+    // Domain=<platform> ile atabilir. __Host- oneki Domain'i yasaklar, yalniz
+    // panel host'u kendi cerezini yazabilir. Better Auth __Secure- onekini kendisi
+    // ekledigi icin useSecureCookies kapatilir; Secure niteligi elle verilir ve
+    // tum cerez adlari __Host- ile acikca tanimlanir. Go tarafi (server/auth
+    // SessionCookieValue) ayni adi okur.
+    ...(hostCookies
+      ? {
+          useSecureCookies: false,
+          defaultCookieAttributes: { secure: true, path: "/", sameSite: "lax" as const },
+          cookies: Object.fromEntries(
+            ["session_token", "session_data", "account_data", "dont_remember", "two_factor", "trust_device", "state", "oauth_state", "oauth_popup", "admin_session"].map(
+              (n) => [n, { name: `__Host-zorven.${n}` }],
+            ),
+          ),
+        }
+      : {}),
     // Istemci IP'si (hiz siniri + oturum kaydi): Go auth proxy'si gelen
     // X-Forwarded-For'u siler ve yalnizca gercek istemci IP'sini TEK deger
     // olarak yazar (server/authproxy.go). Better Auth tek degerli XFF'ye guvenir;

@@ -92,8 +92,16 @@ type Session struct {
 	// pazarladiysa true (el sikismada yazilir, sonra yalniz okunur).
 	screenCursor    bool
 	screenClipboard bool
+	// screen2Stats, istemci saniyelik canli olcum ozetini pazarladiysa true.
+	screen2Stats bool
+	// screen2Feedback, istemci izleyici teslim geri bildirimini kabul ediyorsa true.
+	screen2Feedback bool
+	// screen2Video, istemci H.264 video modunu (FrameVideo) pazarladiysa true.
+	screen2Video bool
 	// screenFiles, istemci ekran oturumu dosya aktarimini pazarladiysa true.
 	screenFiles bool
+
+	sendHook func(ctx context.Context, v any, t protocol.MessageType) error // testler
 	// Dosya aktarimlari (files.go); fileMu altinda, tembel olusturulur.
 	fileMu   sync.Mutex
 	files    map[uint64]*srvXfer
@@ -140,6 +148,12 @@ type Session struct {
 	netMgr  *netctl.Manager
 	netMu   sync.Mutex
 	netConn *netctl.NodeConn
+	// netPunch: wg_punch (W2 dogrudan yol) pazarlandi.
+	netPunch bool
+	// netTun: wg_tun (W3 Mod B) pazarlandi.
+	netTun bool
+	// netALog: wg_alog (Z5 erisim gunlugu) pazarlandi.
+	netALog bool
 }
 
 func NewSession(id, clientID, clientName, remoteAddr string, conn *websocket.Conn, log *slog.Logger) *Session {
@@ -175,6 +189,9 @@ func (s *Session) LastSeen() time.Time {
 
 // Send, kontrol mesajini JSON metin cercevesi olarak gonderir.
 func (s *Session) Send(ctx context.Context, v any, t protocol.MessageType) error {
+	if s.sendHook != nil { // yalniz testler
+		return s.sendHook(ctx, v, t)
+	}
 	data, err := protocol.Marshal(v, t)
 	if err != nil {
 		return err
@@ -307,6 +324,10 @@ func (s *Session) Run(ctx context.Context) error {
 				s.routeScreen2(data)
 				continue
 			}
+			if frame.FrameType == protocol.FrameVideo {
+				s.routeScreen2Video(data)
+				continue
+			}
 			if frame.FrameType == protocol.FrameFile {
 				s.routeFileData(frame)
 				continue
@@ -345,6 +366,9 @@ func (s *Session) handleControl(ctx context.Context, data []byte) error {
 		}
 		s.handleUDPProbeEcho(m, now)
 
+	case protocol.TypePostureReport, protocol.TypeDeviceCertRequest:
+		return nil // acik surumde durus/cihaz sertifikasi pazarlanmaz: yok say
+
 	case protocol.TypeUDPAgentStats:
 		var m protocol.UDPAgentStats
 		if err := json.Unmarshal(data, &m); err != nil {
@@ -352,7 +376,8 @@ func (s *Session) handleControl(ctx context.Context, data []byte) error {
 		}
 		s.handleUDPAgentStats(m)
 
-	case protocol.TypeNetRegister, protocol.TypeNetResync, protocol.TypeNetShareCreate, protocol.TypeNetShareDelete:
+	case protocol.TypeNetRegister, protocol.TypeNetResync, protocol.TypeNetShareCreate, protocol.TypeNetShareDelete,
+		protocol.TypeNetEndpoints, protocol.TypeNetPunchReq, protocol.TypeNetStatus, protocol.TypeNetMode, protocol.TypeNetAccessLog:
 		return s.handleNet(ctx, t, data)
 
 	case protocol.TypeBye:
@@ -503,7 +528,7 @@ func (s *Session) handleControl(ctx context.Context, data []byte) error {
 			}
 		}
 
-	case protocol.TypeScreenCursor, protocol.TypeScreenCursorShape, protocol.TypeScreenClipboard:
+	case protocol.TypeScreenCursor, protocol.TypeScreenCursorShape, protocol.TypeScreenClipboard, protocol.TypeScreen2Stats:
 		// Bozuk/asiri buyuk mesaj okuma dongusunu dusurmez; yalnizca atilir.
 		s.routeScreenAux(t, data)
 

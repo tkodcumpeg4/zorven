@@ -55,6 +55,23 @@ func (s *Session) Screen2Layers(ctx context.Context, sessionID string,
 	}, protocol.TypeScreen2Layers)
 }
 
+// SupportsScreen2Feedback, istemci izleyici geri bildirimini (screen2_feedback) pazarlamis mi.
+func (s *Session) SupportsScreen2Feedback() bool { return s.screen2 && s.screen2Feedback }
+
+// Screen2Feedback, istemciye izleyici teslim ozetini yollar (en iyi caba).
+func (s *Session) Screen2Feedback(ctx context.Context, sessionID string, windowMs int,
+	layers []protocol.Screen2FeedbackLayer) error {
+	if !s.SupportsScreen2Feedback() {
+		return ErrScreen2Unsupported
+	}
+	if layers == nil {
+		layers = []protocol.Screen2FeedbackLayer{}
+	}
+	return s.Send(ctx, protocol.Screen2Feedback{
+		Type: protocol.TypeScreen2Feedback, SessionID: sessionID, WindowMs: windowMs, Layers: layers,
+	}, protocol.TypeScreen2Feedback)
+}
+
 // layersForOpen, katmanli mod pazarlanmadiysa katman listesini yok sayar.
 func (o Screen2Options) layersForOpen(ok bool) []protocol.Screen2LayerSpec {
 	if !ok {

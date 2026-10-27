@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -13,12 +14,12 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/tkodcumpeg4/zorven/client/agent"
 	"github.com/tkodcumpeg4/zorven/client/config"
+	"github.com/tkodcumpeg4/zorven/client/i18n"
 	"github.com/tkodcumpeg4/zorven/client/localctl"
 	"github.com/tkodcumpeg4/zorven/client/wgnet"
 	"github.com/tkodcumpeg4/zorven/shared/protocol"
@@ -34,10 +35,10 @@ type netConnFlags struct {
 }
 
 func (f *netConnFlags) add(c *cobra.Command) {
-	c.Flags().StringVar(&f.server, "server", "", "Zorven sunucusu (host:port)")
-	c.Flags().StringVar(&f.apiToken, "api-token", "", "API token (ZORVEN_API_TOKEN ile de verilebilir)")
-	c.Flags().BoolVar(&f.insecure, "insecure", false, "TLS yerine ws:// (yalnizca lokal gelistirme)")
-	c.Flags().StringVar(&f.caCert, "ca-cert", "", "self-signed sunucu sertifikasi dosyasi")
+	c.Flags().StringVar(&f.server, "server", "", i18n.T("net.flag.server"))
+	c.Flags().StringVar(&f.apiToken, "api-token", "", i18n.T("net.flag.apitoken"))
+	c.Flags().BoolVar(&f.insecure, "insecure", false, i18n.T("net.flag.insecure"))
+	c.Flags().StringVar(&f.caCert, "ca-cert", "", i18n.T("net.flag.cacert"))
 }
 
 func (f *netConnFlags) resolveServer() (string, bool, string) {
@@ -65,10 +66,10 @@ func (f *netConnFlags) token() (string, error) {
 		t = strings.TrimSpace(os.Getenv("ZORVEN_API_TOKEN"))
 	}
 	if t == "" {
-		return "", fmt.Errorf("API token gerekli: --api-token veya ZORVEN_API_TOKEN (panel > API & Guvenlik, net:read/net:write kapsami)")
+		return "", errors.New(i18n.T("net.err.token"))
 	}
 	if strings.HasPrefix(t, "zrv_live_") || strings.HasPrefix(t, "rpsh_live_") {
-		return "", fmt.Errorf("bu bir istemci (ajan) token'i; bu komut bir API token ister")
+		return "", errors.New(i18n.T("net.err.agenttoken"))
 	}
 	return t, nil
 }
@@ -103,21 +104,18 @@ func newShareCmd() *cobra.Command {
 	var name, expires, token, server, caCert, logLevel string
 	var insecure bool
 	cmd := &cobra.Command{
-		Use:   "share <port> --to <kullanici|grup|cihaz> [--udp] [--name x] [--expires 24h]",
-		Short: "Bu cihazin bir portunu secili kisi/grup/cihazla uctan uca sifreli paylasir (yonetici hakki gerekmez)",
-		Long: "Yerel bir portu WireGuard ile YALNIZ belirttiginiz alicilara acar. Sunucu icerigi goremez.\n" +
-			"Paylasim bu komut calistigi surece gecerlidir (Ctrl+C ile biter); --persist ile kalici olur\n" +
-			"(ajan calistikca sunulur). Alici: zorven access <ad> --local <port>.\n\n" +
-			"Alici bicimleri: ali@firma.com (kullanici), user:<id>, group:everyone, group:role:admin, device:<ad>",
+		Use:     "share <port> --to <kullanici|grup|cihaz> [--udp] [--name x] [--expires 24h]",
+		Short:   i18n.T("net.share.short"),
+		Long:    i18n.T("net.share.long"),
 		Example: "  zorven share 5432 --to ali@firma.com --name db\n  zorven share 25565 --udp --to group:everyone --expires 4h",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			port, err := strconv.Atoi(strings.TrimPrefix(args[0], ":"))
 			if err != nil || port < 1 || port > 65535 {
-				return fmt.Errorf("gecersiz port %q", args[0])
+				return errors.New(i18n.T("net.share.err.port", args[0]))
 			}
 			if len(to) == 0 {
-				return fmt.Errorf("--to gerekli: paylasimin kime acilacagini belirtin")
+				return errors.New(i18n.T("net.share.err.to"))
 			}
 			spec := agent.NetShareSpec{Name: name, Port: port, Proto: "tcp", Persist: persist}
 			if udp {
@@ -129,7 +127,7 @@ func newShareCmd() *cobra.Command {
 			if expires != "" {
 				d, err := time.ParseDuration(expires)
 				if err != nil || d < time.Minute {
-					return fmt.Errorf("gecersiz --expires %q (en az 1m, ornek 24h)", expires)
+					return errors.New(i18n.T("net.share.err.expires", expires))
 				}
 				spec.ExpiresSec = int(d.Seconds())
 			}
@@ -152,7 +150,7 @@ func newShareCmd() *cobra.Command {
 				tok = strings.TrimSpace(cfg.Token)
 			}
 			if tok == "" {
-				return fmt.Errorf("istemci token'i bulunamadi: zorven authtoken <TOKEN>")
+				return errors.New(i18n.T("net.share.err.notoken"))
 			}
 			srv := strings.TrimSpace(server)
 			if srv == "" {
@@ -182,11 +180,11 @@ func newShareCmd() *cobra.Command {
 			ag.OnStatus = func(s agent.Status) {
 				switch s.State {
 				case agent.StateConnecting:
-					fmt.Println("Zorven sunucusuna baglaniliyor (" + srv + ")...")
+					fmt.Println(i18n.T("net.share.connecting", srv))
 				case agent.StateFatal:
-					fmt.Println("Baglanti hatasi: " + s.Message)
+					fmt.Println(i18n.T("net.share.connerr", s.Message))
 					if strings.Contains(s.Message, "409") {
-						fmt.Println("  " + conflictHint)
+						fmt.Println("  " + conflictHint())
 					}
 				}
 			}
@@ -197,17 +195,42 @@ func newShareCmd() *cobra.Command {
 	}
 	cmd.AddCommand(newShareRmCmd(), newShareLsCmd())
 	f := cmd.Flags()
-	f.StringArrayVar(&to, "to", nil, "alici (tekrarlanabilir): kullanici, grup veya cihaz")
-	f.BoolVar(&udp, "udp", false, "UDP portunu paylas (varsayilan TCP)")
-	f.StringVar(&name, "name", "", "paylasim adi (varsayilan <cihaz>-<port>)")
-	f.StringVar(&expires, "expires", "", "paylasimin omru (ornek 24h)")
-	f.BoolVar(&persist, "persist", false, "komut/ajan bitince paylasimi silme (calisan servis uzerinden olusturulan paylasimlar zaten kalicidir)")
-	f.StringVar(&token, "token", "", "istemci token'i (zrv_live_...)")
-	f.StringVar(&server, "server", "", "Zorven sunucusu (host:port)")
-	f.BoolVar(&insecure, "insecure", false, "TLS yerine ws:// (yalnizca lokal gelistirme)")
-	f.StringVar(&caCert, "ca-cert", "", "self-signed sunucu sertifikasi dosyasi")
+	f.StringArrayVar(&to, "to", nil, i18n.T("net.share.flag.to"))
+	f.BoolVar(&udp, "udp", false, i18n.T("net.share.flag.udp"))
+	f.StringVar(&name, "name", "", i18n.T("net.share.flag.name"))
+	f.StringVar(&expires, "expires", "", i18n.T("net.share.flag.expires"))
+	f.BoolVar(&persist, "persist", false, i18n.T("net.share.flag.persist"))
+	f.StringVar(&token, "token", "", i18n.T("net.share.flag.token"))
+	f.StringVar(&server, "server", "", i18n.T("net.flag.server"))
+	f.BoolVar(&insecure, "insecure", false, i18n.T("net.flag.insecure"))
+	f.StringVar(&caCert, "ca-cert", "", i18n.T("net.flag.cacert"))
 	f.StringVar(&logLevel, "log-level", "warn", "debug | info | warn | error")
 	return cmd
+}
+
+// watchAccessPaths: yol (dogrudan/relay) degisince bir satir yazar.
+func watchAccessPaths(ctx context.Context, acc *wgnet.Accessor) {
+	last := map[string]string{}
+	tk := time.NewTicker(2 * time.Second)
+	defer tk.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tk.C:
+		}
+		for _, p := range acc.Paths() {
+			if p.Path == last[p.IP] {
+				continue
+			}
+			last[p.IP] = p.Path
+			if p.Path == "direct" {
+				fmt.Println(i18n.T("net.path.direct", p.Name, p.Addr))
+			} else {
+				fmt.Println(i18n.T("net.path.relay", p.Name))
+			}
+		}
+	}
 }
 
 func newAccessCmd() *cobra.Command {
@@ -215,10 +238,9 @@ func newAccessCmd() *cobra.Command {
 	var local int
 	var bind string
 	cmd := &cobra.Command{
-		Use:   "access <paylasim|cihaz>[:port] [--local <port>]",
-		Short: "Size acilan bir paylasima yerel 127.0.0.1 portu uzerinden baglanir (WireGuard, yonetici hakki gerekmez)",
-		Long: "API token ile gecici bir ag dugumu olarak katilir ve yerel bir portu paylasima yonlendirir.\n" +
-			"UDP paylasimlari icin yerel UDP soketi acilir.",
+		Use:     "access <paylasim|cihaz>[:port] [--local <port>]",
+		Short:   i18n.T("net.access.short"),
+		Long:    i18n.T("net.access.long"),
 		Example: "  ZORVEN_API_TOKEN=... zorven access db --local 15432\n  psql -h 127.0.0.1 -p 15432 app",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -227,7 +249,7 @@ func newAccessCmd() *cobra.Command {
 				return err
 			}
 			if ip := net.ParseIP(bind); ip == nil || !ip.IsLoopback() {
-				return fmt.Errorf("--bind yalnizca loopback olabilir (yerel dinleyicide kimlik dogrulama yok)")
+				return errors.New(i18n.T("net.access.err.bind"))
 			}
 			srv, insecure, ca := cf.resolveServer()
 			hc, err := cf.httpClient(ca)
@@ -252,7 +274,7 @@ func newAccessCmd() *cobra.Command {
 				return err
 			case err := <-ready:
 				if err != nil {
-					return fmt.Errorf("ag oturumu kurulamadi: %w", err)
+					return fmt.Errorf("%s: %w", i18n.T("net.access.err.session"), err)
 				}
 			}
 			// Netmap tam gelsin (paylasimlar ilk mesajda gelir, ama kosu icin kisa bekleme).
@@ -282,19 +304,20 @@ func newAccessCmd() *cobra.Command {
 			if proto == "udp" {
 				pc, err := net.ListenPacket("udp", addr)
 				if err != nil {
-					return fmt.Errorf("dinlenemedi (%s): %w", addr, err)
+					return fmt.Errorf("%s: %w", i18n.T("net.access.err.listen", addr), err)
 				}
 				fmt.Printf("Zorven Net: %s (udp) -> %s\n", args[0], addr)
 				go wgnet.ServeUDP(ctx, pc, dial, onErr)
 			} else {
 				ln, err := net.Listen("tcp", addr)
 				if err != nil {
-					return fmt.Errorf("dinlenemedi (%s): %w", addr, err)
+					return fmt.Errorf("%s: %w", i18n.T("net.access.err.listen", addr), err)
 				}
 				fmt.Printf("Zorven Net: %s (tcp) -> %s\n", args[0], addr)
 				go wgnet.ServeTCP(ctx, ln, dial, onErr)
 			}
-			fmt.Println("Cikmak icin Ctrl+C.")
+			fmt.Println(i18n.T("net.access.quit"))
+			go watchAccessPaths(ctx, acc)
 			select {
 			case <-ctx.Done():
 				return nil
@@ -304,21 +327,55 @@ func newAccessCmd() *cobra.Command {
 		},
 	}
 	cf.add(cmd)
-	cmd.Flags().IntVar(&local, "local", 0, "yerel port (varsayilan: paylasim portu)")
-	cmd.Flags().StringVar(&bind, "bind", "127.0.0.1", "yerel dinleme adresi (yalnizca loopback)")
+	cmd.Flags().IntVar(&local, "local", 0, i18n.T("net.access.flag.local"))
+	cmd.Flags().StringVar(&bind, "bind", "127.0.0.1", i18n.T("net.access.flag.bind"))
 	return cmd
 }
 
+// printLocalPaths: bu cihazda calisan ajan varsa esleriyle yolu (dogrudan/relay) yazar.
+// Ajan yok/eski ise sessizce atlanir.
+func printLocalPaths() {
+	ep, _, err := findAgent()
+	if ep == nil || err != nil {
+		return
+	}
+	resp, err := callAgent(*ep, localctl.Request{Op: "net_paths"})
+	if err != nil || len(resp.Paths) == 0 {
+		return
+	}
+	fmt.Println()
+	tw := newTable(os.Stdout)
+	fmt.Fprintln(tw, i18n.T("net.tbl.peer")+"\tIP\t"+i18n.T("net.tbl.status")+"\t"+i18n.T("net.tbl.path")+"\tRTT")
+	for _, p := range resp.Paths {
+		st := i18n.T("net.offline")
+		if p.Online {
+			st = i18n.T("net.online")
+		}
+		rtt := "-"
+		if p.Path == "direct" && p.RTTMs > 0 {
+			rtt = fmt.Sprintf("%d ms", p.RTTMs)
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", p.Name, p.IP, st, pathLabel(p.Path), rtt)
+	}
+	tw.Flush()
+}
+
 func newNetCmd() *cobra.Command {
-	root := &cobra.Command{Use: "net", Short: "Zorven Net (WireGuard port paylasimi) komutlari"}
+	root := &cobra.Command{Use: "net", Short: i18n.T("net.root.short")}
 	var cf netConnFlags
 	status := &cobra.Command{
 		Use:   "status",
-		Short: "Dugumleri (IP, cevrimici) ve paylasimlari listeler",
+		Short: i18n.T("net.status.short"),
+		Long:  i18n.T("net.status.long"),
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			localShown := printLocalTun()
 			tok, err := cf.token()
 			if err != nil {
+				if localShown {
+					fmt.Println(i18n.T("net.status.hint"))
+					return nil
+				}
 				return err
 			}
 			srv, insecure, ca := cf.resolveServer()
@@ -343,7 +400,7 @@ func newNetCmd() *cobra.Command {
 				defer resp.Body.Close()
 				b, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 				if resp.StatusCode != 200 {
-					return fmt.Errorf("sunucu %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+					return errors.New(i18n.T("net.status.server", resp.StatusCode, strings.TrimSpace(string(b))))
 				}
 				return json.Unmarshal(b, v)
 			}
@@ -361,6 +418,7 @@ func newNetCmd() *cobra.Command {
 					OwnerName   string `json:"owner_name"`
 					OwnerOnline bool   `json:"owner_online"`
 					Relation    string `json:"relation"`
+					Path        string `json:"path"`
 				} `json:"shares"`
 			}
 			if err := get("/api/v1/net/nodes", &nodes); err != nil {
@@ -369,30 +427,36 @@ func newNetCmd() *cobra.Command {
 			if err := get("/api/v1/net/shares", &shares); err != nil {
 				return err
 			}
-			tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-			fmt.Fprintln(tw, "DUGUM\tIP\tTUR\tDURUM")
+			tw := newTable(os.Stdout)
+			fmt.Fprintln(tw, i18n.T("net.tbl.node")+"\tIP\t"+i18n.T("net.tbl.kind")+"\t"+i18n.T("net.tbl.status"))
 			for _, n := range nodes.Nodes {
-				st := "cevrimdisi"
+				st := i18n.T("net.offline")
 				if n.Online {
-					st = "cevrimici"
+					st = i18n.T("net.online")
 				}
 				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", n.Name, n.IP, n.Kind, st)
 			}
 			tw.Flush()
 			fmt.Println()
-			tw = tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-			fmt.Fprintln(tw, "PAYLASIM\tCIHAZ\tPORT\tILISKI\tSAHIP")
+			tw = newTable(os.Stdout)
+			fmt.Fprintln(tw, strings.Join([]string{i18n.T("net.tbl.share"), i18n.T("net.tbl.device"), "PORT", i18n.T("net.tbl.relation"), i18n.T("net.tbl.owner"), i18n.T("net.tbl.path")}, "\t"))
 			for _, s := range shares.Shares {
-				st := "cevrimdisi"
+				st := i18n.T("net.offline")
 				if s.OwnerOnline {
-					st = "cevrimici"
+					st = i18n.T("net.online")
 				}
-				fmt.Fprintf(tw, "%s\t%s\t%s/%d\t%s\t%s\n", s.Name, s.OwnerName, s.Proto, s.Port, s.Relation, st)
+				fmt.Fprintf(tw, "%s\t%s\t%s/%d\t%s\t%s\t%s\n", s.Name, s.OwnerName, s.Proto, s.Port, s.Relation, st, pathLabel(s.Path))
 			}
-			return tw.Flush()
+			if err := tw.Flush(); err != nil {
+				return err
+			}
+			if !localShown {
+				printLocalPaths()
+			}
+			return nil
 		},
 	}
 	cf.add(status)
-	root.AddCommand(status)
+	root.AddCommand(status, newNetUpCmd(), newNetDownCmd())
 	return root
 }

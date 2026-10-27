@@ -9,6 +9,15 @@
 import { authClient } from '~/lib/auth-client'
 import { gt } from '~/plugins/i18n'
 
+/** Kimlik dogrulama akisinda sunucunun dondurdugu hata kodunu tasiyan hata. */
+export class AuthFlowError extends Error {
+  code: string
+  constructor(message: string, code = '') {
+    super(message)
+    this.code = code
+  }
+}
+
 export type AuthMethod = 'key' | 'github' | 'better-auth' | null
 
 export interface AuthUserInfo {
@@ -200,6 +209,11 @@ export function useAuth() {
   async function loginWithEmail(email: string, password: string): Promise<{ twoFactor: boolean }> {
     const res = await authClient.signIn.email({ email, password })
     if (res?.error) {
+      // Dogrulanmamis e-posta (ilk kayit veya sureli yeniden dogrulama sonrasi):
+      // sendOnSignIn zaten yeni baglanti gonderdi; acik mesaj goster.
+      if ((res.error as any).code === 'EMAIL_NOT_VERIFIED' || res.error.status === 403) {
+        throw new AuthFlowError(gt('auth.verifyRequired'), 'EMAIL_NOT_VERIFIED')
+      }
       throw new Error(res.error.message || gt('auth.thrownSignin'))
     }
     // Better Auth: 2FA açık kullanıcıda oturum açılmaz, twoFactorRedirect döner.
@@ -319,13 +333,22 @@ export function useAuth() {
    * Dönüş: e-posta doğrulama gerekiyorsa { needsVerification: true } — oturum
    * AÇILMAZ, kullanıcı e-postasındaki linke tıklamalı. Aksi halde oturum açılır.
    */
-  async function signUpWithEmail(email: string, password: string, name: string): Promise<{ needsVerification: boolean }> {
+  async function signUpWithEmail(email: string, password: string, name: string, captchaToken = ''): Promise<{ needsVerification: boolean }> {
     // Doğrulama linki kullanıcıyı kayıt olduğu sayfaya geri getirsin: ör. ekip
     // davetinden (/invite?id=...) gelen kişi doğrulamadan sonra davete döner.
     const callbackURL = import.meta.client ? window.location.pathname + window.location.search : '/'
-    const res = await authClient.signUp.email({ email, password, name, callbackURL })
+    const res = await authClient.signUp.email({
+      email,
+      password,
+      name,
+      callbackURL,
+      // CAPTCHA jetonu (platform CAPTCHA aciksa): sunucu kancasi dogrular.
+      ...(captchaToken ? { fetchOptions: { headers: { 'X-Zorven-Captcha': captchaToken } } } : {}),
+    })
     if (res?.error) {
-      throw new Error(res.error.message || gt('auth.thrownSignup'))
+      const code = String((res.error as any).code ?? '')
+      if (code === 'captcha_failed') throw new AuthFlowError(gt('auth.captchaFailed'), code)
+      throw new AuthFlowError(res.error.message || gt('auth.thrownSignup'), code)
     }
     // token null => e-posta doğrulama zorunlu, oturum açılmadı.
     if (!(res?.data as any)?.token) {
@@ -333,6 +356,13 @@ export function useAuth() {
     }
     await check()
     return { needsVerification: false }
+  }
+
+  /** Dogrulama baglantisini yeniden gonder (giris reddedildikten sonra). */
+  async function resendVerificationEmail(email: string): Promise<void> {
+    const callbackURL = import.meta.client ? window.location.origin : '/'
+    const res = await authClient.sendVerificationEmail({ email, callbackURL })
+    if ((res as any)?.error) throw new Error((res as any).error.message || gt('auth.verifyResendFailed'))
   }
 
   /** Better Auth GitHub ile giriş */
@@ -465,6 +495,7 @@ export function useAuth() {
     check,
     loginWithEmail,
     signUpWithEmail,
+    resendVerificationEmail,
     loginWithBetterAuthGithub,
     loginWithBetterAuthGoogle,
     loginWithKey,

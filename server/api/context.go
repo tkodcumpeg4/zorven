@@ -14,6 +14,7 @@ const (
 	ctxKeyUser
 	ctxKeyAPIScopes
 	ctxKeyProject
+	ctxKeyProjectInvalid
 )
 
 // AuthUser, giris yapmis Better Auth kullanicisinin temel bilgileri.

@@ -90,7 +90,7 @@ func TestAuthProxyInvalidatesSessionCache(t *testing.T) {
 		atUpstream = nil
 		req, _ := http.NewRequest(method, front.URL+path, nil)
 		if withCookie {
-			req.AddCookie(&http.Cookie{Name: "__Secure-better-auth.session_token", Value: "tokA.sig"})
+			req.AddCookie(&http.Cookie{Name: "__Host-zorven.session_token", Value: "tokA.sig"})
 		}
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
@@ -126,5 +126,20 @@ func TestAuthProxyInvalidatesSessionCache(t *testing.T) {
 	ev := do(http.MethodPost, "/api/auth/reset-password", false)
 	if len(ev) != 1 || ev[0] != "all" {
 		t.Fatalf("sifre sifirlama onbellegi tumden temizlemeli: %v", ev)
+	}
+}
+
+func TestDropTossedAuthCookies(t *testing.T) {
+	r := httptest.NewRequest("GET", "https://panel.example/api/auth/get-session", nil)
+	r.Header.Set("Cookie", "__Host-zorven.session_token=saldirgan; theme=dark; __Host-zorven.session_token=kurban")
+	dropTossedAuthCookies(r)
+	if got := r.Header.Get("Cookie"); got != "theme=dark" {
+		t.Fatalf("atilmis cerezler silinmeli: %q", got)
+	}
+	r2 := httptest.NewRequest("GET", "https://panel.example/api/auth/get-session", nil)
+	r2.Header.Set("Cookie", "__Host-zorven.session_token=kurban; theme=dark")
+	dropTossedAuthCookies(r2)
+	if got := r2.Header.Get("Cookie"); got != "__Host-zorven.session_token=kurban; theme=dark" {
+		t.Fatalf("tek cerez korunmali: %q", got)
 	}
 }

@@ -17,7 +17,7 @@ import (
 //
 //   - uyelik hala geçerli mi (token'in verildigi kullanici o kiracidan cikarildiysa red)
 //   - plan ozelligi (FeatureAPIAccess)
-//   - yuzey kisiti (tokenPublicRoutes)
+//   - yuzey kisiti (tokenPublicRoutes; full kapsamda kara liste: oauth_full.go)
 //   - kiraci basina API hiz siniri
 //   - kapsamlar (withAPIScopes) ve kullanici kimligi (role="api_token": gercek rol
 //     handler'larda GetMemberRole ile cozulur, tipki API token'larda oldugu gibi)
@@ -33,7 +33,8 @@ func (m *Middleware) serveOAuthPrincipal(w http.ResponseWriter, r *http.Request)
 		return true
 	}
 	// Kullanici hala bu kiracinin uyesi mi? (API token'larda olmayan ek guvence.)
-	if role, err := m.Store.GetMemberRole(r.Context(), p.TenantID, p.UserID); err != nil || role == "" {
+	role, err := m.Store.GetMemberRole(r.Context(), p.TenantID, p.UserID)
+	if err != nil || role == "" {
 		writeJSONError(w, http.StatusUnauthorized, "invalid_token", "yetki sahibi artik bu organizasyonun uyesi degil")
 		return true
 	}
@@ -44,7 +45,8 @@ func (m *Middleware) serveOAuthPrincipal(w http.ResponseWriter, r *http.Request)
 			return true
 		}
 	}
-	if !tokenMayAccess(r.Method, r.URL.Path) {
+	// full: allowlist yerine kara liste (fullExcluded) uygulanir; bkz. oauth_full.go.
+	if !p.Full && !tokenMayAccess(r.Method, r.URL.Path) {
 		writeJSONError(w, http.StatusForbidden, "endpoint_not_available_for_token",
 			"bu uc programatik erisim icin kullanilamaz; panelden erisin")
 		return true
@@ -60,10 +62,14 @@ func (m *Middleware) serveOAuthPrincipal(w http.ResponseWriter, r *http.Request)
 		}
 		w.Header().Set("X-RateLimit-Remaining", strconv.Itoa(m.APILimiter.Remaining(p.TenantID)))
 	}
+	if p.Full {
+		m.serveFullPrincipal(w, r, p, role)
+		return true
+	}
 	ctx := withTenant(r.Context(), p.TenantID)
 	ctx = m.resolveProject(ctx, r, p.TenantID)
 	ctx = withAPIScopes(ctx, p.APIScopes)
 	ctx = withUser(ctx, &AuthUser{ID: p.UserID, TenantID: p.TenantID, Role: "api_token"})
-	m.Next.ServeHTTP(w, r.WithContext(ctx))
+	m.next(w, r.WithContext(ctx))
 	return true
 }

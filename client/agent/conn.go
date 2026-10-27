@@ -71,12 +71,30 @@ type Agent struct {
 	// updateKeys: test icin acik anahtar listesi gecersiz kilma (nil = updatesig.PublicKeys).
 	updateKeys    []string
 	lastUpdateErr error
+	// lastUpdateMsg / quietUpdate: elle guncellemenin sonuc metni ve stdout'a
+	// yazilmamasi istegi (CheckUpdateQuiet).
+	lastUpdateMsg string
+	quietUpdate   atomic.Bool
 
 	// OnReady, ayarlar kurulduktan sonra Run basinda bir kez cagrilir; yerel
 	// kontrol kanali (IPC) bu noktada baslatilir.
 	OnReady func(ctx context.Context)
 	// NoNet true ise Zorven Net (WireGuard port paylasimi) ilan edilmez (--no-net).
 	NoNet bool
+	// NoPosture true ise cihaz durusu (posture) raporu ilan edilmez (--no-posture).
+	NoPosture bool
+	// NoP2P true ise dogrudan P2P UDP yolu denenmez; WireGuard trafigi yalniz
+	// sunucu relay'inden gider (--no-p2p, ZORVEN_NET_DIRECT=off).
+	NoP2P bool
+	// NetALogInterval, Mod B erisim gunlugu (net_access_log) gonderim araligi (0 = 30 sn; testler).
+	NetALogInterval time.Duration
+	// NoTUN true ise tam ag katmani (Mod B, OS TUN) ilan edilmez/acilmaz (--no-tun).
+	NoTUN bool
+	// TUNDenyInbound true ise Mod B'de yeni gelen baglantilar yerelde reddedilir
+	// (yalniz bu cihazdan baslatilan akislar); sunucu kurallari bunu gevsetemez.
+	TUNDenyInbound bool
+	// TUNOptions, Mod B temel ayarlari (arayuz adi; testlerde sahte OSNet/LocalAddrs).
+	TUNOptions wgnet.TUNOptions
 	// NetKeyPath, wg ozel anahtar dosyasi (bos: <ayar dizini>/zorven/wg.key).
 	NetKeyPath string
 	// NetShares, baglaninca olusturulacak paylasimlar (`zorven share`).
@@ -120,10 +138,23 @@ type Agent struct {
 	screenInputStatus bool
 	// udpProbe, sunucu hello_ack ile udp_probe'u etkinlestirdiyse true.
 	udpProbe bool
+	// posture, sunucu hello_ack ile posture'u etkinlestirdiyse true (Z1).
+	posture bool
+	// deviceCert (Z4): sunucu device_cert'i etkinlestirdiyse true; deviceChallenge
+	// durus imzasina dahil edilen oturum degeri; devClientID sertifika kimligi.
+	deviceCert      bool
+	deviceChallenge string
+	devClientID     string
 	// screen2, sunucu hello_ack ile screen2'yi etkinlestirdiyse true.
 	screen2 bool
 	// screen2Layers, sunucu hello_ack ile katmanli screen2yi etkinlestirdiyse true.
 	screen2Layers bool
+	// screen2Stats, sunucu hello_ack ile canli olcum ozetini etkinlestirdiyse true.
+	screen2Stats bool
+	// screen2Video, sunucu hello_ack ile H.264 video modunu etkinlestirdiyse true.
+	screen2Video bool
+	// screen2Feedback, sunucu hello_ack ile izleyici geri bildirimini etkinlestirdiyse true.
+	screen2Feedback bool
 	// screenCursor / screenClipboard: sunucu hello_ack ile etkinlestirdiyse true.
 	screenCursor    bool
 	screenClipboard bool
@@ -217,6 +248,8 @@ func HTTPClientWithCA(path string) (*http.Client, error) {
 // Run, baglanti kopsa da surekli yeniden dener; yalnizca ctx iptal edilince
 // veya token kalici olarak gecersizse (401/409/426) durur.
 func (a *Agent) Run(ctx context.Context) error {
+	captureInit(a.clientVersion())
+	defer captureShutdown()
 	// Yerel bayraklar TAVANDIR: sunucu bunlarin uzerine cikamaz (F15).
 	a.settings = newSettingsState(localCaps{
 		terminal: !a.NoTerminal,
@@ -266,6 +299,8 @@ func (a *Agent) Run(ctx context.Context) error {
 			errStr := err.Error()
 			if strings.Contains(errStr, "first record does not look like a TLS handshake") || strings.Contains(errStr, "oversized record received") {
 				reconnectMsg = "Sunucu şifresiz (HTTP) çalışıyor — Ayarlar'dan 'Şifrelemeyi kapat'ı seçin"
+			} else if errors.Is(err, errTooManyAttempts) {
+				reconnectMsg = fmt.Sprintf("sunucu çok fazla bağlantı denemesi nedeniyle bekletiyor (429), %s sonra yeniden denenecek", backoff.Round(time.Second))
 			} else if strings.Contains(errStr, "certificate signed by unknown authority") {
 				reconnectMsg = "Sertifika doğrulanamadı — Ayarlar'dan CA sertifikası (server.crt) seçin"
 			}
@@ -297,6 +332,15 @@ func (a *Agent) Run(ctx context.Context) error {
 		}
 	}
 }
+
+// msgAlreadyConnected, sunucu ayni istemci kimligi icin acik bir oturum
+// tuttugunda (409) gosterilir. En sik neden: ayni cihaz anahtariyla terminalde
+// calisan 'zorven' ya da Windows servisi.
+const msgAlreadyConnected = "bu cihaz anahtarıyla başka bir Zorven istemcisi (terminaldeki 'zorven' ya da sistem servisi) şu an bağlı (409); onu kapatıp yeniden bağlanın"
+
+// errTooManyAttempts, sunucunun kimlik dogrulama hiz siniri (429): kalici
+// degil, backoff ile yeniden denenir.
+var errTooManyAttempts = errors.New("sunucu deneme siniri (429)")
 
 // fatalError, yeniden denenmemesi gereken hatalari isaretler.
 type FatalError struct{ Msg string }
@@ -372,7 +416,9 @@ func (a *Agent) connectOnce(ctx context.Context) error {
 			case http.StatusUpgradeRequired:
 				return &FatalError{"istemci surumu sunucuyla uyumsuz (sunucu 426 dondu), guncelleyin"}
 			case http.StatusConflict:
-				return &FatalError{"bu token ile baska bir istemci zaten bagli (409)"}
+				return &FatalError{msgAlreadyConnected}
+			case http.StatusTooManyRequests:
+				return errTooManyAttempts
 			}
 		}
 		return fmt.Errorf("baglanilamadi: %w", err)
@@ -452,8 +498,15 @@ func (a *Agent) handshake(ctx context.Context, conn *websocket.Conn) error {
 	a.flowControl = false
 	a.screenInputStatus = false
 	a.udpProbe = false
+	a.posture = false
+	a.deviceCert = false
+	a.deviceChallenge = ack.DeviceChallenge
+	a.devClientID = ack.ClientID
 	a.screen2 = false
 	a.screen2Layers = false
+	a.screen2Stats = false
+	a.screen2Video = false
+	a.screen2Feedback = false
 	a.screenCursor = false
 	a.screenClipboard = false
 	a.screenFiles = false
@@ -470,11 +523,26 @@ func (a *Agent) handshake(ctx context.Context, conn *websocket.Conn) error {
 		if f == protocol.FeatureUDPProbe {
 			a.udpProbe = true
 		}
+		if f == protocol.FeaturePosture {
+			a.posture = !a.NoPosture
+		}
+		if f == protocol.FeatureDeviceCert {
+			a.deviceCert = !a.NoPosture
+		}
 		if f == protocol.FeatureScreen2 {
 			a.screen2 = true
 		}
 		if f == protocol.FeatureScreen2Layers {
 			a.screen2Layers = true
+		}
+		if f == protocol.FeatureScreen2Stats {
+			a.screen2Stats = true
+		}
+		if f == protocol.FeatureScreen2Feedback {
+			a.screen2Feedback = true
+		}
+		if f == protocol.FeatureScreen2Video {
+			a.screen2Video = true
 		}
 		if f == protocol.FeatureScreenCursor {
 			a.screenCursor = true
@@ -510,8 +578,8 @@ func (a *Agent) handshake(ctx context.Context, conn *websocket.Conn) error {
 		"heartbeat_sn", ack.HeartbeatIntervalS, "tunel_sayisi", len(ack.Tunnels))
 
 	if len(ack.Tunnels) == 0 {
-		a.Log.Warn("bu istemciye tanimli aktif tunel yok — " +
-			"sunucuda 'rpshell-server tunnel add <hostname> <client-id> <target>' calistirin")
+		// Bilgi: tunelsiz istemci normaldir (ekran/terminal/Zorven Net icin tunel gerekmez).
+		a.Log.Info("bu istemciye tanimli tunel yok; panelden ya da 'zorven http <port>' ile eklenebilir")
 	}
 	for _, t := range ack.Tunnels {
 		a.Log.Info("tunel aktif", "adlar", strings.Join(t.Hostnames, ", "), "hedef", t.Target)
@@ -526,6 +594,9 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) error {
 	cs.udpProbe = a.udpProbe
 	cs.screen2 = a.screen2
 	cs.screen2Layers = a.screen2 && a.screen2Layers
+	cs.screen2Stats = a.screen2 && a.screen2Stats
+	cs.screen2Feedback = a.screen2 && a.screen2Feedback
+	cs.screen2Video = a.screen2 && a.screen2Video
 	cs.screenCursor = a.screenCursor
 	cs.screenClipboard = a.screenClipboard && !a.NoClipboard
 	cs.screenFiles = a.screenFiles && !a.NoFileTransfer
@@ -558,6 +629,18 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) error {
 
 	if cs.udpProbe {
 		go cs.runUDPAgentStats(ctx)
+	}
+	if a.posture {
+		if a.deviceCert && a.deviceChallenge != "" && a.devClientID != "" {
+			if dm, err := newDeviceCertManager(deviceCertDir(), a.devClientID, a.Log, cs.requestDeviceCert); err != nil {
+				a.Log.Warn("cihaz sertifikasi baslatilamadi", "hata", err)
+			} else {
+				dm.onNew = cs.kickPosture
+				cs.devCert, cs.deviceChallenge = dm, a.deviceChallenge
+				go dm.run(ctx)
+			}
+		}
+		go cs.runPosture(ctx, realPostureEnv(a.clientVersion(), a.IsService))
 	}
 
 	// Zorven Net: wg dugumu (yalniz pazarlandiysa).
@@ -609,7 +692,7 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) error {
 			var ce websocket.CloseError
 			if errors.As(err, &ce) && ce.Code == websocket.StatusPolicyViolation &&
 				strings.Contains(ce.Reason, "already connected") {
-				return &FatalError{"bu token ile baska bir istemci zaten bagli (409)"}
+				return &FatalError{msgAlreadyConnected}
 			}
 			status := websocket.CloseStatus(err)
 			if status == websocket.StatusNormalClosure || errors.Is(err, context.Canceled) {
@@ -685,7 +768,8 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) error {
 				}
 			}
 
-		case protocol.TypeNetRegistered, protocol.TypeNetMap, protocol.TypeNetShareResult, protocol.TypeNetError:
+		case protocol.TypeNetRegistered, protocol.TypeNetMap, protocol.TypeNetShareResult, protocol.TypeNetError,
+			protocol.TypeNetPunch:
 			if wn != nil {
 				wn.HandleControl(ctx, mt, data)
 			}
@@ -813,6 +897,24 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) error {
 			}
 			sm.screen2Layers(m)
 
+		case protocol.TypeScreen2Feedback:
+			if !cs.screen2Feedback {
+				continue
+			}
+			var m protocol.Screen2Feedback
+			if err := json.Unmarshal(data, &m); err != nil {
+				continue
+			}
+			sm.screen2Feedback(m)
+
+		case protocol.TypeScreen2Video:
+			if !cs.screen2Video {
+				continue
+			}
+			if m, ok := parseScreen2Video(data); ok {
+				sm.screen2Video(m)
+			}
+
 		case protocol.TypeScreen2Settings:
 			var m protocol.Screen2Settings
 			if err := json.Unmarshal(data, &m); err != nil {
@@ -903,6 +1005,15 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) error {
 				continue
 			}
 			cs.windows.add(wu.ReqID, wu.Increment)
+
+		case protocol.TypeDeviceCert:
+			var dc protocol.DeviceCert
+			if err := json.Unmarshal(data, &dc); err == nil {
+				select {
+				case cs.certReply <- dc:
+				default:
+				}
+			}
 
 		case protocol.TypeConfigUpdate:
 			var cu protocol.ConfigUpdate

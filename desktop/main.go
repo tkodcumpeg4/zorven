@@ -4,6 +4,7 @@ import (
 	"context"
 	"embed"
 	"log"
+	"os"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -15,6 +16,9 @@ import (
 var assets embed.FS
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == updateApplyFlag {
+		os.Exit(runApplyUpdate(os.Args[2:]))
+	}
 	app := NewApp()
 
 	err := wails.Run(&options.App{

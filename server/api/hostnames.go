@@ -355,9 +355,16 @@ func (s *Server) createCustomHostname(w http.ResponseWriter, r *http.Request) {
 
 	// Ayni kiracida baska projede kayitliysa acik mesaj: kullanici hangi
 	// projede oldugunu gorsun (genel "zaten alinmis" yerine).
+	// Ayni projede zaten varsa asagidaki genel 409 (hostname_taken) doner.
+	curProject, _ := s.projectFor(r)
+	if curProject == "" {
+		if def, derr := s.Store.GetDefaultProject(r.Context(), tenantID); derr == nil {
+			curProject = def.ID
+		}
+	}
 	if existing, lerr := s.Store.ListHostnames(r.Context(), tenantID); lerr == nil {
 		for _, ex := range existing {
-			if ex.Type == store.HostTypeCustom && strings.EqualFold(ex.FQDN, fqdn) {
+			if ex.Type == store.HostTypeCustom && strings.EqualFold(ex.FQDN, fqdn) && ex.ProjectID != curProject {
 				projName := ex.ProjectID
 				if p, perr := s.Store.GetProjectByID(r.Context(), tenantID, ex.ProjectID); perr == nil {
 					projName = p.Name
@@ -534,7 +541,7 @@ func (s *Server) verifyHostname(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deleteHostname(w http.ResponseWriter, r *http.Request) {
-	if !requireScope(w, r, ScopeHostnamesWrite) {
+	if !requireScopeAny(w, r, ScopeHostnamesWrite, ScopeHostnamesDelete) {
 		return
 	}
 	if !s.requirePrivilegedCaller(w, r) {

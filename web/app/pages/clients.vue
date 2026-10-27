@@ -8,6 +8,7 @@ const { relativeTime } = useFormat()
 const { openUpgrade, loadBillingData } = useBilling()
 
 const clients = ref<Client[]>([])
+const { isPrivileged } = useRole()
 
 const pending = ref(true)
 const saving = ref(false)

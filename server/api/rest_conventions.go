@@ -31,6 +31,11 @@ const (
 	ScopeIPAllowRead    = "ip_allowlist:read"
 	ScopeIPAllowWrite   = "ip_allowlist:write"
 	ScopeAnalyticsRead  = "analytics:read"
+	// Silme kapsamlari (yalnizca DELETE /tunnels/{id} ve /hostnames/{id}): write
+	// kapsamina EK, ayri ve acik verilen kapsamlar. "write"/"admin" icinde YER ALMAZ
+	// (o token'lar zaten :write ile silebilir); OAuth/MCP'de ayri onay icin vardir.
+	ScopeTunnelsDelete   = "tunnels:delete"
+	ScopeHostnamesDelete = "hostnames:delete"
 )
 
 // allReadScopes / allWriteScopes, eski "read"/"write" token'larini yeni modele
@@ -66,6 +71,7 @@ func effectiveScopes(granted []string) map[string]bool {
 			for _, s := range allScopes() {
 				set[s] = true
 			}
+			set[ScopeNetConnect] = true
 		case "read":
 			for _, s := range allReadScopes {
 				set[s] = true
@@ -75,13 +81,20 @@ func effectiveScopes(granted []string) map[string]bool {
 				set[s] = true
 				set[readOf(s)] = true
 			}
+			set[ScopeNetConnect] = true
 		default:
 			if g == "" {
 				continue
 			}
 			set[g] = true
+			if g == ScopeNetRead || g == ScopeNetWrite {
+				set[ScopeNetConnect] = true
+			}
 			if strings.HasSuffix(g, ":write") {
 				set[readOf(g)] = true
+			}
+			if strings.HasSuffix(g, ":delete") {
+				set[strings.TrimSuffix(g, ":delete")+":read"] = true
 			}
 		}
 	}
@@ -114,6 +127,25 @@ func requireScope(w http.ResponseWriter, r *http.Request, needed string) bool {
 	return false
 }
 
+// requireScopeAny, verilen kapsamlardan en az birini ister (silme gibi, hem :write
+// hem de ayri bir :delete kapsamiyla yapilabilen islemler icin).
+func requireScopeAny(w http.ResponseWriter, r *http.Request, needed ...string) bool {
+	scopes, ok := apiScopesFromContext(r.Context())
+	if !ok {
+		return true
+	}
+	eff := effectiveScopes(scopes)
+	for _, n := range needed {
+		if eff[n] {
+			return true
+		}
+	}
+	w.Header().Set("WWW-Authenticate", `Bearer scope="`+needed[0]+`"`)
+	writeJSONError(w, http.StatusForbidden, "insufficient_scope",
+		"bu islem icin '"+strings.Join(needed, "' veya '")+"' kapsami gerekli; API token'inizda bu kapsam yok")
+	return false
+}
+
 // --- Token yuzeyi (allowlist) ----------------------------------------------
 
 type tokenRoute struct{ method, pattern string }
@@ -126,6 +158,7 @@ var tokenPublicRoutes = []tokenRoute{
 	{"GET", "/api/v1/me"},
 	{"GET", "/api/v1/openapi.yaml"},
 	{"GET", "/api/v1/openapi.en.yaml"},
+	{"GET", "/api/v1/openapi.ja.yaml"},
 	{"GET", "/api/v1/plans"},
 
 	{"GET", "/api/v1/projects"},
@@ -157,6 +190,12 @@ var tokenPublicRoutes = []tokenRoute{
 	{"GET", "/api/v1/tunnels/{id}/access-events"},
 	{"GET", "/api/v1/tunnels/{id}/door"},
 	{"PUT", "/api/v1/tunnels/{id}/door"},
+	// MCP tunel modu (M3/M4): ayar + log + analitik token'a acik; anahtarlar,
+	// baglanti sinama ve oturum sonlandirma BILEREK yalniz panelde.
+	{"GET", "/api/v1/tunnels/{id}/mcp"},
+	{"PUT", "/api/v1/tunnels/{id}/mcp"},
+	{"GET", "/api/v1/tunnels/{id}/mcp/calls"},
+	{"GET", "/api/v1/tunnels/{id}/mcp/stats"},
 
 	{"GET", "/api/v1/hostnames"},
 	{"POST", "/api/v1/hostnames"},
@@ -190,6 +229,13 @@ var tokenPublicRoutes = []tokenRoute{
 	{"PATCH", "/api/v1/net/shares/{id}"},
 	{"DELETE", "/api/v1/net/shares/{id}"},
 	{"GET", "/api/v1/net/session"},
+	{"GET", "/api/v1/net/tun/rules"},
+	{"POST", "/api/v1/net/tun/rules"},
+	{"DELETE", "/api/v1/net/tun/rules/{id}"},
+	{"GET", "/api/v1/net/network"},
+	{"PUT", "/api/v1/net/network"},
+	{"GET", "/api/v1/net/access-log"},
+	{"GET", "/api/v1/net/private-access"},
 
 	// Cihazlar: envanter okuma otomasyonu token ile calisabilmeli.
 	{"GET", "/api/v1/devices"},

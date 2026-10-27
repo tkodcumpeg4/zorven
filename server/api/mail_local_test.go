@@ -51,7 +51,9 @@ func (m *localMailStore) InsertMailMessage(_ context.Context, msg store.MailMess
 	return msg, nil
 }
 
-func (m *localMailStore) InsertMailAttachment(context.Context, store.MailAttachment) error { return nil }
+func (m *localMailStore) InsertMailAttachment(context.Context, store.MailAttachment) error {
+	return nil
+}
 
 func (m *localMailStore) ListMailMessages(_ context.Context, _ string, folder string, _ int) ([]store.MailMessage, error) {
 	m.mu.Lock()

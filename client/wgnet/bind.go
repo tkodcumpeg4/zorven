@@ -46,6 +46,16 @@ type relayBind struct {
 	seq  atomic.Uint32
 
 	Dropped atomic.Int64
+
+	// W2: dogrudan yol. pm nil ise yalniz relay (W1 davranisi). Node.start
+	// WireGuard cihazi acilmadan once atar.
+	pm    *pathMgr
+	dsend func(netip.AddrPort, []byte) error
+
+	// Sayaclar (teshis): hangi yoldan kac paket gitti/geldi.
+	DirectTx atomic.Int64
+	RelayTx  atomic.Int64
+	RelayRx  atomic.Int64
 }
 
 func newRelayBind() *relayBind {
@@ -101,6 +111,15 @@ func (b *relayBind) Send(bufs [][]byte, ep conn.Endpoint) error {
 	}
 	id := protocol.IPToRelayID(re.ip)
 	for _, p := range bufs {
+		if pm := b.pm; pm != nil {
+			if addr, ok := pm.route(re.ip); ok {
+				if err := b.dsend(addr, p); err == nil {
+					b.DirectTx.Add(1)
+					continue
+				}
+				pm.failDirect(re.ip) // gonderilemedi: relay'e dus
+			}
+		}
 		if len(p)+protocol.HeaderSize > frameBuf {
 			continue
 		}
@@ -114,6 +133,7 @@ func (b *relayBind) Send(bufs [][]byte, ep conn.Endpoint) error {
 		*bp = f
 		select {
 		case b.out <- bp:
+			b.RelayTx.Add(1)
 		default:
 			b.Dropped.Add(1)
 			framePool.Put(bp)
@@ -124,10 +144,17 @@ func (b *relayBind) Send(bufs [][]byte, ep conn.Endpoint) error {
 
 // deliver: sunucudan gelen sifreli paketi wireguard-go'ya verir (dolu ise dusurur).
 func (b *relayBind) deliver(srcID uint64, payload []byte) {
+	b.RelayRx.Add(1)
+	b.deliverIP(protocol.RelayIDToIP(srcID), payload)
+}
+
+// deliverIP: kaynagi (ic IP) bilinen sifreli paketi wireguard-go'ya verir.
+// Dogrudan UDP yolu da buraya gelir.
+func (b *relayBind) deliverIP(ip netip.Addr, payload []byte) {
 	cp := make([]byte, len(payload))
 	copy(cp, payload)
 	select {
-	case b.in <- inPkt{ip: protocol.RelayIDToIP(srcID), buf: cp}:
+	case b.in <- inPkt{ip: ip, buf: cp}:
 	default:
 		b.Dropped.Add(1)
 	}

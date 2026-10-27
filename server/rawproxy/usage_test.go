@@ -58,8 +58,9 @@ func limitedState(bytesPerSec int) *bandwidth.TenantRuntimeState {
 
 func TestTCPRecordsBothDirectionsOnClose(t *testing.T) {
 	fu := newFakeUsage(unlimitedState())
-	m, addr := rawTestMgr(t, func() (bridgeStream, bool, error) { return newFakeStream("", true), false, nil })
-	m.Usage = fu
+	_, addr := rawTestMgr(t, func() (bridgeStream, bool, error) { return newFakeStream("", true), false, nil }, func(m *Manager) {
+		m.Usage = fu
+	})
 
 	c, err := net.Dial("tcp", addr)
 	if err != nil {
@@ -81,8 +82,9 @@ func TestTCPRecordsBothDirectionsOnClose(t *testing.T) {
 func TestTCPThrottleCapsThroughput(t *testing.T) {
 	// 20 KB/s, burst 20 KB: 60 KB aktarim en az ~2 sn surmeli.
 	fu := newFakeUsage(limitedState(20 * 1024))
-	m, addr := rawTestMgr(t, func() (bridgeStream, bool, error) { return newFakeStream("", false), false, nil })
-	m.Usage = fu
+	m, addr := rawTestMgr(t, func() (bridgeStream, bool, error) { return newFakeStream("", false), false, nil }, func(m *Manager) {
+		m.Usage = fu
+	})
 	c, err := net.Dial("tcp", addr)
 	if err != nil {
 		t.Fatal(err)
@@ -108,8 +110,9 @@ func TestTCPThrottleCapsThroughput(t *testing.T) {
 
 func TestTCPUnlimitedNoWait(t *testing.T) {
 	fu := newFakeUsage(unlimitedState())
-	m, addr := rawTestMgr(t, func() (bridgeStream, bool, error) { return newFakeStream("", false), false, nil })
-	m.Usage = fu
+	m, addr := rawTestMgr(t, func() (bridgeStream, bool, error) { return newFakeStream("", false), false, nil }, func(m *Manager) {
+		m.Usage = fu
+	})
 	c, err := net.Dial("tcp", addr)
 	if err != nil {
 		t.Fatal(err)
@@ -125,8 +128,9 @@ func TestTCPUnlimitedNoWait(t *testing.T) {
 
 func TestTCPNoGoroutineLeak(t *testing.T) {
 	fu := newFakeUsage(unlimitedState())
-	m, addr := rawTestMgr(t, func() (bridgeStream, bool, error) { return newFakeStream("", true), false, nil })
-	m.Usage = fu
+	_, addr := rawTestMgr(t, func() (bridgeStream, bool, error) { return newFakeStream("", true), false, nil }, func(m *Manager) {
+		m.Usage = fu
+	})
 	before := runtime.NumGoroutine()
 	for i := 0; i < 20; i++ {
 		c, err := net.Dial("tcp", addr)

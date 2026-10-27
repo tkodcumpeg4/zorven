@@ -56,6 +56,9 @@ func (h *Handler) serveWebSocket(w http.ResponseWriter, r *http.Request, sess *t
 			delete(wsHeaders, "Cookie")
 		}
 	}
+	// HTTP istekleriyle ayni: gercek ziyaretci IP'si zincirin SONUNA eklenir
+	// (istemcinin gonderdigi X-Forwarded-For tek basina backend'e ulasmaz).
+	setForwardedHeaders(wsHeaders, r)
 	stream, err := sess.OpenWS(ctx, tunnelID, agentPath(r.URL), r.URL.RawQuery, wsHeaders)
 	if err != nil {
 		logRec.status = http.StatusBadGateway
@@ -116,6 +119,12 @@ func (h *Handler) serveWebSocket(w http.ResponseWriter, r *http.Request, sess *t
 		return
 	}
 	logOnce() // el sikismasi tamam: baglanti kapanmasini beklemeden logla
+
+	// Z2: acik WebSocket, erisim/Geo/IP ayari degisince yeniden degerlendirilir.
+	defer h.registerWS(r, tunnelID, tenantID, func() {
+		stream.Close("access revoked")
+		conn.Close()
+	})()
 
 	// tarayici -> yerel: hijack edilen baglantidan oku, ajana ilet.
 	go func() {

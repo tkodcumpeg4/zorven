@@ -3,25 +3,37 @@ info:
   title: Zorven REST API
   version: "1.0.0"
   description: |
-    Zorven's programmatic REST API. Manage your tunnels, clients, hostnames and
-    IP rules; read request logs and your subscription/usage data.
+    Zorven's programmatic REST API. Manage your tunnels, clients, hostnames,
+    policies, devices, team and IP rules; read request logs and your
+    subscription/usage data. The same API is also reachable through MCP (Model
+    Context Protocol) and OAuth 2.1.
 
     ## Authentication
-    Create a token from the **API Keys** section in the dashboard and send it in
-    the `Authorization` header on every request:
+    Two methods exist:
+
+    1. **API token**: create a token from the **API Keys** section in the dashboard
+       and send it in the `Authorization` header on every request:
 
     ```
     Authorization: Bearer zrv_api_xxxxxxxx...
     ```
 
+    2. **OAuth 2.1 access token** (`at+jwt`): for MCP clients (Claude, ChatGPT, ...);
+       see "OAuth 2.1 and MCP" below.
+
     API access is available on **Pro and above** plans.
 
     ## Scopes
-    Each token carries a set of scopes (`resource:action`):
+    API tokens carry scopes (`resource:action`):
     `clients:read`, `clients:write`, `tunnels:read`, `tunnels:write`,
     `hostnames:read`, `hostnames:write`, `ip_allowlist:read`,
     `ip_allowlist:write`, `analytics:read`. A `write` scope also implies the
     `read` of the same resource. Insufficient scope → `403 insufficient_scope`.
+
+    **Endpoints open to API tokens are limited by an allowlist.** Every endpoint
+    not on the list is closed to tokens (default deny). Each endpoint below has a
+    **Scope / access** note: "open to API tokens" or "Dashboard session or OAuth
+    `full` scope".
 
     ## Pagination
     List endpoints accept `?limit=` (default 50, max 200) and `?cursor=`. The
@@ -39,6 +51,82 @@ info:
     Programmatic requests are limited to ~30 requests/sec (burst 60) per tenant.
     Responses carry `X-RateLimit-Limit` and `X-RateLimit-Remaining`; on exceed,
     `429 rate_limited` + `Retry-After`.
+
+    ## Project selection
+    In multi-project organizations the `X-Zorven-Project: <project-id>` header
+    selects the project a request applies to (`project_id` in the MCP `call_api` tool).
+
+    ## OAuth 2.1 and MCP
+    Zorven is an OAuth 2.1 authorization server and an MCP resource server.
+    These endpoints are not under `/api/v1`; they live at `https://<host>/oauth/*`,
+    `/.well-known/*` and `/mcp` (the relevant paths carry their own `servers`).
+
+    - **Flow**: `authorization_code` + **PKCE S256 (mandatory)**. The client id is
+      obtained through **dynamic client registration** (RFC 7591,
+      `POST /oauth/register`, public clients only: `token_endpoint_auth_method=none`).
+    - **Resource indicator** (RFC 8707): the management resource is
+      `https://<host>/mcp`; the `resource` parameter must carry that value.
+    - **Metadata**: `/.well-known/oauth-authorization-server`,
+      `/.well-known/oauth-protected-resource`, JWKS at `/.well-known/jwks.json`.
+    - **Endpoints**: `/oauth/authorize`, `/oauth/token`, `/oauth/revoke`, `/oauth/register`.
+    - **Token lifetimes**: access token (`at+jwt`) **1 hour**; the refresh token
+      is **rotating** (reuse revokes the whole family) and lasts **30 days**.
+    - **MCP endpoint**: `POST/GET https://<host>/mcp` (streamable HTTP),
+      `Authorization: Bearer <API token or OAuth access token>`. A 401 carries
+      `WWW-Authenticate: Bearer resource_metadata="..."`.
+
+    ### OAuth scopes
+    | Scope | Meaning |
+    |---|---|
+    | `mcp:read` | All `*:read` scopes and `analytics:read` (read-only) |
+    | `mcp:manage` | `mcp:read` + `clients:write`, `tunnels:write`, `hostnames:write` |
+    | `clients:read` / `clients:write` | Clients |
+    | `tunnels:read` / `tunnels:write` | Tunnels |
+    | `tunnels:delete` | Delete tunnels (destructive; off by default on the consent screen) |
+    | `hostnames:read` / `hostnames:write` | Hostnames |
+    | `hostnames:delete` | Delete hostnames (destructive; off by default) |
+    | `analytics:read` | Logs, metrics, subscription, audit |
+    | `mcp` | Tunnel MCP resources only (grants nothing on the management API) |
+    | `full` | **Full access**: the same authority as the user's dashboard session (see below) |
+
+    ## Full access (`full` scope)
+    `full` gives an MCP client **the same authority as the user's dashboard
+    session**: the tenant role (owner/admin/member), plan gates and `X-Zorven-Project` project selection all apply.
+    It exceeds the API-token allowlist but **never exceeds the user's own
+    authority**; platform-admin endpoints work only if the user is really a platform admin.
+
+    - **Consent screen**: a separate warning section, **off by default**. It is
+      granted if the user ticks it even when the client did not ask; if the
+      client asks, it is only suggested.
+    - **Step-up**: the dashboard session must have been opened **within the last
+      5 minutes** (with 2FA if password and 2FA are enabled). Otherwise
+      `403 reauth_required`; the dashboard sends the user to sign in again and
+      returns to the same consent page afterwards.
+    - **Lifetimes**: `full` access token **30 minutes**, refresh token **7 days**
+      (sliding). A grant older than 30 days cannot be refreshed (re-consent needed).
+    - **Revocation**: **Connected apps** in the dashboard shows a "Full access"
+      badge with one-click revoke.
+    - **Audit**: every call is recorded as `mcp.full_call` (method + path, no body);
+      terminal/screen tickets as `mcp.full_ticket`.
+    - **Excluded endpoints** (`403 full_scope_excluded`): `/api/v1/api-tokens*`,
+      `/api/v1/tokens*`, `/api/v1/team/members/{id}/tokens*`,
+      `/api/v1/mail/app-passwords*`,
+      `/api/v1/tunnels/{id}/mcp/keys*`, `POST /api/v1/device/approve`,
+      `/api/v1/auth/*`, `DELETE /api/v1/organization`. OAuth app/grant management
+      (`/oauth/*`) is unreachable from MCP; `call_api` only calls `/api/v1`.
+      Account credentials (password/2FA/email) live under `/api/auth` and are out of MCP scope.
+
+    ### MCP tools (with `full`)
+    - `list_api_endpoints`: method/path/summary/required fields from OpenAPI
+      (`filter`, `method`, `limit`, `offset`).
+    - `call_api`: `method` (GET/POST/PUT/PATCH/DELETE), `path` (`/api/v1/...`),
+      `query`, `body`, `project_id`, `confirm`. **DELETE** and destructive verbs
+      (`revoke`, `revoke-sessions`, `rotate`, `freeze`, `send`) require
+      `confirm=true`. Responses are capped at 256 KB (`truncated: true` when cut).
+      WebSocket/streaming endpoints (`/events`, `/clients/{id}/terminal|screen`) cannot be called.
+    - Existing tools also work with `full` (including delete tools; they still ask for `confirm`).
+
+    Detailed guide: `docs/mcp.md`.
   contact:
     name: Zorven
     url: https://zorven.app
@@ -50,6 +138,7 @@ servers:
 
 security:
   - bearerAuth: []
+  - oauth2: [mcp:read]
 
 tags:
   - name: Meta
@@ -64,6 +153,31 @@ tags:
     description: CIDR-based access rules
   - name: Analytics
     description: Request logs, subscription and usage
+
+  - name: Projects
+    description: "Projects and organization"
+  - name: Policies
+    description: "Policy engine and resource access policies"
+  - name: Devices
+    description: "Device inventory"
+  - name: Network
+    description: "Private network (Zorven Net / WireGuard) and private resources"
+  - name: Secrets
+    description: "Secret Vault"
+  - name: Tokens
+    description: "API tokens"
+  - name: Team
+    description: "Team members and invitations"
+  - name: Mail
+    description: "Webmail"
+  - name: Captcha
+    description: "Zorven CAPTCHA: widget, verification service and site management"
+  - name: Billing
+    description: "Subscription"
+  - name: "Platform admin"
+    description: "Platform admins only"
+  - name: "OAuth & MCP"
+    description: "OAuth 2.1 authorization server and MCP endpoint (not under /api/v1)"
 
 paths:
   /health:
@@ -563,6 +677,81 @@ paths:
         "400": { description: Invalid window }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /tunnels/{id}/mcp:
+    get:
+      tags: [Analytics]
+      summary: Tunnel MCP mode setting
+      description: "Scope: `tunnels:read`. Returns the MCP settings (auth, tool allow/deny lists, limits) and the connection URLs."
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: MCP setting }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Analytics]
+      summary: Configure MCP mode
+      description: "Scope: `tunnels:write` (owner/admin). HTTP tunnels only. `auth`: oauth (default) | apikey | none (needs `ack_no_auth`). `allow_tools`/`deny_tools` take `*`/`?` globs; deny wins; an unparseable body is rejected in policy mode. Not changeable: the raw API keys (panel only)."
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled: { type: boolean }
+                config:
+                  type: object
+                  properties:
+                    path: { type: string, default: /mcp }
+                    transport: { type: string, enum: [streamable, sse, auto] }
+                    auth: { type: string, enum: [oauth, apikey, none] }
+                    ack_no_auth: { type: boolean }
+                    allow_tools: { type: array, items: { type: string } }
+                    deny_tools: { type: array, items: { type: string } }
+                    log_level: { type: string, enum: [meta, none] }
+                    max_request_bytes: { type: integer }
+                    head_timeout_sec: { type: integer, maximum: 900 }
+                    idle_timeout_sec: { type: integer, maximum: 3600 }
+                    rate_limit_per_min: { type: integer, maximum: 6000 }
+                    max_streams: { type: integer, maximum: 200 }
+                    allow_org_members: { type: boolean }
+                    allowed_emails: { type: array, items: { type: string } }
+      responses:
+        "200": { description: Saved }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { description: "invalid_config / not_http / oauth_unavailable" }
+
+  /tunnels/{id}/mcp/calls:
+    get:
+      tags: [Analytics]
+      summary: MCP call log
+      description: "Scope: `analytics:read`. Metadata only (method, tool, status, duration); arguments and results are never stored."
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: tool, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { type: string, enum: [ok, error, denied, rate_limited] } }
+        - { name: window, in: query, schema: { type: string, enum: ["1h", "24h", "7d", "30d"] } }
+        - { name: limit, in: query, schema: { type: integer, maximum: 200 } }
+        - { name: offset, in: query, schema: { type: integer } }
+      responses:
+        "200": { description: "Calls, newest first" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /tunnels/{id}/mcp/stats:
+    get:
+      tags: [Analytics]
+      summary: MCP tool analytics
+      description: "Scope: `analytics:read`. Per-tool calls, errors, denied, average/p95/max latency."
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: window, in: query, schema: { type: string, enum: ["1h", "24h", "7d", "30d"], default: "24h" } }
+      responses:
+        "200": { description: Statistics }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /tunnels/{id}/door:
     get:
       tags: [Analytics]
@@ -659,6 +848,2315 @@ paths:
               schema: { type: string }
         "403": { $ref: "#/components/responses/Forbidden" }
 
+  /status:
+    get:
+      tags: [Meta]
+      summary: "Public service status"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens)."
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { status: { type: string }, components: { type: array, items: { type: object, additionalProperties: true } } } }
+
+  /my-ip:
+    get:
+      tags: [Meta]
+      summary: "Caller's visible IP address"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens)."
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { ip: { type: string } } }
+
+  /abuse:
+    post:
+      tags: [Meta]
+      summary: "Report abuse"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens)."
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [fqdn], properties: { fqdn: { type: string }, reason: { type: string } } }
+      responses:
+        "202":
+          description: Accepted
+          content:
+            application/json:
+              schema: { type: object, properties: { ok: { type: boolean }, id: { type: string } } }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /projects:
+    get:
+      tags: [Projects]
+      summary: "List projects"
+      description: "Scope / access: open to API tokens."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Project" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Projects]
+      summary: "Create a project"
+      description: "Scope / access: open to API tokens. Requires the owner/admin role."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [name, slug], properties: { name: { type: string }, slug: { type: string } } }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Project" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /projects/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    patch:
+      tags: [Projects]
+      summary: "Rename a project"
+      description: "Scope / access: open to API tokens. Requires the owner/admin role."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [name], properties: { name: { type: string, minLength: 1, maxLength: 80 } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Project" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    delete:
+      tags: [Projects]
+      summary: "Delete a project"
+      description: "The default project cannot be deleted; a non-empty project returns `409 project_not_empty`. Scope / access: open to API tokens. Requires the owner/admin role. When called through MCP `call_api`, `confirm=true` is required."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { status: { type: string, example: deleted } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /organization:
+    delete:
+      tags: [Projects]
+      summary: "Delete the organization"
+      description: "Owner only. The last organization and the platform organization cannot be deleted. Scope / access: dashboard session only. Also closed to the OAuth `full` scope (`403 full_scope_excluded`). Requires the owner/admin role. When called through MCP `call_api`, `confirm=true` is required."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [confirm_slug], properties: { confirm_slug: { type: string } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { status: { type: string }, disconnected_clients: { type: integer } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /terminal-ticket:
+    post:
+      tags: [Clients]
+      summary: "Remote terminal ticket"
+      description: "The returned short-lived ticket opens the `GET /clients/{id}/terminal` WebSocket (a streaming endpoint, not described here). Scope / access: dashboard session or OAuth `full` scope (closed to API tokens)."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [client_id], properties: { client_id: { type: string }, shell: { type: string }, attach: { type: string } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /screen-ticket:
+    post:
+      tags: [Clients]
+      summary: "Remote screen ticket"
+      description: "The ticket opens the `GET /clients/{id}/screen` WebSocket (a streaming endpoint). Scope / access: dashboard session or OAuth `full` scope (closed to API tokens)."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [client_id], properties: { client_id: { type: string } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /clients/{id}/screen-files:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Clients]
+      summary: "List remote-screen files"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens)."
+      parameters:
+        - { name: path, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { dir: { type: string }, files: { type: array, items: { type: object, additionalProperties: true } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Clients]
+      summary: "Upload a file to the device"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens)."
+      parameters:
+        - { name: name, in: query, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/octet-stream:
+              schema: { type: object, properties: { name: { type: string }, size: { type: integer }, sha256: { type: string } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /clients/{id}/screen-files/download:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Clients]
+      summary: "Download a file from the device"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens)."
+      parameters:
+        - { name: name, in: query, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /tunnels/{id}/access:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Tunnels]
+      summary: "Visitor access policy"
+      description: "Scope / access: open to API tokens."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Tunnels]
+      summary: "Set the visitor access policy"
+      description: "Scope / access: open to API tokens. Requires the owner/admin role."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, properties: { mode: { type: string, enum: [none, basic, oauth] }, enabled: { type: boolean }, config: { type: object, properties: { username: { type: string }, password: { type: string }, providers: { type: array, items: { type: string } }, allowed_emails: { type: array, items: { type: string } }, allowed_groups: { type: array, items: { type: string } }, session_ttl_minutes: { type: integer }, session_sliding: { type: boolean } } } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /tunnels/{id}/access/revoke-sessions:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    post:
+      tags: [Tunnels]
+      summary: "Revoke visitor sessions"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens). Requires the owner/admin role. When called through MCP `call_api`, `confirm=true` is required."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, properties: { identity: { type: string, description: "empty = all" } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { revoked: { type: boolean }, scope: { type: string }, identity: { type: string } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /tunnels/{id}/lb:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Tunnels]
+      summary: "Load-balancing setting"
+      description: "Scope / access: open to API tokens."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { config: { type: object, additionalProperties: true }, candidates: { type: array, items: { type: object, additionalProperties: true } }, health: { type: object, additionalProperties: true } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Tunnels]
+      summary: "Configure load balancing"
+      description: "Advanced LB requires a plan that includes it. Scope / access: open to API tokens. Requires the owner/admin role."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /tunnels/{id}/replicas:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Tunnels]
+      summary: "Replica clients"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens)."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { replicas: { type: array, items: { type: object, additionalProperties: true } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Tunnels]
+      summary: "Add a replica client"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens). Requires the owner/admin role."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [client_id], properties: { client_id: { type: string } } }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { type: object, properties: { ok: { type: boolean }, client_id: { type: string } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /tunnels/{id}/replicas/{clientID}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+      - { name: clientID, in: path, required: true, schema: { type: string } }
+    delete:
+      tags: [Tunnels]
+      summary: "Remove a replica client"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens). Requires the owner/admin role. When called through MCP `call_api`, `confirm=true` is required."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Ok" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /tunnels/{id}/udp:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Tunnels]
+      summary: "UDP tunnel setting"
+      description: "Scope / access: open to API tokens."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Tunnels]
+      summary: "Configure the UDP tunnel"
+      description: "Scope / access: open to API tokens. Requires the owner/admin role."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /tunnels/{id}/tcp:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Tunnels]
+      summary: "TCP tunnel statistics"
+      description: "TCP tunnels only; otherwise `409 not_tcp`. Scope / access: open to API tokens."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /tunnels/{id}/game-status:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Tunnels]
+      summary: "Game server status"
+      description: "Scope / access: open to API tokens."
+      parameters:
+        - { name: kind, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /tunnels/{id}/traffic:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Tunnels]
+      summary: "Traffic policy"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens)."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { enabled: { type: boolean }, config: { type: object, additionalProperties: true } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Tunnels]
+      summary: "Set the traffic policy"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens). Requires the owner/admin role."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [enabled], properties: { enabled: { type: boolean }, config: { type: object, additionalProperties: true } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { ok: { type: boolean }, enabled: { type: boolean } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /tunnels/{id}/metrics:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Tunnels]
+      summary: "Tunnel metrics"
+      description: "Scope / access: open to API tokens."
+      parameters:
+        - { name: window, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /tunnels/{id}/alert:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Tunnels]
+      summary: "Error-rate alert"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens)."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TunnelAlert" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Tunnels]
+      summary: "Configure the error-rate alert"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens). Requires the owner/admin role."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, properties: { enabled: { type: boolean }, error_rate_pct: { type: integer, minimum: 1, maximum: 100 }, window_min: { type: integer, minimum: 1, maximum: 1440 }, min_requests: { type: integer }, notify_email: { type: string } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { ok: { type: boolean }, enabled: { type: boolean } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /tunnels/{id}/security:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Tunnels]
+      summary: "WAF / geo security setting"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens)."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TunnelSecurity" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Tunnels]
+      summary: "Configure WAF / geo security"
+      description: "Requires a plan with tunnel security (`feature_not_available`). Scope / access: dashboard session or OAuth `full` scope (closed to API tokens). Requires the owner/admin role."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, properties: { waf: { type: object, additionalProperties: true }, geo: { type: object, additionalProperties: true }, bot: { $ref: "#/components/schemas/TunnelSecurity/properties/bot" }, rate: { $ref: "#/components/schemas/TunnelSecurity/properties/rate" } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { ok: { type: boolean }, waf: { type: object, additionalProperties: true }, geo: { type: object, additionalProperties: true }, bot: { $ref: "#/components/schemas/TunnelSecurity/properties/bot" }, rate: { $ref: "#/components/schemas/TunnelSecurity/properties/rate" } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /tunnels/{id}/mtls:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Tunnels]
+      summary: "mTLS setting"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens)."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { tunnel_id: { type: string }, enabled: { type: boolean } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Tunnels]
+      summary: "Configure mTLS"
+      description: "`ca_pem` is required, otherwise `422 missing_ca`. Scope / access: dashboard session or OAuth `full` scope (closed to API tokens). Requires the owner/admin role."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, properties: { enabled: { type: boolean }, ca_pem: { type: string } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { ok: { type: boolean }, enabled: { type: boolean } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /tunnels/{id}/mcp/test:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    post:
+      tags: [Tunnels]
+      summary: "Test the MCP connection"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens). Requires the owner/admin role."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { auth: { type: string }, checks: { type: object, additionalProperties: true }, probe: { type: object, additionalProperties: true } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /tunnels/{id}/mcp/revoke-sessions:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    post:
+      tags: [Tunnels]
+      summary: "Revoke MCP sessions"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens). Requires the owner/admin role. When called through MCP `call_api`, `confirm=true` is required."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { revoked: { type: integer } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /tunnels/{id}/mcp/keys:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Tunnels]
+      summary: "MCP API keys"
+      description: "Scope / access: dashboard session only. Also closed to the OAuth `full` scope (`403 full_scope_excluded`)."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Tunnels]
+      summary: "Create an MCP API key"
+      description: "Scope / access: dashboard session only. Also closed to the OAuth `full` scope (`403 full_scope_excluded`). Requires the owner/admin role."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, properties: { name: { type: string } } }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /tunnels/{id}/mcp/keys/{keyId}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+      - { name: keyId, in: path, required: true, schema: { type: string } }
+    delete:
+      tags: [Tunnels]
+      summary: "Delete an MCP API key"
+      description: "Scope / access: dashboard session only. Also closed to the OAuth `full` scope (`403 full_scope_excluded`). Requires the owner/admin role. When called through MCP `call_api`, `confirm=true` is required."
+      responses:
+        "204": { description: "OK" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /hostnames/{id}/dns-check:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    post:
+      tags: [Hostnames]
+      summary: "Custom-domain DNS check"
+      description: "Scope / access: open to API tokens."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /hostnames/{id}/paths:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Hostnames]
+      summary: "Path routes"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens)."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { fqdn: { type: string }, routes: { type: array, items: { $ref: "#/components/schemas/PathRoute" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Hostnames]
+      summary: "Add a path route"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens). Requires the owner/admin role."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [path_prefix, tunnel_id], properties: { path_prefix: { type: string, example: /api }, tunnel_id: { type: string } } }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PathRoute" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /hostnames/{id}/paths/{routeID}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+      - { name: routeID, in: path, required: true, schema: { type: string } }
+    delete:
+      tags: [Hostnames]
+      summary: "Delete a path route"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens). Requires the owner/admin role. When called through MCP `call_api`, `confirm=true` is required."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Ok" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /requests/capture:
+    get:
+      tags: [Analytics]
+      summary: "Request capture setting"
+      description: "Scope / access: open to API tokens."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { enabled: { type: boolean } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Analytics]
+      summary: "Toggle request capture"
+      description: "Scope / access: open to API tokens. Requires the owner/admin role."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [enabled], properties: { enabled: { type: boolean } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { enabled: { type: boolean } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /requests/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Analytics]
+      summary: "Captured request detail"
+      description: "Scope / access: open to API tokens."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /requests/{id}/replay:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    post:
+      tags: [Analytics]
+      summary: "Replay a captured request"
+      description: "Scope / access: open to API tokens. Requires the owner/admin role."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true, description: "optional overrides (method, path, headers, body)" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /policies:
+    get:
+      tags: [Policies]
+      summary: "List policies"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens)."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { policies: { type: array, items: { $ref: "#/components/schemas/Policy" } }, count: { type: integer } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Policies]
+      summary: "Create a policy"
+      description: "Pro+ plan (`policy_engine`). `{{secret:name}}` references in `config` must exist (`422 unknown_secret`). Scope / access: dashboard session or OAuth `full` scope (closed to API tokens). Requires the owner/admin role."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [name, config], properties: { name: { type: string }, config: { type: object, additionalProperties: true }, priority: { type: integer } } }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Policy" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /policies/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Policies]
+      summary: "Get a policy"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens)."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Policy" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Policies]
+      summary: "Update a policy (partial)"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens). Requires the owner/admin role."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, properties: { name: { type: string }, config: { type: object, additionalProperties: true }, enabled: { type: boolean }, priority: { type: integer } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Policy" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    delete:
+      tags: [Policies]
+      summary: "Delete a policy"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens). Requires the owner/admin role. When called through MCP `call_api`, `confirm=true` is required."
+      responses:
+        "204": { description: "OK" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /policies/{id}/bind:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    post:
+      tags: [Policies]
+      summary: "Bind a policy to a tunnel or hostname"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens). Requires the owner/admin role."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, properties: { tunnel_id: { type: string }, hostname: { type: string } }, description: "tunnel_id or hostname" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Ok" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /policies/{id}/unbind:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    post:
+      tags: [Policies]
+      summary: "Unbind a policy"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens). Requires the owner/admin role."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, properties: { tunnel_id: { type: string }, hostname: { type: string } }, description: "tunnel_id or hostname" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Ok" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /devices:
+    get:
+      tags: [Devices]
+      summary: "Device inventory"
+      description: "Scope / access: open to API tokens."
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Device" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /devices/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Devices]
+      summary: "Device detail"
+      description: "Scope / access: open to API tokens."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Device" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /devices/{id}/config:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Devices]
+      summary: "Device agent settings"
+      description: "Scope / access: open to API tokens."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Devices]
+      summary: "Update device agent settings"
+      description: "The change is pushed to the online agent immediately. Needs the remote-config feature. Scope / access: open to API tokens. Requires the owner/admin role."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /network/resources:
+    get:
+      tags: [Network]
+      summary: "Private network resources"
+      description: "Scope / access: open to API tokens."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { resources: { type: array, items: { type: object, additionalProperties: true } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Network]
+      summary: "Publish a private network resource"
+      description: "Scope / access: open to API tokens. Requires the owner/admin role."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [name, client_id], properties: { name: { type: string }, client_id: { type: string }, target: { type: string, description: "host:port" }, subnet: { type: string, description: "CIDR range instead of a single target" } } }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /network/connect:
+    get:
+      tags: [Network]
+      summary: "Connect to a private resource (WebSocket)"
+      description: "Used by `zorven connect`. Requires an API-token identity. Scope / access: open to API tokens."
+      parameters:
+        - { name: target, in: query, required: true, schema: { type: string, description: "name:port" } }
+      responses:
+        "101": { description: Switching Protocols }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /net/nodes:
+    get:
+      tags: [Network]
+      summary: "Zorven Net nodes"
+      description: "Scope / access: open to API tokens."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { nodes: { type: array, items: { type: object, additionalProperties: true } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /net/nodes/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    delete:
+      tags: [Network]
+      summary: "Revoke a node"
+      description: "Scope / access: open to API tokens. Requires the owner/admin role. When called through MCP `call_api`, `confirm=true` is required."
+      responses:
+        "204": { description: "OK" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /net/shares:
+    get:
+      tags: [Network]
+      summary: "Port shares"
+      description: "Scope / access: open to API tokens."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { shares: { type: array, items: { $ref: "#/components/schemas/NetShare" } }, count: { type: integer } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Network]
+      summary: "Create a port share"
+      description: "Scope / access: open to API tokens."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [client_id, port], properties: { name: { type: string }, client_id: { type: string }, port: { type: integer }, proto: { type: string, enum: [tcp, udp] }, to: { type: array, items: { $ref: "#/components/schemas/Grantee" } }, expires_in_sec: { type: integer } } }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NetShare" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /net/shares/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    patch:
+      tags: [Network]
+      summary: "Update a port share"
+      description: "Scope / access: open to API tokens."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, properties: { name: { type: string }, to: { type: array, items: { $ref: "#/components/schemas/Grantee" } }, expires_in_sec: { type: integer, description: "0 = no expiry" } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NetShare" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    delete:
+      tags: [Network]
+      summary: "Delete a port share"
+      description: "Scope / access: open to API tokens. When called through MCP `call_api`, `confirm=true` is required."
+      responses:
+        "204": { description: "OK" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /net/session:
+    get:
+      tags: [Network]
+      summary: "Zorven Net session info"
+      description: "Requires an API-token identity. Scope / access: open to API tokens."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /net/tun/rules:
+    get:
+      tags: [Network]
+      summary: "TUN zone rules"
+      description: "Scope / access: open to API tokens. Requires the owner/admin role."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { rules: { type: array, items: { $ref: "#/components/schemas/TunRule" } }, zone: { type: string } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Network]
+      summary: "Create a TUN rule"
+      description: "Scope / access: open to API tokens. Requires the owner/admin role."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [name, src, dst], properties: { name: { type: string }, src: { $ref: "#/components/schemas/Grantee" }, dst: { type: string }, proto: { type: string }, ports: { type: string } } }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TunRule" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /net/tun/rules/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    delete:
+      tags: [Network]
+      summary: "Delete a TUN rule"
+      description: "Scope / access: open to API tokens. Requires the owner/admin role. When called through MCP `call_api`, `confirm=true` is required."
+      responses:
+        "204": { description: "OK" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /net/network:
+    get:
+      tags: [Network]
+      summary: "Private network CIDR"
+      description: "Scope / access: open to API tokens."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    put:
+      tags: [Network]
+      summary: "Set the private network CIDR"
+      description: "Scope / access: open to API tokens. Requires the owner/admin role."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [cidr], properties: { cidr: { type: string, example: 10.99.0.0/16 } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { cidr: { type: string }, resolver: { type: string } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /captcha/platform-config:
+    get:
+      tags: [Captcha]
+      summary: "Whether the platform CAPTCHA site is enabled (used for Zorven signup)"
+      description: "No authentication (widget endpoints are rate-limited per IP)."
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { enabled: { type: boolean }, sitekey: { type: string } } }
+
+  /captcha/challenge:
+    post:
+      tags: [Captcha]
+      summary: "Widget: request a PoW challenge"
+      description: "Called by the widget (`/captcha/v1/api.js`). CORS: the Origin is checked against the site domain list (not allowed: 403 `origin_not_allowed`). `signals` is optional; automation hints raise the difficulty. No authentication (widget endpoints are rate-limited per IP)."
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [sitekey], properties: { sitekey: { type: string }, signals: { type: object, additionalProperties: true } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { token: { type: string }, nonce: { type: string }, difficulty: { type: integer }, expires_at: { type: string, format: date-time } } }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { description: "rate_limited" }
+
+  /captcha/solve:
+    post:
+      tags: [Captcha]
+      summary: "Widget: submit the PoW solution"
+      description: "On a valid solution returns a signed, SINGLE-USE response token valid for 300 s, bound to the site and hostname. If the site has `pass_cookie` enabled, `pass` (the pass cookie value) is returned too. Automation signals: 403 `automated`. No authentication (widget endpoints are rate-limited per IP)."
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [token, counter], properties: { token: { type: string }, counter: { type: string, description: "SHA-256(nonce || decimal counter) leading-zero-bits" }, signals: { type: object, additionalProperties: true } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { response: { type: string }, expires_at: { type: string, format: date-time }, pass: { type: string }, pass_ttl_seconds: { type: integer } } }
+        "400": { description: "invalid_token | expired | already_used | invalid_solution" }
+        "403": { description: "origin_not_allowed | origin_mismatch | automated" }
+        "429": { description: "rate_limited" }
+
+  /captcha/renew:
+    post:
+      tags: [Captcha]
+      summary: "Widget: get a response with a pass cookie, no PoW"
+      description: "Exchanges a valid `zcap_pass` (signature + site + expiry) for a new single-use response. No IP binding. No authentication (widget endpoints are rate-limited per IP)."
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [sitekey, pass], properties: { sitekey: { type: string }, pass: { type: string } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { response: { type: string }, expires_at: { type: string, format: date-time } } }
+        "400": { description: "invalid_token | expired" }
+        "403": { description: "origin_not_allowed" }
+        "429": { description: "rate_limited" }
+
+  /captcha/siteverify:
+    post:
+      tags: [Captcha]
+      summary: "Verify a response token (siteverify)"
+      description: "Turnstile compatible. The body may be a form (`application/x-www-form-urlencoded`) or JSON. A failed verification also returns HTTP 200 with `success:false`. Error codes: missing-input-secret, invalid-input-secret, missing-input-response, invalid-input-response, timeout-or-duplicate, internal-error. Server-to-server; no session, authorized by `secret`."
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: { type: object, required: [secret, response], properties: { secret: { type: string }, response: { type: string }, remoteip: { type: string } } }
+          application/json:
+            schema: { type: object, required: [secret, response], properties: { secret: { type: string }, response: { type: string }, remoteip: { type: string } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { success: { type: boolean }, challenge_ts: { type: string, format: date-time }, hostname: { type: string }, "error-codes": { type: array, items: { type: string } } } }
+
+  /captcha/sites:
+    get:
+      tags: [Captcha]
+      summary: "List CAPTCHA sites"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens). Writes need owner/admin; reads are open to members. Returns today and last-7-days counters (`stats`) per site; the secret is never returned."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { sites: { type: array, items: { type: object, properties: { id: { type: string }, name: { type: string }, site_key: { type: string }, secret: { type: string, description: "zcsec_..., only on create/rotate" }, domains: { type: array, items: { type: string } }, difficulty: { type: integer, minimum: 14, maximum: 22 }, pass_cookie: { type: object, properties: { enabled: { type: boolean }, ttl_minutes: { type: integer, minimum: 5, maximum: 43200 } } }, created_at: { type: string, format: date-time }, updated_at: { type: string, format: date-time }, stats: { type: object, properties: { today: { $ref: "#/components/schemas/CaptchaTotals" }, last_7_days: { $ref: "#/components/schemas/CaptchaTotals" } } } } } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Captcha]
+      summary: "Create a CAPTCHA site"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens). Writes need owner/admin; reads are open to members. The `secret` (zcsec_...) in the response is shown ONLY here; only its hash is stored."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [name], properties: { name: { type: string }, domains: { type: array, items: { type: string } }, difficulty: { type: integer, minimum: 14, maximum: 22, default: 17 }, pass_cookie: { type: object, properties: { enabled: { type: boolean, default: false }, ttl_minutes: { type: integer, minimum: 5, maximum: 43200, default: 1440 } } } } }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { type: object, properties: { id: { type: string }, name: { type: string }, site_key: { type: string }, secret: { type: string, description: "zcsec_..., only on create/rotate" }, domains: { type: array, items: { type: string } }, difficulty: { type: integer, minimum: 14, maximum: 22 }, pass_cookie: { type: object, properties: { enabled: { type: boolean }, ttl_minutes: { type: integer, minimum: 5, maximum: 43200 } } }, created_at: { type: string, format: date-time }, updated_at: { type: string, format: date-time }, stats: { type: object, properties: { today: { $ref: "#/components/schemas/CaptchaTotals" }, last_7_days: { $ref: "#/components/schemas/CaptchaTotals" } } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /captcha/sites/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    patch:
+      tags: [Captcha]
+      summary: "Update a CAPTCHA site"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens). Writes need owner/admin; reads are open to members."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, properties: { name: { type: string }, domains: { type: array, items: { type: string } }, difficulty: { type: integer, minimum: 14, maximum: 22 }, pass_cookie: { type: object, properties: { enabled: { type: boolean }, ttl_minutes: { type: integer, minimum: 5, maximum: 43200 } } } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { id: { type: string }, name: { type: string }, site_key: { type: string }, secret: { type: string, description: "zcsec_..., only on create/rotate" }, domains: { type: array, items: { type: string } }, difficulty: { type: integer, minimum: 14, maximum: 22 }, pass_cookie: { type: object, properties: { enabled: { type: boolean }, ttl_minutes: { type: integer, minimum: 5, maximum: 43200 } } }, created_at: { type: string, format: date-time }, updated_at: { type: string, format: date-time }, stats: { type: object, properties: { today: { $ref: "#/components/schemas/CaptchaTotals" }, last_7_days: { $ref: "#/components/schemas/CaptchaTotals" } } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    delete:
+      tags: [Captcha]
+      summary: "Delete a CAPTCHA site"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens). Writes need owner/admin; reads are open to members."
+      responses:
+        "204": { description: "OK" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /captcha/sites/{id}/rotate-secret:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    post:
+      tags: [Captcha]
+      summary: "Rotate the secret"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens). Writes need owner/admin; reads are open to members. The new `secret` is shown only in this response; the old one stops working immediately."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { id: { type: string }, name: { type: string }, site_key: { type: string }, secret: { type: string, description: "zcsec_..., only on create/rotate" }, domains: { type: array, items: { type: string } }, difficulty: { type: integer, minimum: 14, maximum: 22 }, pass_cookie: { type: object, properties: { enabled: { type: boolean }, ttl_minutes: { type: integer, minimum: 5, maximum: 43200 } } }, created_at: { type: string, format: date-time }, updated_at: { type: string, format: date-time }, stats: { type: object, properties: { today: { $ref: "#/components/schemas/CaptchaTotals" }, last_7_days: { $ref: "#/components/schemas/CaptchaTotals" } } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /secrets:
+    get:
+      tags: [Secrets]
+      summary: "List secrets (no values)"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens)."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { secrets: { type: array, items: { $ref: "#/components/schemas/Secret" } }, count: { type: integer } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Secrets]
+      summary: "Create a secret"
+      description: "The value is encrypted and can never be read back. Reference it in policies as `{{secret:name}}`. Scope / access: dashboard session or OAuth `full` scope (closed to API tokens). Requires the owner/admin role."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [name, value], properties: { name: { type: string }, value: { type: string } } }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Secret" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /secrets/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    delete:
+      tags: [Secrets]
+      summary: "Delete a secret"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens). Requires the owner/admin role. When called through MCP `call_api`, `confirm=true` is required."
+      responses:
+        "204": { description: "OK" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api-tokens:
+    get:
+      tags: [Tokens]
+      summary: "List API tokens"
+      description: "Scope / access: dashboard session only. Also closed to the OAuth `full` scope (`403 full_scope_excluded`)."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { tokens: { type: array, items: { $ref: "#/components/schemas/APIToken" } }, count: { type: integer } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Tokens]
+      summary: "Create an API token"
+      description: "The token plaintext is returned once, in this response only. Requires a Pro+ plan. Scope / access: dashboard session only. Also closed to the OAuth `full` scope (`403 full_scope_excluded`)."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [name, scopes], properties: { name: { type: string }, scopes: { type: array, items: { type: string } }, expires_in_days: { type: [integer, "null"], minimum: 0, maximum: 3650 }, expires_at: { type: [string, "null"], format: date-time } } }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /api-tokens/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    delete:
+      tags: [Tokens]
+      summary: "Revoke an API token"
+      description: "Scope / access: dashboard session only. Also closed to the OAuth `full` scope (`403 full_scope_excluded`). When called through MCP `call_api`, `confirm=true` is required."
+      responses:
+        "204": { description: "OK" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api-tokens/{id}/rotate:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    post:
+      tags: [Tokens]
+      summary: "Rotate an API token"
+      description: "Scope / access: dashboard session only. Also closed to the OAuth `full` scope (`403 full_scope_excluded`). When called through MCP `call_api`, `confirm=true` is required."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /tokens:
+    get:
+      tags: [Tokens]
+      summary: "List API tokens (alias)"
+      description: "Scope / access: dashboard session only. Also closed to the OAuth `full` scope (`403 full_scope_excluded`)."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { tokens: { type: array, items: { $ref: "#/components/schemas/APIToken" } }, count: { type: integer } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Tokens]
+      summary: "Create an API token (alias)"
+      description: "The token plaintext is returned once, in this response only. Requires a Pro+ plan. Scope / access: dashboard session only. Also closed to the OAuth `full` scope (`403 full_scope_excluded`)."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [name, scopes], properties: { name: { type: string }, scopes: { type: array, items: { type: string } }, expires_in_days: { type: [integer, "null"], minimum: 0, maximum: 3650 }, expires_at: { type: [string, "null"], format: date-time } } }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /tokens/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    delete:
+      tags: [Tokens]
+      summary: "Revoke an API token"
+      description: "Scope / access: dashboard session only. Also closed to the OAuth `full` scope (`403 full_scope_excluded`). When called through MCP `call_api`, `confirm=true` is required."
+      responses:
+        "204": { description: "OK" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /tokens/{id}/rotate:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    post:
+      tags: [Tokens]
+      summary: "Rotate an API token"
+      description: "Scope / access: dashboard session only. Also closed to the OAuth `full` scope (`403 full_scope_excluded`). When called through MCP `call_api`, `confirm=true` is required."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /team/members:
+    get:
+      tags: [Team]
+      summary: "Team members"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens)."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { members: { type: array, items: { $ref: "#/components/schemas/TeamMember" } }, count: { type: integer } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /team/members/invite:
+    post:
+      tags: [Team]
+      summary: "Invite a member"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens). Requires the owner/admin role."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [email], properties: { email: { type: string, format: email }, name: { type: string }, role: { type: string, enum: [admin, member] } } }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TeamMember" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /team/members/{id}/role:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    patch:
+      tags: [Team]
+      summary: "Change a member's role"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens). Requires the owner/admin role."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [role], properties: { role: { type: string, enum: [admin, member] } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { success: { type: boolean } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /team/members/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    delete:
+      tags: [Team]
+      summary: "Remove a member"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens). Requires the owner/admin role. When called through MCP `call_api`, `confirm=true` is required."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { success: { type: boolean } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /team/members/{id}/resend:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    post:
+      tags: [Team]
+      summary: "Resend an invitation"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens). Requires the owner/admin role."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { success: { type: boolean }, email_sent: { type: boolean } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /team/members/{id}/tokens:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Team]
+      summary: "Member's client tokens"
+      description: "Scope / access: dashboard session only. Also closed to the OAuth `full` scope (`403 full_scope_excluded`). Requires the owner/admin role."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Client" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Team]
+      summary: "Create a client token for a member"
+      description: "Scope / access: dashboard session only. Also closed to the OAuth `full` scope (`403 full_scope_excluded`). Requires the owner/admin role."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, properties: { name: { type: string } } }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /team/members/{id}/tokens/{client_id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+      - { name: client_id, in: path, required: true, schema: { type: string } }
+    delete:
+      tags: [Team]
+      summary: "Revoke a member's client token"
+      description: "Scope / access: dashboard session only. Also closed to the OAuth `full` scope (`403 full_scope_excluded`). Requires the owner/admin role. When called through MCP `call_api`, `confirm=true` is required."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { success: { type: boolean } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /invitations:
+    get:
+      tags: [Team]
+      summary: "My pending invitations"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens)."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { invitations: { type: array, items: { type: object, additionalProperties: true } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /invitations/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Team]
+      summary: "Invitation detail"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens)."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /invitations/{id}/accept:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    post:
+      tags: [Team]
+      summary: "Accept an invitation"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens)."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /invitations/{id}/decline:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    post:
+      tags: [Team]
+      summary: "Decline an invitation"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens)."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { success: { type: boolean } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /mail/info:
+    get:
+      tags: [Mail]
+      summary: "Mailbox info"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens)."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { enabled: { type: boolean }, address: { type: string }, unseen: { type: integer } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /mail/messages:
+    get:
+      tags: [Mail]
+      summary: "List messages"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens)."
+      parameters:
+        - { name: box, in: query, schema: { type: string }, description: "folder" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/MailMessage" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /mail/messages/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Mail]
+      summary: "Get a message"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens)."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MailMessage" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Mail]
+      summary: "Delete a message"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens). When called through MCP `call_api`, `confirm=true` is required."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { success: { type: boolean } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /mail/messages/{id}/move:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    post:
+      tags: [Mail]
+      summary: "Move a message to a folder"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens)."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [folder], properties: { folder: { type: string } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { success: { type: boolean }, folder: { type: string } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /mail/folders:
+    get:
+      tags: [Mail]
+      summary: "Folders"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens)."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { folders: { type: array, items: { type: string } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /mail/attachments/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Mail]
+      summary: "Download an attachment"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens)."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /mail/send:
+    post:
+      tags: [Mail]
+      summary: "Send an email"
+      description: "External recipients are Enterprise-only; otherwise `403 external_mail_not_allowed`. Scope / access: dashboard session or OAuth `full` scope (closed to API tokens). When called through MCP `call_api`, `confirm=true` is required."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [to, subject, body], properties: { to: { type: string }, subject: { type: string }, body: { type: string }, in_reply_to: { type: string }, from: { type: string }, template: { type: string }, attachments: { type: array, items: { type: object, properties: { filename: { type: string }, content_type: { type: string }, content_base64: { type: string } } } } } }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { type: object, properties: { success: { type: boolean }, message_id: { type: string } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /mail/app-passwords:
+    get:
+      tags: [Mail]
+      summary: "Mail app passwords"
+      description: "Scope / access: dashboard session only. Also closed to the OAuth `full` scope (`403 full_scope_excluded`)."
+      parameters:
+        - { name: mailbox, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Mail]
+      summary: "Create an app password"
+      description: "Scope / access: dashboard session only. Also closed to the OAuth `full` scope (`403 full_scope_excluded`)."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, properties: { label: { type: string, maxLength: 60 }, mailbox: { type: string } } }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /mail/app-passwords/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    delete:
+      tags: [Mail]
+      summary: "Revoke an app password"
+      description: "Scope / access: dashboard session only. Also closed to the OAuth `full` scope (`403 full_scope_excluded`). When called through MCP `call_api`, `confirm=true` is required."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { success: { type: boolean } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /mail/mobileconfig:
+    get:
+      tags: [Mail]
+      summary: "iOS/macOS mail profile"
+      description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens)."
+      parameters:
+        - { name: mailbox, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/x-apple-aspen-config:
+              schema: { type: string, format: binary }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /admin/stats:
+    get:
+      tags: ["Platform admin"]
+      summary: "Platform statistics"
+      description: "Scope / access: real platform admins only (dashboard session or OAuth `full`); otherwise `403 forbidden`."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /admin/tcp-pool:
+    get:
+      tags: ["Platform admin"]
+      summary: "TCP port pool"
+      description: "Scope / access: real platform admins only (dashboard session or OAuth `full`); otherwise `403 forbidden`."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /admin/tenants:
+    get:
+      tags: ["Platform admin"]
+      summary: "List tenants"
+      description: "Scope / access: real platform admins only (dashboard session or OAuth `full`); otherwise `403 forbidden`."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { type: object, additionalProperties: true } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /admin/clients:
+    get:
+      tags: ["Platform admin"]
+      summary: "All clients"
+      description: "Scope / access: real platform admins only (dashboard session or OAuth `full`); otherwise `403 forbidden`."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { type: object, additionalProperties: true } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /admin/hostnames:
+    get:
+      tags: ["Platform admin"]
+      summary: "All hostnames"
+      description: "Scope / access: real platform admins only (dashboard session or OAuth `full`); otherwise `403 forbidden`."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { type: object, additionalProperties: true } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /admin/abuse-reports:
+    get:
+      tags: ["Platform admin"]
+      summary: "Abuse reports"
+      description: "Scope / access: real platform admins only (dashboard session or OAuth `full`); otherwise `403 forbidden`."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { reports: { type: array, items: { type: object, additionalProperties: true } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /admin/clients/notify-update:
+    post:
+      tags: ["Platform admin"]
+      summary: "Notify clients of an update"
+      description: "Scope / access: real platform admins only (dashboard session or OAuth `full`); otherwise `403 forbidden`."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { notified: { type: integer } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /admin/switch-tenant:
+    post:
+      tags: ["Platform admin"]
+      summary: "Switch tenant"
+      description: "Scope / access: real platform admins only (dashboard session or OAuth `full`); otherwise `403 forbidden`."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [tenant_id], properties: { tenant_id: { type: string } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /admin/abuse/freeze:
+    post:
+      tags: ["Platform admin"]
+      summary: "Freeze a hostname or tunnel"
+      description: "Scope / access: real platform admins only (dashboard session or OAuth `full`); otherwise `403 forbidden`. When called through MCP `call_api`, `confirm=true` is required."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [frozen], properties: { fqdn: { type: string }, tunnel_id: { type: string }, frozen: { type: boolean } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { ok: { type: boolean }, frozen: { type: boolean } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /.well-known/oauth-authorization-server:
+    servers:
+      - url: https://zorven.app
+    get:
+      tags: ["OAuth & MCP"]
+      summary: "OAuth authorization server metadata (RFC 8414)"
+      description: "`grant_types_supported`: authorization_code, refresh_token; `code_challenge_methods_supported`: S256; `token_endpoint_auth_methods_supported`: none; `scopes_supported`: the scope list (including `full`); `resource_indicators_supported`: true. No authentication."
+      security: []
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/OAuthServerMetadata" } } } }
+
+  /.well-known/oauth-protected-resource:
+    servers:
+      - url: https://zorven.app
+    get:
+      tags: ["OAuth & MCP"]
+      summary: "Protected resource metadata (RFC 9728)"
+      description: "Advertises the management resource `https://<host>/mcp` and its authorization server. The `WWW-Authenticate` header of the MCP endpoint's 401 points here."
+      security: []
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+
+  /.well-known/jwks.json:
+    servers:
+      - url: https://zorven.app
+    get:
+      tags: ["OAuth & MCP"]
+      summary: "Access-token signing keys (JWKS)"
+      description: "Public key set for verifying `at+jwt` access-token signatures."
+      security: []
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+
+  /oauth/register:
+    servers:
+      - url: https://zorven.app
+    post:
+      tags: ["OAuth & MCP"]
+      summary: "Dynamic client registration (RFC 7591)"
+      description: "Public clients only (`token_endpoint_auth_method=none`). PKCE S256 is mandatory. The returned `client_id` is used in the authorization flow."
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [redirect_uris]
+              properties:
+                client_name: { type: string }
+                redirect_uris: { type: array, items: { type: string } }
+                grant_types: { type: array, items: { type: string, enum: [authorization_code, refresh_token] } }
+                response_types: { type: array, items: { type: string, enum: [code] } }
+                token_endpoint_auth_method: { type: string, enum: [none] }
+      responses:
+        "201": { description: Created, content: { application/json: { schema: { type: object, properties: { client_id: { type: string }, client_name: { type: string }, redirect_uris: { type: array, items: { type: string } } } } } } }
+        "400": { description: invalid_client_metadata / invalid_redirect_uri }
+
+  /oauth/authorize:
+    servers:
+      - url: https://zorven.app
+    get:
+      tags: ["OAuth & MCP"]
+      summary: "Authorization request (authorization_code + PKCE)"
+      description: "A browser redirect: sends the user to the dashboard consent page and, after consent, returns to `redirect_uri` with `code`, `state` and `iss`. `code_challenge_method=S256` is mandatory. If `full` is requested in `scope`, or the user ticks it on the consent screen, step-up applies: when the dashboard session was not opened in the last 5 minutes the result is `403 reauth_required` and a re-login."
+      security: []
+      parameters:
+        - { name: response_type, in: query, required: true, schema: { type: string, enum: [code] } }
+        - { name: client_id, in: query, required: true, schema: { type: string } }
+        - { name: redirect_uri, in: query, required: true, schema: { type: string } }
+        - { name: code_challenge, in: query, required: true, schema: { type: string } }
+        - { name: code_challenge_method, in: query, required: true, schema: { type: string, enum: [S256] } }
+        - { name: scope, in: query, schema: { type: string, example: "mcp:read tunnels:write" } }
+        - { name: state, in: query, schema: { type: string } }
+        - { name: resource, in: query, schema: { type: string, example: "https://zorven.app/mcp" } }
+      responses:
+        "302": { description: Redirect }
+        "400": { description: invalid_request / invalid_scope }
+
+  /oauth/token:
+    servers:
+      - url: https://zorven.app
+    post:
+      tags: ["OAuth & MCP"]
+      summary: "Token endpoint"
+      description: "Accepts `authorization_code` (code + `code_verifier`) or `refresh_token`. The access token is `at+jwt`, 1 hour (30 minutes for `full`). The refresh token rotates; reuse revokes the family; 30 days (7 days sliding for `full`, and refresh is refused once the grant is older than 30 days)."
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [grant_type]
+              properties:
+                grant_type: { type: string, enum: [authorization_code, refresh_token] }
+                code: { type: string }
+                code_verifier: { type: string }
+                redirect_uri: { type: string }
+                client_id: { type: string }
+                refresh_token: { type: string }
+                resource: { type: string, example: "https://zorven.app/mcp" }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/OAuthTokenResponse" } } } }
+        "400": { description: "invalid_request / invalid_grant / invalid_scope" }
+
+  /oauth/revoke:
+    servers:
+      - url: https://zorven.app
+    post:
+      tags: ["OAuth & MCP"]
+      summary: "Token revocation (RFC 7009)"
+      description: "Revokes a refresh token (and its grant)."
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: { type: object, required: [token], properties: { token: { type: string }, client_id: { type: string } } }
+      responses:
+        "200": { description: OK }
+
+  /mcp:
+    servers:
+      - url: https://zorven.app
+    post:
+      tags: ["OAuth & MCP"]
+      summary: "MCP request (JSON-RPC, streamable HTTP)"
+      description: "The management MCP endpoint. `Authorization: Bearer` with an API token (`zrv_api_...`) or an OAuth access token. A 401 carries `WWW-Authenticate: Bearer resource_metadata=\"...\"`. A token with the `full` scope unlocks the `list_api_endpoints` and `call_api` tools; `call_api` only calls `/api/v1` endpoints, requires `confirm=true` for DELETE and destructive verbs, caps responses at 256 KB and returns `403 full_scope_excluded` on excluded endpoints."
+      security:
+        - bearerAuth: []
+        - oauth2: [mcp:read]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true, description: JSON-RPC 2.0 }
+      responses:
+        "200": { description: OK }
+        "401": { description: "Unauthorized (WWW-Authenticate: Bearer resource_metadata=...)" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    get:
+      tags: ["OAuth & MCP"]
+      summary: "MCP stream (SSE, streamable HTTP)"
+      description: "The management MCP endpoint. `Authorization: Bearer` with an API token (`zrv_api_...`) or an OAuth access token. A 401 carries `WWW-Authenticate: Bearer resource_metadata=\"...\"`. A token with the `full` scope unlocks the `list_api_endpoints` and `call_api` tools; `call_api` only calls `/api/v1` endpoints, requires `confirm=true` for DELETE and destructive verbs, caps responses at 256 KB and returns `403 full_scope_excluded` on excluded endpoints."
+      security:
+        - bearerAuth: []
+        - oauth2: [mcp:read]
+      responses:
+        "200": { description: OK }
+        "401": { description: "Unauthorized (WWW-Authenticate: Bearer resource_metadata=...)" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
 components:
   securitySchemes:
     bearerAuth:
@@ -666,6 +3164,28 @@ components:
       scheme: bearer
       bearerFormat: zrv_api_...
       description: "API token created in the dashboard. `Authorization: Bearer zrv_api_...`"
+    oauth2:
+      type: oauth2
+      description: "OAuth 2.1 (authorization_code + PKCE S256). For the /mcp endpoint and /api/v1 with an OAuth access token."
+      flows:
+        authorizationCode:
+          authorizationUrl: https://zorven.app/oauth/authorize
+          tokenUrl: https://zorven.app/oauth/token
+          refreshUrl: https://zorven.app/oauth/token
+          scopes:
+            mcp:read: "Read-only"
+            mcp:manage: "Read + management writes"
+            clients:read: Clients (read)
+            clients:write: Clients (write)
+            tunnels:read: Tunnels (read)
+            tunnels:write: Tunnels (write)
+            tunnels:delete: "Delete tunnels (destructive)"
+            hostnames:read: Hostnames (read)
+            hostnames:write: Hostnames (write)
+            hostnames:delete: "Delete hostnames (destructive)"
+            analytics:read: Analytics (read)
+            mcp: "Tunnel MCP resources only"
+            full: "Full access: same authority as the dashboard session (step-up required)"
 
   parameters:
     PathID:
@@ -722,6 +3242,15 @@ components:
           schema: { $ref: "#/components/schemas/Error" }
 
   schemas:
+    CaptchaTotals:
+      type: object
+      properties:
+        challenge: { type: integer }
+        solve: { type: integer }
+        verify_ok: { type: integer }
+        verify_fail: { type: integer }
+        renewals: { type: integer }
+        unique_passes: { type: integer }
     Error:
       type: object
       properties:
@@ -764,6 +3293,8 @@ components:
         fqdn: { type: string, example: "api.zorven.app" }
         type: { type: string, enum: [global, scoped, legacy, custom], description: "global = short name, scoped = tenant name" }
         verified: { type: boolean }
+        suspended_reason: { type: string, enum: [plan_limit], description: "When set, the name is suspended by a plan limit (access closed, not deleted)" }
+        suspended_at: { type: string, format: date-time }
         created_at: { type: string, format: date-time }
 
     IPRule:
@@ -875,3 +3406,207 @@ components:
         effective_bandwidth_limit_bytes: { type: [integer, "null"], description: "Monthly traffic limit including extra GB; null = unlimited" }
         created_at: { type: string, format: date-time }
         plan_details: { $ref: "#/components/schemas/Plan" }
+
+    Ok:
+      type: object
+      properties:
+        ok: { type: boolean }
+
+    Project:
+      type: object
+      properties:
+        id: { type: string }
+        tenant_id: { type: string }
+        name: { type: string }
+        slug: { type: string }
+        created_at: { type: string, format: date-time }
+
+    PolicyBinding:
+      type: object
+      properties:
+        policy_id: { type: string }
+        tunnel_id: { type: string }
+        hostname: { type: string }
+
+    Policy:
+      type: object
+      properties:
+        id: { type: string }
+        tenant_id: { type: string }
+        project_id: { type: string }
+        name: { type: string }
+        config: { type: object, additionalProperties: true }
+        enabled: { type: boolean }
+        priority: { type: integer }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        bindings:
+          type: array
+          items: { $ref: "#/components/schemas/PolicyBinding" }
+
+    Device:
+      allOf:
+        - $ref: "#/components/schemas/Client"
+        - type: object
+          properties:
+            tunnels:
+              type: array
+              items: { $ref: "#/components/schemas/Tunnel" }
+            tags: { type: object, additionalProperties: { type: string } }
+
+    Secret:
+      type: object
+      properties:
+        id: { type: string }
+        tenant_id: { type: string }
+        project_id: { type: string }
+        name: { type: string }
+        key_version: { type: integer }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    APIToken:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        token_id: { type: string }
+        token_prefix: { type: string }
+        scopes: { type: array, items: { type: string } }
+        last_used_at: { type: [string, "null"], format: date-time }
+        expires_at: { type: [string, "null"], format: date-time }
+        revoked_at: { type: [string, "null"], format: date-time }
+        created_at: { type: string, format: date-time }
+
+    TeamMember:
+      type: object
+      properties:
+        id: { type: string }
+        user_id: { type: string }
+        email: { type: string }
+        name: { type: string }
+        role: { type: string, enum: [owner, admin, member] }
+        status: { type: string }
+        tokens_count: { type: integer }
+        email_sent: { type: boolean }
+        created_at: { type: string, format: date-time }
+
+    MailMessage:
+      type: object
+      properties:
+        id: { type: string }
+        direction: { type: string, enum: [inbound, outbound] }
+        from: { type: string }
+        to: { type: string }
+        subject: { type: string }
+        text_body: { type: string }
+        html_body: { type: string }
+        message_id: { type: string }
+        in_reply_to: { type: string }
+        seen: { type: boolean }
+        received_at: { type: string, format: date-time }
+
+    TunnelAlert:
+      type: object
+      properties:
+        tunnel_id: { type: string }
+        enabled: { type: boolean }
+        error_rate_pct: { type: integer }
+        window_min: { type: integer }
+        min_requests: { type: integer }
+        notify_email: { type: string }
+        state: { type: string, enum: [ok, firing] }
+        last_changed_at: { type: [string, "null"], format: date-time }
+        last_notified_at: { type: [string, "null"], format: date-time }
+
+    TunnelSecurity:
+      type: object
+      properties:
+        tunnel_id: { type: string }
+        config: { type: object, additionalProperties: true }
+        updated_at: { type: string, format: date-time }
+        bot:
+          type: object
+          description: "Bot protection (proof-of-work check). mode=always and rate limiting require Pro+; on lower plans always -> suspicious and rate is not enforced (settings are kept)."
+          properties:
+            mode: { type: string, enum: [off, suspicious, always] }
+            difficulty: { type: integer, minimum: 12, maximum: 22, default: 18, description: "PoW bit count (12-22, default 18)" }
+            ttl_minutes: { type: integer, minimum: 5, maximum: 10080, default: 60, description: "Verification cookie lifetime in minutes (5-10080, default 60)" }
+            exclude_paths: { type: array, maxItems: 32, items: { type: string }, description: "Excluded paths (max 32, `*` only at the end)" }
+            allow_verified_bots: { type: boolean, default: true, description: "Verified search-engine bots pass (default true)" }
+            block_empty_ua: { type: boolean, default: false, description: "Block requests with an empty User-Agent (default false)" }
+        rate:
+          type: object
+          description: "Rate limit (per tunnel+IP, per window). Pro+."
+          properties:
+            enabled: { type: boolean }
+            requests: { type: integer, minimum: 1, maximum: 100000, default: 120, description: "Requests per window (1-100000, default 120)" }
+            window_seconds: { type: integer, minimum: 1, maximum: 3600, default: 60, description: "Window length in seconds (1-3600, default 60)" }
+            action: { type: string, enum: [block, challenge], default: block, description: "Action when exceeded (default block)" }
+            exclude_paths: { type: array, maxItems: 32, items: { type: string }, description: "Excluded paths (max 32, `*` only at the end)" }
+
+    PathRoute:
+      type: object
+      properties:
+        id: { type: string }
+        fqdn: { type: string }
+        path_prefix: { type: string }
+        tunnel_id: { type: string }
+        created_at: { type: string, format: date-time }
+
+    Grantee:
+      type: object
+      required: [type, id]
+      properties:
+        type: { type: string, enum: [user, group, device] }
+        id: { type: string }
+
+    NetShare:
+      type: object
+      properties:
+        id: { type: string }
+        owner_client_id: { type: string }
+        name: { type: string }
+        proto: { type: string }
+        port: { type: integer }
+        grantees: { type: array, items: { $ref: "#/components/schemas/Grantee" } }
+        expires_at: { type: [string, "null"], format: date-time }
+        ephemeral: { type: boolean }
+        created_at: { type: string, format: date-time }
+
+    TunRule:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        src: { $ref: "#/components/schemas/Grantee" }
+        dst: { type: string }
+        proto: { type: string }
+        ports: { type: string }
+        src_name: { type: string }
+        dst_name: { type: string }
+
+    OAuthServerMetadata:
+      type: object
+      properties:
+        issuer: { type: string }
+        authorization_endpoint: { type: string }
+        token_endpoint: { type: string }
+        registration_endpoint: { type: string }
+        revocation_endpoint: { type: string }
+        jwks_uri: { type: string }
+        response_types_supported: { type: array, items: { type: string } }
+        grant_types_supported: { type: array, items: { type: string } }
+        code_challenge_methods_supported: { type: array, items: { type: string } }
+        token_endpoint_auth_methods_supported: { type: array, items: { type: string } }
+        scopes_supported: { type: array, items: { type: string } }
+        resource_indicators_supported: { type: boolean }
+
+    OAuthTokenResponse:
+      type: object
+      properties:
+        access_token: { type: string }
+        token_type: { type: string, example: Bearer }
+        expires_in: { type: integer, description: "3600; 1800 for the full scope" }
+        refresh_token: { type: string }
+        scope: { type: string }

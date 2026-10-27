@@ -50,6 +50,15 @@ if [ -n "$DESKTOP_JSON" ]; then
   chmod 644 "$OUT/desktop.json"
 fi
 
+# Windows Mod B icin wintun.dll (WireGuard LLC, imzali, degistirilmemis): resmi
+# kaynaktan indirilir, sha256 dogrulanir; dist/'e konur ve imzali manifest'e
+# girer. Atlamak icin ZORVEN_SKIP_WINTUN=1 (Windows tam ag katmani calismaz).
+WITH_WINTUN=0
+if [ "${ZORVEN_SKIP_WINTUN:-0}" != "1" ]; then
+  "$ROOT/scripts/fetch-wintun.sh" "$OUT"
+  WITH_WINTUN=1
+fi
+
 echo "rpshell-client derleniyor (surum: $VERSION)"
 echo
 
@@ -99,6 +108,18 @@ sha_of() { sha256sum "$1" 2>/dev/null | awk '{print $1}' || shasum -a 256 "$1" |
     printf '    "%s": {"name": "%s", "sha256": "%s", "size": %s}' \
       "$key" "$served" "$sha" "$sz"
   done
+  if [ "$WITH_WINTUN" = "1" ]; then
+    # Ek dosyalar: istemci "<os>/<arch>+wintun" anahtarindan okur; eski istemciler
+    # bilmedigi anahtari yok sayar. Manifest imzasi bunlari da kapsar.
+    for arch in amd64 arm64; do
+      f="$OUT/wintun-${arch}.dll"
+      printf ',\n    "windows/%s+wintun": {"name": "wintun-%s.dll", "sha256": "%s", "size": %s}' \
+        "$arch" "$arch" "$(sha_of "$f")" "$(wc -c < "$f" | tr -d ' ')"
+    done
+    f="$OUT/wintun-LICENSE.txt"
+    printf ',\n    "any+wintun-license": {"name": "wintun-LICENSE.txt", "sha256": "%s", "size": %s}' \
+      "$(sha_of "$f")" "$(wc -c < "$f" | tr -d ' ')"
+  fi
   printf '\n  }\n}\n'
 } > "$OUT/manifest.json"
 echo "  -> $OUT/manifest.json (surum $VERSION)"

@@ -76,9 +76,9 @@ func (o *OAuthStore) CountClients(ctx context.Context) (int, error) {
 
 func (o *OAuthStore) CreateCode(ctx context.Context, hash string, c oauthas.Code) error {
 	_, err := o.pool.Exec(ctx,
-		`INSERT INTO oauth_codes (code_hash, client_id, user_id, tenant_id, redirect_uri, scope, resource, code_challenge, expires_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-		hash, c.ClientID, c.UserID, c.TenantID, c.RedirectURI, c.Scope, c.Resource, c.CodeChallenge, c.ExpiresAt)
+		`INSERT INTO oauth_codes (code_hash, client_id, user_id, tenant_id, redirect_uri, scope, resource, code_challenge, expires_at, step_up_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+		hash, c.ClientID, c.UserID, c.TenantID, c.RedirectURI, c.Scope, c.Resource, c.CodeChallenge, c.ExpiresAt, c.StepUpAt)
 	return err
 }
 
@@ -88,8 +88,8 @@ func (o *OAuthStore) ConsumeCode(ctx context.Context, hash string, now time.Time
 	err := o.pool.QueryRow(ctx,
 		`UPDATE oauth_codes SET used_at = $2
 		  WHERE code_hash = $1 AND used_at IS NULL AND expires_at >= $2
-		 RETURNING client_id, user_id, tenant_id, redirect_uri, scope, resource, code_challenge, expires_at`,
-		hash, now).Scan(&c.ClientID, &c.UserID, &c.TenantID, &c.RedirectURI, &c.Scope, &c.Resource, &c.CodeChallenge, &c.ExpiresAt)
+		 RETURNING client_id, user_id, tenant_id, redirect_uri, scope, resource, code_challenge, expires_at, step_up_at`,
+		hash, now).Scan(&c.ClientID, &c.UserID, &c.TenantID, &c.RedirectURI, &c.Scope, &c.Resource, &c.CodeChallenge, &c.ExpiresAt, &c.StepUpAt)
 	if err == nil {
 		return c, nil
 	}
@@ -98,28 +98,29 @@ func (o *OAuthStore) ConsumeCode(ctx context.Context, hash string, now time.Time
 	}
 	var used *time.Time
 	var exp time.Time
-	err = o.pool.QueryRow(ctx, `SELECT used_at, expires_at FROM oauth_codes WHERE code_hash = $1`, hash).Scan(&used, &exp)
+	err = o.pool.QueryRow(ctx, `SELECT used_at, expires_at, client_id, user_id, tenant_id FROM oauth_codes WHERE code_hash = $1`,
+		hash).Scan(&used, &exp, &c.ClientID, &c.UserID, &c.TenantID)
 	if errors.Is(err, pgx.ErrNoRows) || (err == nil && used == nil) {
 		return oauthas.Code{}, oauthas.ErrNotFound
 	}
 	if err != nil {
 		return oauthas.Code{}, err
 	}
-	return oauthas.Code{}, oauthas.ErrUsed
+	return oauthas.Code{ClientID: c.ClientID, UserID: c.UserID, TenantID: c.TenantID}, oauthas.ErrUsed
 }
 
 func (o *OAuthStore) CreateGrant(ctx context.Context, g oauthas.Grant) error {
 	_, err := o.pool.Exec(ctx,
-		`INSERT INTO oauth_grants (id, user_id, tenant_id, client_id, resource, scope, created_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7)`, g.ID, g.UserID, g.TenantID, g.ClientID, g.Resource, g.Scope, g.CreatedAt)
+		`INSERT INTO oauth_grants (id, user_id, tenant_id, client_id, resource, scope, created_at, step_up_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, g.ID, g.UserID, g.TenantID, g.ClientID, g.Resource, g.Scope, g.CreatedAt, g.StepUpAt)
 	return err
 }
 
-const oauthGrantCols = `g.id, g.user_id, g.tenant_id, g.client_id, c.client_name, g.resource, g.scope, g.created_at, g.last_used_at, g.revoked_at`
+const oauthGrantCols = `g.id, g.user_id, g.tenant_id, g.client_id, c.client_name, g.resource, g.scope, g.created_at, g.last_used_at, g.revoked_at, g.step_up_at`
 
 func scanOAuthGrant(row pgx.Row) (oauthas.Grant, error) {
 	var g oauthas.Grant
-	err := row.Scan(&g.ID, &g.UserID, &g.TenantID, &g.ClientID, &g.ClientName, &g.Resource, &g.Scope, &g.CreatedAt, &g.LastUsedAt, &g.RevokedAt)
+	err := row.Scan(&g.ID, &g.UserID, &g.TenantID, &g.ClientID, &g.ClientName, &g.Resource, &g.Scope, &g.CreatedAt, &g.LastUsedAt, &g.RevokedAt, &g.StepUpAt)
 	return g, err
 }
 

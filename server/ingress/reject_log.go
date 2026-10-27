@@ -117,6 +117,12 @@ func accessRejectReason(status int) string {
 // host 404) cagrilmaz. Dahili yollar (/_zva/, /_zvb/, /_zvd/) erisim olaylarina
 // zaten yazildigi icin atlanir. Tunel basina hiz sinirlidir.
 func (h *Handler) logReject(tun store.HostRoute, r *http.Request, status int, reason string, started time.Time) {
+	h.logRejectID(tun, r, status, reason, started, "")
+}
+
+// logRejectID, logReject ile aynidir; id doluysa kayit bu istek kimligiyle yazilir
+// (yanitta X-Zorven-Request-Id olarak istemciye de verilmistir).
+func (h *Handler) logRejectID(tun store.HostRoute, r *http.Request, status int, reason string, started time.Time, id string) {
 	if tun.TunnelID == "" || tun.TenantID == "" {
 		return
 	}
@@ -132,6 +138,7 @@ func (h *Handler) logReject(tun store.HostRoute, r *http.Request, status int, re
 		return
 	}
 	h.emitEntry(reqlog.Entry{
+		ID:           id,
 		TunnelID:     tun.TunnelID,
 		TenantID:     tun.TenantID,
 		Hostname:     normalizeHost(r.Host),

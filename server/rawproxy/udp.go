@@ -101,6 +101,9 @@ type udpFlow struct {
 	// Web-door: yalnizca grant sayesinde kabul edilen flow'lar icin.
 	grantExp time.Time // sifir degilse flow bu ana kadar yasayabilir
 	unreg    func()    // grant iptalinde kesilebilmesi icin kayit silici
+
+	// unregLive: canli akis defteri (Reevaluate) kaydini siler.
+	unregLive func()
 }
 
 // udpCounters, dinleyici basladigindan beri biriken sayaclar.
@@ -286,6 +289,8 @@ func (ul *udpListener) openFlow(ti TunnelInfo, src *net.UDPAddr, key string) *ud
 	if !grantExp.IsZero() {
 		f.unreg = ul.m.doorConns.add(ti.TunnelID, src.IP.String(), func() { ul.removeFlow(key, f) })
 	}
+	// Z2: her flow yeniden degerlendirme icin kaydedilir.
+	f.unregLive = ul.m.registerLive(ti, src.IP.String(), true, func() { ul.removeFlow(key, f) })
 	ul.mu.Lock()
 	ul.flows[key] = f
 	if len(ul.flows) > ul.peakFlows {
@@ -354,6 +359,9 @@ func (ul *udpListener) removeFlow(key string, f *udpFlow) {
 	ul.mu.Unlock()
 	if f.unreg != nil {
 		f.unreg()
+	}
+	if f.unregLive != nil {
+		f.unregLive()
 	}
 	f.cancel()
 	f.stream.Close("flow closed")

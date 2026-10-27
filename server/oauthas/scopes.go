@@ -10,21 +10,44 @@ import (
 const (
 	ScopeMCPRead   = "mcp:read"
 	ScopeMCPManage = "mcp:manage"
+	// ScopeTunnelAccess, bir kullanicinin MCP tunel kaynagina erisim kapsami
+	// (yalnizca tunel kaynaklarinda verilir; yonetim kaynaginda gecersizdir).
+	ScopeTunnelAccess = "mcp"
+	// Silme kapsamlari: her biri ayri onay ister, onay ekraninda varsayilan KAPALIDIR
+	// ve mcp:manage icinde YER ALMAZ.
+	ScopeTunnelsDelete   = "tunnels:delete"
+	ScopeHostnamesDelete = "hostnames:delete"
+	// ScopeFull, "tam erisim": kullanicinin panel oturumuyla yapabildigi HER SEYI
+	// (rol, kaynak politikalari, plan kapilari dahil; kullanicinin yetkisini
+	// asmadan) yapabilme kapsami. Yalnizca yonetim kaynaginda (/mcp) verilir,
+	// onay ekraninda varsayilan KAPALIDIR, taze yeniden giris (step-up) ister ve
+	// kisa omurludur (FullAccessTTL, FullRefreshTTL, StepUpMaxAge).
+	ScopeFull = "full"
 )
 
 // ScopeInfo, onay ekraninda gosterilen kapsam bilgisi.
 type ScopeInfo struct {
 	ID    string `json:"id"`
 	Write bool   `json:"write"`
+	// Destructive, geri donusu olmayan islem kapsami; onay ekraninda varsayilan
+	// kapali gelir ve acikca secilmedikce verilmez.
+	Destructive bool `json:"destructive,omitempty"`
+	// Full, "tam erisim" kapsami: onay ekraninda ayri uyari bolumunde, varsayilan
+	// kapali; verilmesi icin taze giris (step-up) gerekir.
+	Full bool `json:"full,omitempty"`
 }
 
 var scopeCatalog = []ScopeInfo{
-	{ScopeMCPRead, false},
-	{ScopeMCPManage, true},
-	{"clients:read", false}, {"clients:write", true},
-	{"tunnels:read", false}, {"tunnels:write", true},
-	{"hostnames:read", false}, {"hostnames:write", true},
-	{"analytics:read", false},
+	{ScopeMCPRead, false, false, false},
+	{ScopeMCPManage, true, false, false},
+	{"clients:read", false, false, false}, {"clients:write", true, false, false},
+	{"tunnels:read", false, false, false}, {"tunnels:write", true, false, false},
+	{ScopeTunnelsDelete, true, true, false},
+	{"hostnames:read", false, false, false}, {"hostnames:write", true, false, false},
+	{ScopeHostnamesDelete, true, true, false},
+	{"analytics:read", false, false, false},
+	{ScopeTunnelAccess, false, false, false},
+	{ScopeFull, true, false, true},
 }
 
 // SupportedScopes, metadata'da duyurulan kapsamlar.
@@ -64,7 +87,7 @@ func ParseScopes(s string) (scopes []string, unknown string) {
 
 // APIScopes, OAuth kapsamlarini REST API token kapsamlarina genisletir.
 // mcp:read -> "read" (tum *:read + analytics:read); mcp:manage -> read + yazma
-// kapsamlari. Silme araci yoktur; yazma kapsamlari yalniz olusturma/guncelleme.
+// kapsamlari. Silme kapsamlari (tunnels:delete, hostnames:delete) ayri ve acik onaylidir.
 func APIScopes(oauthScopes []string) []string {
 	set := map[string]bool{}
 	for _, s := range oauthScopes {
@@ -76,6 +99,19 @@ func APIScopes(oauthScopes []string) []string {
 			set["tunnels:write"] = true
 			set["hostnames:write"] = true
 			set["clients:write"] = true
+		case ScopeFull:
+			// "full", REST kapsami listesi DEGILDIR: API katmani onu Principal.Full
+			// bayragi olarak isler ve panel oturumuyla ayni yetkiyi uygular
+			// (api/oauth_principal.go). Burada yalnizca isaretlenir.
+			set[ScopeFull] = true
+		case ScopeTunnelAccess:
+			// Tunel kaynak kapsami yonetim API'sine HICBIR yetki vermez.
+		case ScopeTunnelsDelete:
+			set[ScopeTunnelsDelete] = true
+			set["tunnels:read"] = true
+		case ScopeHostnamesDelete:
+			set[ScopeHostnamesDelete] = true
+			set["hostnames:read"] = true
 		default:
 			if _, ok := scopeInfo(s); ok {
 				set[s] = true
@@ -94,6 +130,10 @@ func APIScopes(oauthScopes []string) []string {
 func covers(super map[string]bool, s string) bool {
 	if super[s] {
 		return true
+	}
+	if super[ScopeFull] {
+		// full, yonetim kaynagindaki her kapsami ima eder ('mcp' tunel kapsami haric).
+		return s != ScopeTunnelAccess
 	}
 	if super[ScopeMCPManage] {
 		switch s {
@@ -120,3 +160,6 @@ func subsetOf(sub, super []string) bool {
 	}
 	return true
 }
+
+// HasFull, kapsam listesinde "full" var mi.
+func HasFull(scopes []string) bool { return hasScope(scopes, ScopeFull) }

@@ -34,6 +34,9 @@ type Code struct {
 	Resource      string
 	CodeChallenge string
 	ExpiresAt     time.Time
+	// StepUpAt, "full" onayinin dayandigi taze girisin (oturum acilis) zamani;
+	// full verilmediyse nil.
+	StepUpAt *time.Time
 }
 
 // Grant, bir kullanicinin bir istemciye bir kiraci icin verdigi yetki.
@@ -49,6 +52,14 @@ type Grant struct {
 	CreatedAt  time.Time
 	LastUsedAt *time.Time
 	RevokedAt  *time.Time
+	// StepUpAt, "full" kapsami verilirken dogrulanan taze girisin zamani.
+	StepUpAt *time.Time
+}
+
+// IsFull, grant tam erisim kapsamini tasiyor mu.
+func (g Grant) IsFull() bool {
+	sc, _ := ParseScopes(g.Scope)
+	return HasFull(sc)
 }
 
 // Active, grant iptal edilmemis mi.
@@ -63,7 +74,8 @@ type Store interface {
 	// CreateCode kodu (ozet olarak) saklar.
 	CreateCode(ctx context.Context, hash string, c Code) error
 	// ConsumeCode kodu ATOMIK olarak kullanilmis isaretler. Yok/suresi dolmus
-	// ErrNotFound, daha once kullanilmis ErrUsed doner.
+	// ErrNotFound, daha once kullanilmis ErrUsed doner; ErrUsed'da Code'un
+	// ClientID/UserID/TenantID alanlari doludur (tekrar kullanimda iptal icin).
 	ConsumeCode(ctx context.Context, hash string, now time.Time) (Code, error)
 
 	CreateGrant(ctx context.Context, g Grant) error

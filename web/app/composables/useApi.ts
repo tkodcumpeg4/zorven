@@ -1,6 +1,6 @@
 import type {
   AccessEvent, AccessEventSummary, AccessEventsPage,
-  NetShare, NetNode, NetGrantee,
+  NetShare, NetNode, NetGrantee, NetTunRule, NetNetwork, 
   Client, Tunnel, Hostname, RequestLog, LogFilter, CreateClientResponse,
   CreateCustomHostnameResponse, VerifyHostnameResponse, DNSCheckResult,
   Subscription, Plan, SubscriptionResponse, PlansResponse,
@@ -13,12 +13,14 @@ import type {
   AbuseReport,
   TunnelReplica, TunnelLBConfig, TunnelLBResp, TunnelUDPConfig, TunnelUDPResp, TunnelTCPResp, GameStatus,
   TrafficPolicy, TrafficConfig,
+  TunnelMCP, TunnelMCPConfig, MCPKey, MCPKeyCreated, MCPCall, MCPStats, MCPTestResult,
   TunnelMetricsResp,
   TunnelAlert,
   PathRoute,
   TunnelMTLS,
+  TunnelSecurity,
   Project,
-  Secret, Policy, PolicyConfig,
+  Secret, Policy, PolicyConfig, CaptchaSite, CaptchaSiteInput,
   TeamInvitation,
 } from '~/types/api'
 
@@ -349,6 +351,36 @@ export function useApi() {
     await req(`/tunnels/${id}/replicas/${clientID}`, { method: 'DELETE' })
   }
 
+  // --- Tunel MCP modu (M3/M4) ---
+
+  async function getTunnelMCP(id: string): Promise<TunnelMCP> {
+    return req<TunnelMCP>(`/tunnels/${id}/mcp`)
+  }
+  async function setTunnelMCP(id: string, payload: { enabled: boolean, config: Partial<TunnelMCPConfig> }): Promise<{ ok: boolean, config: TunnelMCPConfig, urls: string[] }> {
+    return req(`/tunnels/${id}/mcp`, { method: 'PUT', body: payload })
+  }
+  async function listMCPKeys(id: string): Promise<MCPKey[]> {
+    return (await req<MCPKey[]>(`/tunnels/${id}/mcp/keys`)) ?? []
+  }
+  async function createMCPKey(id: string, payload: { label: string, expires_in_days?: number }): Promise<MCPKeyCreated> {
+    return req<MCPKeyCreated>(`/tunnels/${id}/mcp/keys`, { method: 'POST', body: payload })
+  }
+  async function deleteMCPKey(id: string, keyId: string): Promise<void> {
+    await req(`/tunnels/${id}/mcp/keys/${keyId}`, { method: 'DELETE' })
+  }
+  async function listMCPCalls(id: string, q: { status?: string, tool?: string, window?: string, limit?: number } = {}): Promise<MCPCall[]> {
+    return (await req<MCPCall[]>(`/tunnels/${id}/mcp/calls`, { query: q })) ?? []
+  }
+  async function getMCPStats(id: string, window: string): Promise<MCPStats> {
+    return req<MCPStats>(`/tunnels/${id}/mcp/stats`, { query: { window } })
+  }
+  async function testTunnelMCP(id: string): Promise<MCPTestResult> {
+    return req<MCPTestResult>(`/tunnels/${id}/mcp/test`, { method: 'POST' })
+  }
+  async function revokeMCPSessions(id: string): Promise<{ revoked: number }> {
+    return req(`/tunnels/${id}/mcp/revoke-sessions`, { method: 'POST' })
+  }
+
   // --- Trafik politikası (FAZ 6) ---
 
   async function getTunnelTraffic(id: string): Promise<TrafficPolicy> {
@@ -434,8 +466,20 @@ export function useApi() {
     await req(`/tunnels/${id}/mtls`, { method: 'PUT', body: payload })
   }
 
+  // --- Tunel guvenligi: WAF + Geo (ZTNA Z3) ---
 
-  // --- Denetim günlüğü (FAZ 6.8) ---
+  async function getTunnelSecurity(id: string): Promise<TunnelSecurity> {
+    if (USE_MOCK) {
+      await delay()
+      return { tunnel_id: id, waf: { mode: 'off' }, geo: { mode: 'off', unknown_is: 'allow' }, rules: [], geo_db_loaded: false, plan_ok: true }
+    }
+    return req<TunnelSecurity>(`/tunnels/${id}/security`)
+  }
+
+  async function setTunnelSecurity(id: string, payload: Pick<TunnelSecurity, 'waf' | 'geo' | 'bot' | 'rate'>): Promise<void> {
+    if (USE_MOCK) { await delay(); return }
+    await req(`/tunnels/${id}/security`, { method: 'PUT', body: payload })
+  }
 
   // --- Hostnames ---
 
@@ -611,6 +655,24 @@ export function useApi() {
   async function listNetNodes(): Promise<NetNode[]> {
     const r = await req<{ nodes: NetNode[] }>('/net/nodes')
     return r.nodes || []
+  }
+  // --- Zorven Net Mod B (tam ağ katmanı): erişim kuralları + ağ aralığı ---
+  async function listNetTunRules(): Promise<NetTunRule[]> {
+    const r = await req<{ rules: NetTunRule[] }>('/net/tun/rules')
+    return r.rules || []
+  }
+  async function createNetTunRule(p: { src: NetGrantee, dst: string, proto: string, ports?: string, name?: string }): Promise<NetTunRule> {
+    return req<NetTunRule>('/net/tun/rules', { method: 'POST', body: p })
+  }
+  async function deleteNetTunRule(id: string): Promise<void> {
+    await req(`/net/tun/rules/${id}`, { method: 'DELETE' })
+  }
+  // --- Z5: özel ağ üzerinden ZTNA (erişim matrisi + günlük) ---
+  async function getNetNetwork(): Promise<NetNetwork> {
+    return req<NetNetwork>('/net/network')
+  }
+  async function setNetNetwork(cidr: string): Promise<void> {
+    await req('/net/network', { method: 'PUT', body: { cidr } })
   }
 
   async function replayRequest(id: string, overrides?: ReplayOverrides): Promise<ReplayResult> {
@@ -1183,6 +1245,24 @@ export function useApi() {
     await req(`/secrets/${id}`, { method: 'DELETE' })
   }
 
+  // --- Zorven CAPTCHA ---
+  async function listCaptchaSites(): Promise<{ sites: CaptchaSite[] }> {
+    if (USE_MOCK) { await delay(); return { sites: [] } }
+    return req<{ sites: CaptchaSite[] }>('/captcha/sites')
+  }
+  async function createCaptchaSite(input: CaptchaSiteInput): Promise<CaptchaSite> {
+    return req<CaptchaSite>('/captcha/sites', { method: 'POST', body: input })
+  }
+  async function updateCaptchaSite(id: string, input: Partial<CaptchaSiteInput>): Promise<CaptchaSite> {
+    return req<CaptchaSite>(`/captcha/sites/${encodeURIComponent(id)}`, { method: 'PATCH', body: input })
+  }
+  async function rotateCaptchaSecret(id: string): Promise<CaptchaSite> {
+    return req<CaptchaSite>(`/captcha/sites/${encodeURIComponent(id)}/rotate-secret`, { method: 'POST' })
+  }
+  async function deleteCaptchaSite(id: string): Promise<void> {
+    await req(`/captcha/sites/${encodeURIComponent(id)}`, { method: 'DELETE' })
+  }
+
   // --- Birlesik Policy motoru (FAZ 1 / F04) ---
   async function listPolicies(): Promise<{ policies: Policy[], count: number }> {
     if (USE_MOCK) { await delay(); return { policies: [], count: 0 } }
@@ -1221,15 +1301,18 @@ export function useApi() {
     getTunnelReplicas, addTunnelReplica, removeTunnelReplica, getTunnelLB, setTunnelLB,
     getTunnelUDP, getTunnelTCP, setTunnelUDP, getGameStatus,
     getTunnelTraffic, setTunnelTraffic,
+    getTunnelMCP, setTunnelMCP, listMCPKeys, createMCPKey, deleteMCPKey, listMCPCalls, getMCPStats, testTunnelMCP, revokeMCPSessions,
     getTunnelMetrics, getAccessEventsSummary, listAccessEvents,
     getTunnelAlert, setTunnelAlert,
     listPathRoutes, addPathRoute, deletePathRoute,
     getTunnelMTLS, setTunnelMTLS,
+    getTunnelSecurity, setTunnelSecurity,
     listHostnames, createHostname, createCustomHostname, updateHostname, verifyHostname, dnsCheckHostname, deleteHostname,
     listRequests, streamRequests, deviceApprove,
     getCaptureEnabled, setCaptureEnabled, getRequestDetail, replayRequest,
     listDevices, getDevice, listNetworkResources, createNetworkResource,
     listNetShares, createNetShare, deleteNetShare, listNetNodes,
+    listNetTunRules, createNetTunRule, deleteNetTunRule, getNetNetwork, setNetNetwork,
     adminGetStats, adminListTenants, adminListClients, adminListHostnames, adminSwitchTenant,
     adminListAbuseReports, adminFreeze,
     adminListUpdates, adminSaveUpdate, adminDeleteUpdate, adminPublishUpdate, adminPreviewUpdate, adminImportUpdates, adminExportUpdates,
@@ -1243,6 +1326,7 @@ export function useApi() {
     mailInfo, listMail, listMailFolders, moveMail, getMail, sendMail, deleteMail, mailAttachmentUrl,
     listMailAppPasswords, createMailAppPassword, revokeMailAppPassword, mailMobileConfigUrl,
     listSecrets, createSecret, deleteSecret,
+    listCaptchaSites, createCaptchaSite, updateCaptchaSite, rotateCaptchaSecret, deleteCaptchaSite,
     listPolicies, getPolicy, createPolicy, updatePolicy, deletePolicy, bindPolicy, unbindPolicy,
   }
 }

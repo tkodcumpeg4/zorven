@@ -70,7 +70,7 @@ func (m *MemStore) ConsumeCode(_ context.Context, hash string, now time.Time) (C
 		return Code{}, ErrNotFound
 	}
 	if c.used {
-		return Code{}, ErrUsed
+		return Code{ClientID: c.ClientID, UserID: c.UserID, TenantID: c.TenantID}, ErrUsed
 	}
 	c.used = true
 	return c.Code, nil

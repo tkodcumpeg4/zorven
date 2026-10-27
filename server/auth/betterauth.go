@@ -28,6 +28,9 @@ type SessionUser struct {
 	ActiveOrganizationID string
 	Role                 string
 	ExpiresAt            time.Time
+	// CreatedAt, oturumun acildigi an (Better Auth session.createdAt). Yeniden giris
+	// yeni oturum acar; OAuth "full" step-up taze girisi buradan dogrular.
+	CreatedAt time.Time
 }
 
 type cachedSession struct {
@@ -128,16 +131,41 @@ func (v *BetterAuthVerifier) InvalidateUser(userID string) {
 	})
 }
 
+// HostSessionCookie, Better Auth oturum cerezinin HTTPS'teki adi.
+const HostSessionCookie = "__Host-zorven.session_token"
+
+// SessionCookieValue, istekteki Better Auth oturum cerezinin (imzali) degeri.
+//
+// Cerez atma (cookie tossing) korumasi: tunel alt alanlari panelle ayni kayit
+// alanini paylastigi icin kotu niyetli bir tunel sayfasi Domain=<platform>
+// ile kendi oturum cerezini atabilir. Bu yuzden:
+//   - HTTPS'te yalniz __Host- onekli ad kabul edilir (web/server/lib/auth.ts
+//     ayni adi yazar). __Host- cerezini alt alan adi ATAMAZ; duz ad yalniz
+//     yerel gelistirmede (TLS'siz) gecerlidir.
+//   - Ayni adla FARKLI degerli birden cok cerez gelirse istek belirsizdir ve
+//     oturumsuz sayilir (kurbanin cerezi + atilan cerez birlikte gelir).
+func SessionCookieValue(r *http.Request) string {
+	names := map[string]bool{HostSessionCookie: true}
+	if r.TLS == nil {
+		names["better-auth.session_token"] = true
+	}
+	val := ""
+	for _, c := range r.Cookies() {
+		if !names[c.Name] || c.Value == "" {
+			continue
+		}
+		if val != "" && val != c.Value {
+			return ""
+		}
+		val = c.Value
+	}
+	return val
+}
+
 // RequestSessionToken, istekteki Better Auth oturum token'ini (imzasiz kisim)
 // cerezden veya Bearer basligindan cikarir. Yoksa "".
 func RequestSessionToken(r *http.Request) string {
-	raw := ""
-	for _, name := range []string{"better-auth.session_token", "__Secure-better-auth.session_token"} {
-		if c, err := r.Cookie(name); err == nil && c.Value != "" {
-			raw = c.Value
-			break
-		}
-	}
+	raw := SessionCookieValue(r)
 	if raw == "" {
 		if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
 			raw = strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
@@ -210,7 +238,7 @@ func (v *BetterAuthVerifier) VerifySession(ctx context.Context, token string) (*
 	var sess SessionUser
 	var activeOrg sql.NullString
 	query := `
-		SELECT s."id", s."userId", s."activeOrganizationId", s."expiresAt",
+		SELECT s."id", s."userId", s."activeOrganizationId", s."expiresAt", s."createdAt",
 		       u."email", u."name"
 		FROM "session" s
 		JOIN "user" u ON s."userId" = u."id"
@@ -221,6 +249,7 @@ func (v *BetterAuthVerifier) VerifySession(ctx context.Context, token string) (*
 		&sess.UserID,
 		&activeOrg,
 		&sess.ExpiresAt,
+		&sess.CreatedAt,
 		&sess.Email,
 		&sess.Name,
 	)
@@ -271,4 +300,22 @@ func (v *BetterAuthVerifier) VerifySession(ctx context.Context, token string) (*
 	})
 
 	return &sess, nil
+}
+
+// SignValue, degeri Better Auth imzali deger bicimiyle ("<deger>.<imza>", HMAC-SHA256
+// standart base64) imzalar. Anahtar yoksa "" doner. Cagiranlar etki alani ayrimi
+// icin degerin basina sabit bir onek KOYMALIDIR (oturum token'i imzalama
+// vekili olmasin).
+func (v *BetterAuthVerifier) SignValue(val string) string {
+	if len(v.secret) == 0 {
+		return ""
+	}
+	mac := hmac.New(sha256.New, v.secret)
+	mac.Write([]byte(val))
+	return val + "." + base64.StdEncoding.EncodeToString(mac.Sum(nil))
+}
+
+// VerifyValue, SignValue ciktisini dogrular ve degeri doner.
+func (v *BetterAuthVerifier) VerifyValue(signed string) (string, bool) {
+	return VerifySignedValue(signed, v.secret)
 }

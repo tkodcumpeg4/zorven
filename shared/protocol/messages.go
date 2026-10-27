@@ -101,6 +101,15 @@ const (
 	// TypeScreen2Layers, etkin katman kumesini bildirir (sunucu -> istemci).
 	// Yalnizca FeatureScreen2Layers.
 	TypeScreen2Layers MessageType = "screen2_layers"
+	// TypeScreen2Stats, ajanin saniyelik canli olcum ozeti (istemci -> sunucu ->
+	// izleyiciler). Yalnizca FeatureScreen2Stats pazarlanmissa gonderilir.
+	TypeScreen2Stats MessageType = "screen2_stats"
+	// TypeScreen2Feedback, sunucunun izleyici teslim geri bildirimi (sunucu ->
+	// istemci). Yalnizca FeatureScreen2Feedback pazarlanmissa gonderilir.
+	TypeScreen2Feedback MessageType = "screen2_feedback"
+	// TypeScreen2Video, sunucunun H.264 video modu tercihi (sunucu -> istemci).
+	// Yalnizca FeatureScreen2Video pazarlanmissa gonderilir.
+	TypeScreen2Video MessageType = "screen2_video"
 	// Imlec katmani ve pano (docs/screen2-protocol.md). Yetenekler:
 	// FeatureScreenCursor / FeatureScreenClipboard.
 	TypeScreenCursor         MessageType = "screen_cursor"          // istemci -> sunucu: konum
@@ -243,6 +252,10 @@ type HelloAck struct {
 	// Features, sunucunun bu oturum icin ETKINLESTIRDIGI yetenekler
 	// (istemcinin istedikleri ile sunucunun destekledeklerinin kesisimi).
 	Features []string `json:"features,omitempty"`
+
+	// DeviceChallenge (Z4): FeatureDeviceCert pazarlik edildiyse oturuma ozel
+	// rastgele deger; durus imzasina dahil edilir (tekrar oynatmayi onler).
+	DeviceChallenge string `json:"device_challenge,omitempty"`
 
 	// Settings (FAZ 3 / F15), cihaz icin kayitli uzak ayarlar. Baglanti
 	// aninda gonderilir ki ajan ilk andan itibaren dogru yapilandirmayla
@@ -673,6 +686,180 @@ const FeatureScreen2 = "screen2"
 // yansitirsa ve screen_open.layers dolu gelirse istemci katmanli calisir;
 // aksi halde eski screen2 davranisi surer.
 const FeatureScreen2Layers = "screen2_layers"
+
+// FeatureScreen2Stats, istemcinin screen2_stats (saniyelik canli olcum ozeti)
+// gonderebildigini bildirir. Sunucu yansitmazsa istemci hic gondermez; eski
+// sunucu/izleyici bu mesaji hic gormez (geriye uyumlu).
+const FeatureScreen2Stats = "screen2_stats"
+
+// FeatureScreen2Feedback, sunucunun izleyici teslim ozetini (screen2_feedback)
+// ajana gonderebildigini bildirir. Istemci Hello'da ilan eder, sunucu HelloAck'te
+// yansitirsa etkindir; aksi halde ajan yalniz yerel yazma suresine bakar (eski
+// davranis). Eski istemci/sunucu bu mesaji hic gormez.
+const FeatureScreen2Feedback = "screen2_feedback"
+
+// FeatureScreen2Video, istemcinin H.264 video modunu (FrameVideo cerceveleri,
+// bkz. screen2_video.go) destekledigini bildirir. Istemci YALNIZ kodlayici
+// (Windows Media Foundation) gercekten calisiyorsa ilan eder. Sunucu
+// yansitirsa istemci screen2_video mesajlarini dinler ve otomatik karo/video
+// gecisi yapabilir; aksi halde karo modu (eski davranis).
+const FeatureScreen2Video = "screen2_video"
+
+// Video modu degerleri (Screen2Video.Mode ve panel tercihi).
+const (
+	Screen2VideoAuto  = "auto"  // hareketli iceriginde video, durgunda karo
+	Screen2VideoTiles = "tiles" // hep karo
+	Screen2VideoOn    = "video" // hep video
+)
+
+// Screen2Video, sunucunun etkin video modunu bildirir (sunucu -> istemci).
+// Sunucu tum izleyicilerin tercihini birlestirir (screen_video.go): herhangi
+// biri video desteklemiyorsa ya da karo istiyorsa Mode=tiles.
+type Screen2Video struct {
+	Type      MessageType `json:"type"`
+	SessionID string      `json:"session_id"`
+	Mode      string      `json:"mode"`
+}
+
+// ValidVideoMode, bilinen bir video modu mu.
+func ValidVideoMode(m string) bool {
+	return m == Screen2VideoAuto || m == Screen2VideoTiles || m == Screen2VideoOn
+}
+
+// Geri bildirim sinirlari.
+const (
+	Screen2FeedbackMaxLayers = 4 // katman kimligi 0..3 (+ katmansiz -1)
+	Screen2FeedbackMaxQueue  = 60000
+	Screen2FeedbackMaxSkip   = 1000000
+	Screen2FeedbackMaxViewer = 1000
+)
+
+// Screen2FeedbackLayer, bir katmanin (ya da katmansiz akisin: ID -1) izleyici
+// ozeti. FPS ve Skipped, o katmanin izleyicilerinin EN YAVASINA aittir.
+type Screen2FeedbackLayer struct {
+	ID int `json:"id"`
+	// FPS, en yavas izleyiciye teslim edilen kare/sn (kuyruk yuzunden kisitli
+	// degilse ajanin geldigi hiz: kisit yok).
+	FPS float64 `json:"fps"`
+	// Skipped, pencerede bu izleyici icin atlanan/birlestirilen kare sayisi.
+	Skipped int `json:"skipped"`
+	// QueueMs, en yavas izleyicinin bekleyen verisinin yasi (ms).
+	QueueMs int `json:"queue_ms"`
+	// Viewers, katmani izleyen ve veri bekleyen izleyici sayisi.
+	Viewers int `json:"viewers"`
+}
+
+// Screen2Feedback, sunucudan ajana ~500 ms'lik pencere ozeti (yalniz degisimde
+// ya da seyrek canlilik mesaji olarak). Layers bos => kimse veri beklemiyor.
+type Screen2Feedback struct {
+	Type      MessageType            `json:"type"`
+	SessionID string                 `json:"session_id"`
+	WindowMs  int                    `json:"window_ms"`
+	Layers    []Screen2FeedbackLayer `json:"layers"`
+}
+
+// Valid, geri bildirimin makul sinirlarda oldugunu soyler.
+func (f Screen2Feedback) Valid() bool {
+	if f.WindowMs < 0 || f.WindowMs > 60000 || len(f.Layers) > Screen2FeedbackMaxLayers {
+		return false
+	}
+	seen := map[int]bool{}
+	for _, l := range f.Layers {
+		if l.ID < -1 || l.ID > 3 || seen[l.ID] {
+			return false
+		}
+		seen[l.ID] = true
+		if !(l.FPS >= 0 && l.FPS < 1000) || l.Skipped < 0 || l.Skipped > Screen2FeedbackMaxSkip ||
+			l.QueueMs < 0 || l.QueueMs > Screen2FeedbackMaxQueue || l.Viewers < 0 || l.Viewers > Screen2FeedbackMaxViewer {
+			return false
+		}
+	}
+	return true
+}
+
+// Screen2LayerStat, bir katmanin ajan tarafindaki GERCEK kullanilan kalite/hedefi
+// (spec kalitesi ile uyarlama kalitesinin asgarisi, geri bildirim indirimi dahil).
+type Screen2LayerStat struct {
+	ID      int `json:"id"`
+	Quality int `json:"quality"`
+	// SpecQuality, katmanin tavani (sunucunun istedigi kalite); 0 => tavan yok.
+	SpecQuality int `json:"spec_quality,omitempty"`
+	TargetFPS   int `json:"target_fps"`
+}
+
+// Screen2StageStat, bir boru hatti asamasinin pencere ozeti (milisaniye).
+type Screen2StageStat struct {
+	Avg float64 `json:"avg"`
+	P95 float64 `json:"p95"`
+	N   int     `json:"n"` // pencerede olcum sayisi
+}
+
+// Screen2Stats, ajanin yaklasik 1 sn'lik penceresinin ozeti. Sunucu icerigi
+// degistirmeden izleyicilere iletir (dogrulama: Valid).
+type Screen2Stats struct {
+	Type      MessageType `json:"type"`
+	SessionID string      `json:"session_id"`
+	// WindowMs, olcum penceresinin gercek suresi.
+	WindowMs int `json:"window_ms"`
+	// FPS, pencerede gercekten gonderilen kare/sn; CaptureFPS yakalanan kare/sn.
+	FPS        float64 `json:"fps"`
+	CaptureFPS float64 `json:"capture_fps"`
+	// TargetFPS/MaxFPS, uyarlama denetleyicisinin anlik/tavan hedefi.
+	TargetFPS int `json:"target_fps"`
+	MaxFPS    int `json:"max_fps"`
+	Quality   int `json:"quality"`
+	// Merged, yuvada birlestirilen (atlanan ara) is sayisi; Idle, degisim
+	// olmadigi icin atlanan yakalama turu sayisi.
+	Merged int `json:"merged"`
+	Idle   int `json:"idle"`
+	// KBps, pencerede gonderilen KB/sn.
+	KBps float64 `json:"kbps"`
+	// Method: yakalama yontemi (dxgi|gdi|kbinani|darwin|...).
+	Method string `json:"method"`
+	// SrcW/SrcH yakalanan cozunurluk; W/H gonderilen tuval (olceklenmis).
+	SrcW int `json:"src_w"`
+	SrcH int `json:"src_h"`
+	W    int `json:"w"`
+	H    int `json:"h"`
+	// Asama sureleri (ms).
+	Capture Screen2StageStat `json:"capture"`
+	Scale   Screen2StageStat `json:"scale"`
+	Diff    Screen2StageStat `json:"diff"`
+	Encode  Screen2StageStat `json:"encode"`
+	Pack    Screen2StageStat `json:"pack"`
+	Write   Screen2StageStat `json:"write"`
+	// Layers, katman basina gercek kalite/hedef fps (geriye uyumlu, eski ajanda yok).
+	Layers []Screen2LayerStat `json:"layers,omitempty"`
+	// Mode: anlik akis modu "tiles"|"video" (bos => eski ajan: tiles).
+	// VideoKbps/VideoBitrate: video modunda gonderilen kbit/sn ve kodlayici hedefi.
+	// Backend: video kodlayici adi (or. "mf-hw", "mf-sw").
+	Mode         string `json:"mode,omitempty"`
+	VideoKbps    int    `json:"video_kbps,omitempty"`
+	VideoBitrate int    `json:"video_bitrate,omitempty"`
+	Backend      string `json:"backend,omitempty"`
+}
+
+// Valid, istatistik mesajinin makul sinirlarda oldugunu soyler (sunucu bozuk
+// ya da asiri degerleri izleyiciye iletmez).
+func (s Screen2Stats) Valid() bool {
+	ok := func(v float64) bool { return v >= 0 && v < 1e9 }
+	st := func(a Screen2StageStat) bool { return ok(a.Avg) && ok(a.P95) && a.N >= 0 }
+	if len(s.Layers) > Screen2FeedbackMaxLayers {
+		return false
+	}
+	for _, l := range s.Layers {
+		if l.ID < -1 || l.ID > 3 || l.Quality < 0 || l.Quality > 100 || l.SpecQuality < 0 || l.SpecQuality > 100 ||
+			l.TargetFPS < 0 || l.TargetFPS > 1000 {
+			return false
+		}
+	}
+	return s.WindowMs >= 0 && s.WindowMs < 60000 && ok(s.FPS) && ok(s.CaptureFPS) && ok(s.KBps) &&
+		s.TargetFPS >= 0 && s.TargetFPS <= 1000 && s.MaxFPS >= 0 && s.MaxFPS <= 1000 &&
+		s.Quality >= 0 && s.Quality <= 100 && len(s.Method) <= 32 && len(s.Mode) <= 8 && len(s.Backend) <= 32 &&
+		s.VideoKbps >= 0 && s.VideoBitrate >= 0 &&
+		s.SrcW >= 0 && s.SrcH >= 0 && s.W >= 0 && s.H >= 0 &&
+		st(s.Capture) && st(s.Scale) && st(s.Diff) && st(s.Encode) && st(s.Pack) && st(s.Write)
+}
 
 // FeatureScreenCursor, istemcinin screen_cursor / screen_cursor_shape
 // gonderebildigini bildirir (Windows, Linux X11). Kareler imleci icermez.

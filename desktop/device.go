@@ -26,7 +26,7 @@ func deviceHostname() string {
 	if h, err := os.Hostname(); err == nil && h != "" {
 		return h
 	}
-	return "masaustu"
+	return tm("dev.hostFallback")
 }
 
 // ResizeWindow, pencereyi verilen boyuta getirir ve ortalar. Log paneli
@@ -61,7 +61,7 @@ func (a *App) UpdateBehavior(noTerminal, noScreen, hideToTray bool) string {
 	a.mu.Unlock()
 
 	if err := saveConfig(cfg); err != nil {
-		return "Ayarlar kaydedilemedi: " + err.Error()
+		return tm("app.saveFail", err.Error())
 	}
 	if permsChanged && wasConnected && cfg.Token != "" {
 		go func() { a.Disconnect(); a.connect(prevTarget) }()
@@ -80,10 +80,10 @@ func (a *App) IsAuthed() bool {
 func (a *App) SetToken(token string) string {
 	token = strings.TrimSpace(token)
 	if token == "" {
-		return "Token bos olamaz."
+		return tm("dev.tokenEmpty")
 	}
 	if !strings.HasPrefix(token, "zrv_live_") && !strings.HasPrefix(token, "rpsh_live_") {
-		return "Token \"zrv_live_\" ile baslamalidir."
+		return tm("dev.tokenPrefix")
 	}
 	a.mu.Lock()
 	a.cfg.Token = token
@@ -95,7 +95,7 @@ func (a *App) SetToken(token string) string {
 	cfg := a.cfg
 	a.mu.Unlock()
 	if err := saveConfig(cfg); err != nil {
-		return "Ayarlar kaydedilemedi: " + err.Error()
+		return tm("app.saveFail", err.Error())
 	}
 	go a.Connect()
 	return ""
@@ -122,7 +122,7 @@ func (a *App) StartDeviceLogin() string {
 	reqBody, _ := json.Marshal(map[string]string{"name": deviceHostname()})
 	resp, err := http.Post(base+"/api/v1/device/code", "application/json", bytes.NewReader(reqBody))
 	if err != nil {
-		return mustJSON(map[string]string{"error": "sunucuya ulasilamadi: " + err.Error()})
+		return mustJSON(map[string]string{"error": tm("dev.unreachable", err.Error())})
 	}
 	defer resp.Body.Close()
 	var out struct {
@@ -133,7 +133,7 @@ func (a *App) StartDeviceLogin() string {
 		ExpiresIn       int    `json:"expires_in"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil || out.DeviceCode == "" {
-		return mustJSON(map[string]string{"error": "sunucu yaniti cozulemedi"})
+		return mustJSON(map[string]string{"error": tm("dev.badResponse")})
 	}
 
 	verify := base + out.VerificationURI + "?code=" + out.UserCode
@@ -190,13 +190,13 @@ func (a *App) pollDevice(deviceCode string, interval, expiresIn int) {
 			return
 		case "denied":
 			if a.ctx != nil {
-				wailsrt.EventsEmit(a.ctx, "device:error", "Onay reddedildi.")
+				wailsrt.EventsEmit(a.ctx, "device:error", tm("dev.denied"))
 			}
 			return
 		}
 	}
 	if a.ctx != nil {
-		wailsrt.EventsEmit(a.ctx, "device:error", "Kodun suresi doldu, tekrar deneyin.")
+		wailsrt.EventsEmit(a.ctx, "device:error", tm("dev.expired"))
 	}
 }
 

@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -118,6 +119,11 @@ func New(cfg Config) *Handler {
 func (h *Handler) ip(r *http.Request) string {
 	if h.cfg.ClientIP != nil {
 		return h.cfg.ClientIP(r)
+	}
+	// Port DAHIL EDILMEZ: her baglanti farkli kaynak portundan gelir; portlu
+	// anahtar basarisiz deneme sinirini fiilen devre disi birakirdi.
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
 	}
 	return r.RemoteAddr
 }
@@ -280,6 +286,11 @@ func (h *Handler) authenticate(w http.ResponseWriter, r *http.Request) (identity
 		// Token yoluyla /me her zaman scopes doner; yoksa guvenli taraf: hicbiri.
 		scopes = []string{}
 	}
+	if prin != nil && prin.Full {
+		// Tam erisim: API kapsam listesi yoktur (panel oturumuyla ayni yetki);
+		// MCP arac kumesi "full" ile tamamen acilir.
+		scopes = []string{mcptools.ScopeFull}
+	}
 	id := identity{scopes: scopes, actor: "mcp:api-token", expires: time.Now().Add(identityTTL)}
 	if prin != nil {
 		id.actor = "mcp:oauth:" + prin.ClientName + ":" + prin.UserID
@@ -336,7 +347,8 @@ func (h *Handler) serverFor(r *http.Request) *mcp.Server {
 	be := &inprocBackend{api: h.cfg.API, auth: "Bearer " + bearer(r), remote: r.RemoteAddr, host: r.Host,
 		project: strings.TrimSpace(r.Header.Get("X-Zorven-Project")), principal: id.principal}
 	ip := h.ip(r)
-	return mcptools.NewServer(be, mcptools.Options{
+	full := id.principal != nil && id.principal.Full
+	opts := mcptools.Options{
 		Version:     h.cfg.Version,
 		Scopes:      id.scopes,
 		SchemaCache: h.schema,
@@ -349,10 +361,30 @@ func (h *Handler) serverFor(r *http.Request) *mcp.Server {
 				result = "error"
 			}
 			// Yalnizca arac adi + durum: girdi/cikti ASLA yazilmaz.
+			scope := ""
+			if full {
+				scope = " scope=full"
+			}
 			h.cfg.Audit(id.tenantID, id.actor, ip, "mcp.tool", tool,
-				fmt.Sprintf("via=mcp status=%d result=%s", status, result))
+				fmt.Sprintf("via=mcp status=%d result=%s%s", status, result, scope))
 		},
-	})
+	}
+	if full {
+		// Tam erisim: her REST cagrisi icin yontem+yol denetim kaydi (govde/sorgu YOK).
+		// Terminal/ekran WS biletleri ozel eylemle yazilir.
+		opts.OnAPICall = func(tool, method, path string, status int) {
+			if h.cfg.Audit == nil {
+				return
+			}
+			action := "mcp.full_call"
+			if mcptools.IsTicketPath(path) {
+				action = "mcp.full_ticket"
+			}
+			h.cfg.Audit(id.tenantID, id.actor, ip, action, method+" "+path,
+				fmt.Sprintf("via=mcp scope=full tool=%s status=%d", tool, status))
+		}
+	}
+	return mcptools.NewServer(be, opts)
 }
 
 func writeErr(w http.ResponseWriter, status int, code, msg string) {
