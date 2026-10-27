@@ -130,8 +130,9 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 365 -subj "/CN=yourdomain.com" \
 docker compose up -d
 ```
 
-**4. First admin and first tunnel.** Open `https://panel.yourdomain.com`, sign up, create a
-client token in the dashboard, then connect a client:
+**4. First account and first tunnel.** Open `https://panel.yourdomain.com`, sign up (each new
+account gets its own organization), create a client token in the dashboard, then connect a client.
+Platform administration (the Platform page, all tenants) uses the `ADMIN_KEY` from your `.env`:
 
 ```bash
 zorven authtoken zrv_live_... && zorven config set-server yourdomain.com:443
