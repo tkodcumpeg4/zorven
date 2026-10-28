@@ -12,7 +12,7 @@ outbound connection, so it works behind CGNAT, home routers and corporate firewa
 
 ```bash
 # 1. Install the client (from your Zorven server)
-curl -fsSL https://<your-server>/install.sh | sh
+curl -fsSL https://<your-server>/install.sh | sudo bash
 
 # 2. Save your token once (create it in the dashboard)
 zorven authtoken zrv_live_...
@@ -149,7 +149,7 @@ Protocol and transport details: [docs/protokol-uyumluluk.md](docs/protokol-uyuml
 
 ```bash
 # Linux / macOS
-curl -fsSL https://<your-server>/install.sh | sh
+curl -fsSL https://<your-server>/install.sh | sudo bash
 ```
 
 ```powershell
@@ -184,7 +184,7 @@ Zorven is a Go workspace (`go.work`) with a Nuxt dashboard and SDKs under `sdk/`
 ```bash
 cd server && go build ./...
 cd ../client && go build -o zorven .
-cd ../web && npm install && npm run build && cd .. && bash scripts/build-dashboard.sh
+cd ../web && npm install && cd .. && bash scripts/build-dashboard.sh   # runs `nuxt generate` and embeds the result in server/webdist
 ```
 
 | Path | What |
@@ -226,6 +226,7 @@ repository:
 - Suspicious-email tracking (disposable-domain and random-looking address detection with a risk score) and periodic email re-verification
 - Platform user list (platform console Users tab with risk badges, filters, CSV export and forced re-verification)
 - Platform plan management (changing a tenant's plan; plan labels in the platform console)
+- Zorven Apps (deploying Docker apps to your own machine through the client)
 - Hosted marketing site and billing screens
 
 The core defines the integration seams as interfaces; without the commercial
