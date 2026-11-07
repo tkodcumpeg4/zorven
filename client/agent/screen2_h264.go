@@ -199,3 +199,27 @@ func clamp8(v int) byte {
 	}
 	return byte(v)
 }
+
+// fillParamSets, AU'da eksik SPS/PPS'i kodlayicinin dizi basligindan (Annex-B,
+// start code'lu SPS+PPS) tamamlar.
+func fillParamSets(au h264AU, hdr []byte) h264AU {
+	if len(hdr) == 0 {
+		return au
+	}
+	for _, n := range splitAnnexB(hdr) {
+		if len(n) == 0 {
+			continue
+		}
+		switch n[0] & nalTypeMask {
+		case nalSPS:
+			if au.SPS == nil {
+				au.SPS = n
+			}
+		case nalPPS:
+			if au.PPS == nil {
+				au.PPS = n
+			}
+		}
+	}
+	return au
+}

@@ -78,6 +78,21 @@ for target in "${TARGETS[@]}"; do
   printf '%-42s %s\n' "$name" "$size"
 done
 
+# Windows kurulum paketi: Zorven-Setup-windows-amd64.exe, masaustu ikilisinin
+# (desktop/build/bin/Zorven.exe) AYNI baytlarinin kopyasidir. Ikili kendi
+# kurulumunu yapar: dosya adinda "Setup" varsa (ya da --install ile) kurulum
+# kipine girer (Program Files + Baslat menusu + servis, UAC ister); kurulu
+# Zorven.exe ise normal acilir. Kurulum CLI'yi (windows/amd64+cli) bu betigin
+# urettigi imzali manifest.json'dan indirir; bu yuzden masaustu ve CLI ayni
+# surumde yayinlanmali. Bkz. installer/README.md.
+DESKTOP_EXE="$ROOT/desktop/build/bin/Zorven.exe"
+if [ -f "$DESKTOP_EXE" ]; then
+  cp "$DESKTOP_EXE" "$OUT/Zorven-Setup-windows-amd64.exe"
+  echo "  Windows kurulum paketi    Zorven-Setup-windows-amd64.exe (masaustu ikilisinin kopyasi)"
+else
+  echo "  UYARI: $DESKTOP_EXE yok; Zorven-Setup-windows-amd64.exe dist'e eklenmedi (wails build once calistirilmali)." >&2
+fi
+
 echo
 echo "Kontrol toplamlari yaziliyor..."
 (cd "$OUT" && sha256sum ./* > SHA256SUMS 2>/dev/null || shasum -a 256 ./* > SHA256SUMS)

@@ -57,6 +57,9 @@ type screen2Params struct {
 	Display                int // -1 => degistirme (yalniz guncellemede)
 	// Layers dolu ise oturum katmanli calisir (screen2_layers pazarlandi).
 	Layers []protocol.Screen2LayerSpec
+	// HighFPS, sunucu screen2_fps60'i onayladiysa true: oturum 30 fps'in ustune
+	// (screen2HighFPS) cikabilir. Yalniz oturum kurulurken okunur.
+	HighFPS bool
 }
 
 // screen2Session, yakalama -> karo farki -> kodlama -> gonderme dongusu.
@@ -77,12 +80,22 @@ type screen2Session struct {
 	lastSrc *image.RGBA
 	// onAttach, yakalama oncesi (Windows girdi masaustune baglanma); nil olabilir.
 	onAttach func()
+	// onStatus, goruntu/girdi kisitlamasi degisince cagrilir (state: degraded,
+	// detail: protocol.Degraded* ya da "" = kalkti); nil olabilir.
+	onStatus func(state, detail string)
+	// onLog, tanilama logu; nil olabilir.
+	onLog func(msg string, args ...any)
+	// wake, yakalama dongusunu bekleme suresinden erken uyandirir (girdi/anahtar kare).
+	wake chan struct{}
 	// vid, H.264 video modu (FeatureScreen2Video); nil => yalniz karo.
 	vid *videoCtl
 
 	display  int
 	maxWidth int
 	ctl      *adaptCtl
+	// fpsCap, oturumun fps tavani (screen2MaxFPS ya da screen2_fps60 ile screen2HighFPS);
+	// kurulumda atanir, sonra degismez. 0 => screen2MaxFPS.
+	fpsCap int
 
 	keyReq atomic.Bool
 
@@ -111,17 +124,25 @@ type screen2Stats struct {
 
 func newScreen2Session(id string, streamID uint64, c Capturer, e TileEncoder,
 	send func(context.Context, []byte) error, p screen2Params) *screen2Session {
-	if p.FPS <= 0 || p.FPS > screen2MaxFPS {
+	fpsCap := screen2MaxFPS
+	if p.HighFPS {
+		fpsCap = screen2HighFPS
+	}
+	switch {
+	case p.FPS <= 0:
 		p.FPS = 15
+	case p.FPS > fpsCap:
+		p.FPS = fpsCap // onaylanan tavanin ustu istenemez
 	}
 	if p.Quality <= 0 || p.Quality > 100 {
 		p.Quality = 70
 	}
 	s := &screen2Session{
 		id: id, streamID: streamID, cap: c, enc: e, send: send,
-		display: p.Display, maxWidth: p.MaxWidth,
+		display: p.Display, maxWidth: p.MaxWidth, fpsCap: fpsCap,
 		ctl:   newAdaptCtl(p.Quality, p.FPS),
 		setCh: make(chan screen2Params, 1),
+		wake:  make(chan struct{}, 1),
 		met:   newS2Metrics(time.Now()),
 	}
 	if len(p.Layers) > 0 {
@@ -184,7 +205,28 @@ func (s *screen2Session) canvasSize() (w, h int) {
 }
 
 // Keyframe, bir sonraki turda tam kare gonderilmesini ister (goroutine-guvenli).
-func (s *screen2Session) Keyframe() { s.keyReq.Store(true) }
+func (s *screen2Session) Keyframe() { s.keyReq.Store(true); s.Poke() }
+
+// Poke, yakalama dongusunu hemen uyandirir (bosta yavaslamayi bitirir). Girdi
+// geldiginde cagrilir: kullanici etkilesimi ekranin hemen guncellenmesini bekler.
+func (s *screen2Session) Poke() {
+	select {
+	case s.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (s *screen2Session) status(state, detail string) {
+	if s.onStatus != nil {
+		s.onStatus(state, detail)
+	}
+}
+
+func (s *screen2Session) logWarn(msg string, args ...any) {
+	if s.onLog != nil {
+		s.onLog(msg, args...)
+	}
+}
 
 // Update, ayarlari canli degistirir (goroutine-guvenli, bloklamaz). Sifir
 // alanlar degistirilmez; Display < 0 degistirilmez.
@@ -202,13 +244,21 @@ func (s *screen2Session) Update(p screen2Params) {
 	}
 }
 
+// maxFPS, oturumun fps tavani (kurulumda belirlenir; elle kurulmus oturumda 30).
+func (s *screen2Session) maxFPS() int {
+	if s.fpsCap <= 0 {
+		return screen2MaxFPS
+	}
+	return s.fpsCap
+}
+
 func (s *screen2Session) applyParams(p screen2Params) (displayChanged bool) {
 	mq, mf := s.ctl.MaxQ(), s.ctl.MaxFPS()
 	if p.Quality > 0 && p.Quality <= 100 {
 		mq = p.Quality
 	}
 	if p.FPS > 0 {
-		mf = min(p.FPS, screen2MaxFPS)
+		mf = min(p.FPS, s.maxFPS())
 	}
 	s.ctl.SetMax(mq, mf)
 	if p.MaxWidth > 0 {
@@ -243,6 +293,12 @@ func (sm *screenManager) runScreen2(ctx context.Context, ss *screenSession, p sc
 		s.vid = newVideoCtl(s)
 	}
 	s.onAttach = func() { attachToInputDesktop() }
+	s.onLog = func(msg string, args ...any) { sm.cs.log.Warn(msg, append([]any{"session", ss.id}, args...)...) }
+	if sm.cs.screenInputStatus {
+		s.onStatus = func(state, detail string) {
+			sm.sendInputStatus(ctx, ss.id, inputResult{State: state, Detail: detail})
+		}
+	}
 	s.onDisplay = func(_ int, b image.Rectangle) {
 		ss.setBounds(displayRect{x: b.Min.X, y: b.Min.Y, w: b.Dx(), h: b.Dy()})
 	}

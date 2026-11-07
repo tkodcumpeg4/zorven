@@ -181,7 +181,8 @@ func (s *Store) UpdateDeviceInfo(ctx context.Context, clientID string, d store.D
 			ips           = COALESCE($5::text[], ips),
 			agent_version = COALESCE(NULLIF($6, ''), agent_version),
 			last_metrics  = COALESCE($7::jsonb, last_metrics),
-			last_seen_at  = now()
+			last_seen_at  = now(),
+			offline_notified_at = NULL
 		 WHERE id = $1`,
 		clientID, d.Hostname, d.OS, d.Arch, ips, d.AgentVersion, metrics)
 	return err

@@ -12,6 +12,7 @@ import (
 	"math/big"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/tkodcumpeg4/zorven/server/ingress"
@@ -22,7 +23,7 @@ import (
 // DualCertManager, platform sertifikasi ile on-demand custom domain sertifikalarini
 // tek bir GetCertificate icinde birlestirir.
 type DualCertManager struct {
-	DefaultCert     *tls.Certificate
+	DefaultCert     *tls.Certificate // dogrudan okuma yerine currentDefault() kullanilir
 	PlatformDomain  string
 	ControlHosts    []string
 	Store           store.Store
@@ -36,6 +37,14 @@ type DualCertManager struct {
 	// sertifikalarini alirlar. Ornek: autoconfig.mail.<platform> (mail istemcisi
 	// otomatik ayari). *.<platform> yalniz tek seviyeyi kapsar.
 	extraACME map[string]bool
+
+	// reloaded, SetDefaultCert ile atomik olarak degistirilen varsayilan sertifika;
+	// doluysa DefaultCert alanina gore onceliklidir (kesintisiz yeniden yukleme).
+	reloaded atomic.Pointer[tls.Certificate]
+	// cacheOnly, edge rolunde ACME baslatmadan yalniz onbellekten sertifika okur.
+	cacheOnly autocert.Cache
+	cacheMu   sync.Mutex
+	cacheHit  map[string]cachedCert
 }
 
 // SetExtraACMEHosts, wildcard'in kapsamadigi platform alt hostlarini ACME'ye acar.
@@ -120,7 +129,7 @@ func (m *DualCertManager) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certi
 
 	// 1. SNI yoksa, IP ise veya kontrol hostlarindan biri ise varsayilan sertifika:
 	if sni == "" || ingress.IsIPHost(sni) || ingress.HostMatchesAny(sni, m.ControlHosts) {
-		return m.DefaultCert, nil
+		return m.currentDefault(), nil
 	}
 
 	// 2a. Wildcard'in kapsamadigi izinli platform hostu (or. autoconfig.mail.<platform>):
@@ -135,7 +144,7 @@ func (m *DualCertManager) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certi
 	// 2. Platform domaini veya platform alt alani ise varsayilan (wildcard) sertifika:
 	if m.PlatformDomain != "" {
 		if sni == m.PlatformDomain || strings.HasSuffix(sni, "."+m.PlatformDomain) {
-			return m.DefaultCert, nil
+			return m.currentDefault(), nil
 		}
 	}
 
@@ -156,6 +165,11 @@ func (m *DualCertManager) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certi
 	// (askidaki domainlerde HostPolicy yalnizca onbellekteki sertifikaya izin verir):
 	if m.AutocertManager != nil {
 		return m.AutocertManager.GetCertificate(hello)
+	}
+
+	// 4b. Edge: ACME baslatilmaz; yalniz birincilin yazdigi veritabani onbelleginden okunur.
+	if m.cacheOnly != nil {
+		return m.cachedCertFor(ctx, sni)
 	}
 
 	// 5. ACME email yapilandirilmamissa (or. lokal test veya gelistirme):

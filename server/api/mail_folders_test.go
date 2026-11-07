@@ -27,6 +27,11 @@ func (f *folderMailStore) ListMailMessages(_ context.Context, _ string, folder s
 	return nil, nil
 }
 
+func (f *folderMailStore) ListMailMessagesPage(ctx context.Context, tenantID, folder string, _ store.Page) ([]store.MailMessage, int, error) {
+	msgs, err := f.ListMailMessages(ctx, tenantID, folder, 0)
+	return msgs, len(msgs), err
+}
+
 func (f *folderMailStore) MoveMailMessage(_ context.Context, _ string, id, folder string) (uint32, error) {
 	if id == "yok" {
 		return 0, store.ErrNotFound

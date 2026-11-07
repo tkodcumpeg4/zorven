@@ -72,12 +72,14 @@ type CreateTunnelIn struct {
 	HostnameID string `json:"hostname_id,omitempty" jsonschema:"Attach an existing unattached domain (from list_domains) instead of allocating a new platform subdomain."`
 	NoDomain   bool   `json:"no_domain,omitempty" jsonschema:"If true no domain is allocated (tunnel used only as a path-route target)."`
 	TTLSec     int    `json:"ttl_sec,omitempty" jsonschema:"Make the tunnel ephemeral: auto-removed after this many seconds (60 to 86400). Omit for a permanent tunnel."`
+	Confirm    bool   `json:"confirm,omitempty" jsonschema:"Set true only after the user explicitly agreed to expose a SENSITIVE target (admin port such as SSH/RDP/database, or a private/link-local/internal address). Without it such calls are refused and nothing is sent."`
 }
 
 type UpdateTunnelIn struct {
 	Common
 	TunnelID string  `json:"tunnel_id" jsonschema:"Tunnel id."`
 	Target   *string `json:"target,omitempty" jsonschema:"New local target (http(s)://host:port, or host:port for raw TCP/UDP tunnels)."`
+	Confirm  bool    `json:"confirm,omitempty" jsonschema:"Set true only after the user explicitly agreed to expose a SENSITIVE target (admin port such as SSH/RDP/database, or a private/link-local/internal address). Without it such calls are refused and nothing is sent."`
 	Enabled  *bool   `json:"enabled,omitempty" jsonschema:"Enable (true) or pause (false) the tunnel."`
 }
 
@@ -307,7 +309,7 @@ func (c Common) proj() string { return strings.TrimSpace(c.ProjectID) }
 
 // specs, tum aracin listesi (silme araci YOK).
 func specs() []spec {
-	return append(baseSpecs(), fullSpecs()...)
+	return append(append(baseSpecs(), appsSpecs()...), fullSpecs()...)
 }
 
 func baseSpecs() []spec {
@@ -424,10 +426,13 @@ func baseSpecs() []spec {
 				return decodeObject(r.Body)
 			}, projOf[TunnelIDIn]),
 
-		tool("create_tunnel", "Create tunnel", "Create a tunnel that exposes a local target of a device to the internet. Quota and plan limits apply; the result is the new tunnel including its public host. Does not delete or modify anything existing.",
+		tool("create_tunnel", "Create tunnel", "Create a tunnel that exposes a local target of a device to the internet. Quota and plan limits apply; the result is the new tunnel including its public host. Does not delete or modify anything existing. SENSITIVE targets (admin/database ports such as 22, 3389, 5900-5902, 2375/2376, 6443, 10250, 5432, 3306, 6379, 27017, 9200, or private/link-local/internal hosts) are refused unless confirm=true, which you may set only after the user explicitly agrees; plain localhost app ports need no confirm.",
 			ScopeTunnelsWrite, true, false,
 			func(p map[string]*jsonschema.Schema) { props(p, "ttl_sec", rangeOf(0, 86400)) },
 			func(do call, in CreateTunnelIn) (map[string]any, error) {
+				if sens, why := SensitiveTarget(in.Target); sens && !in.Confirm {
+					return nil, sensitiveErr("create_tunnel", in.Target, why)
+				}
 				body := map[string]any{
 					"name": in.Name, "client_id": in.DeviceID, "target": in.Target,
 				}
@@ -447,7 +452,7 @@ func baseSpecs() []spec {
 				return decodeObject(r.Body)
 			}, projOf[CreateTunnelIn]),
 
-		tool("update_tunnel", "Update tunnel", "Change the target and/or pause/resume a tunnel. Only target and enabled can be changed here; at least one is required.",
+		tool("update_tunnel", "Update tunnel", "Change the target and/or pause/resume a tunnel. Only target and enabled can be changed here; at least one is required. A SENSITIVE new target (admin/database port or private/link-local/internal host) is refused unless confirm=true, which you may set only after the user explicitly agrees.",
 			ScopeTunnelsWrite, true, true, nil,
 			func(do call, in UpdateTunnelIn) (map[string]any, error) {
 				id, err := seg("tunnel_id", in.TunnelID)
@@ -456,6 +461,9 @@ func baseSpecs() []spec {
 				}
 				body := map[string]any{}
 				if in.Target != nil {
+					if sens, why := SensitiveTarget(*in.Target); sens && !in.Confirm {
+						return nil, sensitiveErr("update_tunnel", *in.Target, why)
+					}
 					body["target"] = *in.Target
 				}
 				if in.Enabled != nil {
@@ -573,7 +581,7 @@ func baseSpecs() []spec {
 				return nil, fmt.Errorf("not_found: alan adi bulunamadi (HTTP 404)")
 			}, projOf[DomainIDIn]),
 
-		tool("add_domain", "Add domain", "Add a domain. With fqdn: a custom domain you own; the result includes dns instructions (CNAME/A/TXT records to create at your DNS provider) - after creating them call check_domain_dns then verify_domain. With name: a platform subdomain (kind scoped or short). Optionally attach to a tunnel. Plan limits apply.",
+		tool("add_domain", "Add domain", "Add a domain. With fqdn: a custom domain you own (wildcard '*.' names are not supported - add each subdomain separately); the result includes dns instructions (CNAME/A/TXT records to create at your DNS provider) - after creating them call check_domain_dns then verify_domain. With name: a platform subdomain (kind scoped or short). Optionally attach to a tunnel. Plan limits apply.",
 			ScopeHostnamesWrite, true, false,
 			func(p map[string]*jsonschema.Schema) { props(p, "kind", enumOf("scoped", "short")) },
 			func(do call, in AddDomainIn) (map[string]any, error) {

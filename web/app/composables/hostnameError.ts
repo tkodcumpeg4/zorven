@@ -1,5 +1,6 @@
 import type { ApiError } from '~/types/api'
 import { gt } from '~/plugins/i18n'
+import { isWildcardDomainError } from '~/lib/hostnameWildcard'
 
 /**
  * Sunucudan gelen ad hatalarını kullanıcıya anlaşılır Türkçeye çevirir.
@@ -36,6 +37,8 @@ export function hostnameError(e: unknown, fallback: string): string {
     // invalid_name: kural metnini sunucudan alıyoruz — hangi kuralın
     // çiğnendiğini ("--" mı, geçersiz karakter mi) yalnızca o biliyor.
     if (code === 'invalid_name') return data?.error?.message ?? fallback
+    // Joker alan adi (*.alan.com) desteklenmiyor: genel "gecersiz format" yerine ozel metin.
+    if (isWildcardDomainError(code, data?.error?.message)) return gt('hostnameErr.wildcard')
     if (KNOWN_CODES.includes(code)) return gt('hostnameErr.' + code)
     return data?.error?.message ?? fallback
   }

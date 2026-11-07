@@ -15,3 +15,6 @@ func platNewVideoEncoder(w, h, fps, bps int, preferSW bool) (videoEncoder, error
 
 // platVideoThreadInit, kodlama goroutine'inin baslangic kancasi (Windows'ta COM).
 func platVideoThreadInit() {}
+
+// platVideoThreadDone, thread kancasinin kapanisi (Windows'ta CoUninitialize).
+func platVideoThreadDone() {}

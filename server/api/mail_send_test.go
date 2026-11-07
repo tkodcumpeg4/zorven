@@ -162,9 +162,9 @@ func TestSendMail_ExternalAllowedUsesEnvelopeAddress(t *testing.T) {
 	// Harici alici (acik surumde serbest): 201, zarf alicisi gercek adres;
 	// gorunen addaki ic adres zarfa girmez.
 	for to, want := range map[string]string{
-		"victim@example.org":                   "<victim@example.org>",
+		"victim@example.org":                       "<victim@example.org>",
 		`"x@mail.zorven.app" <victim@example.org>`: "<victim@example.org>",
-		"Victim@EXAMPLE.net":                     "<Victim@example.net>",
+		"Victim@EXAMPLE.net":                       "<Victim@example.net>",
 	} {
 		rec := send(map[string]any{"to": to, "subject": "s", "body": "b"})
 		if rec.Code != http.StatusCreated {

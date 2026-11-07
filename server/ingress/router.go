@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/tkodcumpeg4/zorven/server/ratelimit"
 	"github.com/tkodcumpeg4/zorven/server/store"
@@ -92,6 +93,10 @@ type Router struct {
 	// SecurityGate, planin WAF block / Geo hakki var mi (Pro+). nil = kapi yok
 	// (open core): hicbir sey kisitlanmaz. main.go baslangicta ayarlar.
 	SecurityGate func(plan string) bool
+
+	// OnReload (opsiyonel): her Reload denemesinin suresi ve sonucu (gozlemlenebilirlik
+	// ve yonlendirme goruntusu icin). main.go bir kez ayarlar; Reload'dan once atanmali.
+	OnReload func(d time.Duration, err error)
 
 	// reloadMu, Reload'lari serilestirir (O8): es zamanli iki Reload'dan eski
 	// olanin yenisini ezmesi ve limiter onbelleginin yarismasi engellenir.
@@ -223,9 +228,13 @@ func (r *Router) SetIPIntel(x *ipIntel) {
 
 // Reload, eslestirmeleri veritabanindan yeniden okur.
 // Sunucu acilisinda ve her tunel/ad degisikliginden sonra cagrilir.
-func (r *Router) Reload(ctx context.Context) error {
+func (r *Router) Reload(ctx context.Context) (err error) {
 	r.reloadMu.Lock()
 	defer r.reloadMu.Unlock()
+	if hook := r.OnReload; hook != nil {
+		started := time.Now()
+		defer func() { hook(time.Since(started), err) }()
+	}
 
 	// TUM kiracilarin yonlendirmeleri: gelen istek yalnizca hostname tasir;
 	// hangi kiraciya ait oldugunu ancak bu tablodan ogreniriz.
@@ -640,7 +649,8 @@ func IsIPHost(host string) bool {
 }
 
 // buildLBEntries, yuk dengeleme kayitlarini tunel bilgileriyle birlestirir.
-// Yalnizca yonlendirilen (host route'u olan) tuneller icin kayit kurulur.
+// Yonlendirilen (host route'u olan) tuneller icin kayit kurulur; hostname'siz
+// rezerve-port ham tuneller rawLBEntries ile eklenir.
 func (r *Router) buildLBEntries(ctx context.Context, routes []store.HostRoute) (map[string]*lbEntry, error) {
 	cfgs, err := r.st.ListTunnelLBs(ctx)
 	if err != nil {
@@ -656,12 +666,25 @@ func (r *Router) buildLBEntries(ctx context.Context, routes []store.HostRoute) (
 		}
 	}
 	out := make(map[string]*lbEntry, len(cfgs))
+	var noRoute []store.TunnelLB // host route'u olmayanlar (hostname'siz ham tuneller)
 	for _, c := range cfgs {
 		rt, ok := byTunnel[c.TunnelID]
 		if !ok {
+			noRoute = append(noRoute, c)
 			continue
 		}
 		out[c.TunnelID] = &lbEntry{cfg: c, clients: candidateClients(rt), proto: rt.Proto}
+	}
+	// Hostname'siz rezerve-port TCP/UDP tuneli de replika dagitimi icin ayni
+	// ayari kullanir; okunamazsa ESKI gorunum korunur (hata doner).
+	if len(noRoute) > 0 {
+		raw, err := r.rawLBEntries(ctx, noRoute)
+		if err != nil {
+			return nil, err
+		}
+		for id, e := range raw {
+			out[id] = e
+		}
 	}
 	return out, nil
 }

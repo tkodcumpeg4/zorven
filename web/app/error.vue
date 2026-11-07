@@ -13,7 +13,7 @@ onMounted(() => { initTheme() })
 const is404 = computed(() => Number(props.error?.statusCode) === 404)
 const site = computed(() => {
   const d = platformDomain.value || (import.meta.client ? location.host.replace(/^(panel|app)\./, '') : 'zorven.app')
-  const pre = locale.value === 'en' ? '/en/' : locale.value === 'ja' ? '/ja/' : '/'
+  const pre = locale.value === 'en' ? '/en/' : locale.value === 'ja' ? '/ja/' : locale.value === 'zh' ? '/zh/' : '/'
   return `https://${d}${pre}`
 })
 useHead({ title: computed(() => `${is404.value ? t('notFound.title') : t('notFound.errorTitle')} · Zorven`) })

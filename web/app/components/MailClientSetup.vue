@@ -19,8 +19,12 @@ const boxes = computed<string[]>(() => {
 })
 const mailbox = ref<string>(props.info.address || '')
 
-const passwords = ref<MailAppPassword[]>([])
-const loading = ref(false)
+const pager = usePagedList<MailAppPassword, { mailbox: string }>(
+  (p, f) => api.pageMailAppPasswords(p, f.mailbox),
+  { queryKey: 'ppage', immediate: false, filters: () => ({ mailbox: mailbox.value }) },
+)
+const passwords = pager.items
+const loading = pager.loading
 const creating = ref(false)
 const label = ref('')
 const created = ref<MailAppPasswordCreated | null>(null)
@@ -32,17 +36,11 @@ function errMsg(e: any, fallback: string): string {
 
 async function loadPasswords() {
   if (!access.value?.enabled || !mailbox.value) return
-  loading.value = true
-  try {
-    passwords.value = await api.listMailAppPasswords(mailbox.value)
-  } catch (e: any) {
-    toast.error(errMsg(e, t('mailApps.loadFailed')))
-  } finally {
-    loading.value = false
-  }
+  await pager.reload(true)
+  if (pager.error.value) toast.error(errMsg(pager.error.value, t('mailApps.loadFailed')))
 }
 
-watch(mailbox, () => { created.value = null; loadPasswords() })
+watch(mailbox, () => { created.value = null }) // listeyi sayfalayicinin filtre izleyicisi yeniler
 onMounted(loadPasswords)
 
 async function createPassword() {
@@ -253,6 +251,7 @@ const mobileConfigUrl = computed(() => api.mailMobileConfigUrl(mailbox.value))
               </tbody>
             </table>
           </div>
+          <ListPager :list="pager" />
         </div>
       </PanelFrame>
 

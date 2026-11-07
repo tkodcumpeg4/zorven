@@ -113,7 +113,7 @@ func newWinDXGISource() dxgiSource { return &winDXGI{} }
 //   - ZORVEN_SCREEN_CAPTURE=dxgi: DXGI'yi korumayi yok sayarak zorlar.
 func newPlatCapturer() Capturer {
 	if h := serviceHelper(); h != nil {
-		return helperCapturer{h}
+		return helperCapturer{c: h, s: h.newSession()}
 	}
 	env := os.Getenv(envScreenCapture)
 	g, allowed, _ := processGuard()

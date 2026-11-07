@@ -438,10 +438,18 @@ export function useAuth() {
   // --- Şifremi unuttum -------------------------------------------------------
 
   /** Şifre sıfırlama e-postası gönder (linkteki token /reset-password'a taşınır). */
-  async function requestPasswordReset(email: string): Promise<void> {
+  async function requestPasswordReset(email: string, captchaToken = ''): Promise<void> {
     // Better Auth 1.7.3: uc /request-password-reset (eski /forget-password YOK; 404 donuyordu).
-    const res = await authClient.requestPasswordReset({ email, redirectTo: '/reset-password' })
-    if (res?.error) throw new Error(res.error.message || gt('auth.thrownResetSend'))
+    const res = await authClient.requestPasswordReset({
+      email,
+      redirectTo: '/reset-password',
+      // CAPTCHA jetonu (platform CAPTCHA aciksa): sunucu kancasi dogrular.
+      ...(captchaToken ? { fetchOptions: { headers: { 'X-Zorven-Captcha': captchaToken } } } : {}),
+    })
+    if (res?.error) {
+      if (String((res.error as any).code ?? '') === 'captcha_failed') throw new AuthFlowError(gt('auth.captchaFailed'), 'captcha_failed')
+      throw new Error(res.error.message || gt('auth.thrownResetSend'))
+    }
   }
 
   /** Yeni şifreyi ayarla (e-postadaki token ile). */

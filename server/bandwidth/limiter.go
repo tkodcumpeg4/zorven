@@ -21,6 +21,15 @@ type TenantRuntimeState struct {
 	NormalRateBytesSec    int64
 	ThrottledRateBytesSec int64
 
+	// Zorven Apps (0106): uygulama tunelleri (zapp://) icin aylik kota. Uygulama
+	// trafigi hem toplam sayaca hem bu sayaca yazilir. Kota asilinca YALNIZ
+	// uygulama tunelleri ayri, kisitli hizli bir limiter'a duser (diger tuneller
+	// genel kotaya gore calismaya devam eder). 0 = sinirsiz.
+	AppMonthlyLimitBytes int64
+	AppBytesUsed         atomic.Int64
+	appThrottled         atomic.Bool
+	appLimiter           *rate.Limiter
+
 	limiter     *rate.Limiter
 	isThrottled atomic.Bool
 	mu          sync.RWMutex
@@ -85,9 +94,56 @@ func NewTenantRuntimeState(tenantID, planID string, monthlyLimit, usedSoFar, nor
 // Record, kiracinin harcadigi bayt miktarini atomik olarak ekler.
 // Kota asildiginda hizi O(1) aninda ThrottledRateBytesSec seviyesine indirir.
 func (s *TenantRuntimeState) Record(bytesIn, bytesOut int64) {
+	s.RecordFor(bytesIn, bytesOut, false)
+}
+
+// SetAppQuota, uygulama trafigi kotasini ve su ana kadarki kullanimi yukler
+// (durum olusturulurken, yayinlanmadan once cagrilir). limit<=0 = sinirsiz.
+// Enterprise'da (limiter nil) kota uygulanmaz.
+func (s *TenantRuntimeState) SetAppQuota(limit, used int64) {
+	s.AppBytesUsed.Store(used)
+	if limit <= 0 || s.limiter == nil {
+		return
+	}
+	s.AppMonthlyLimitBytes = limit
+	bps := s.ThrottledRateBytesSec
+	burst := int(bps / 2)
+	if burst < 64*1024 {
+		burst = 64 * 1024
+	}
+	s.appLimiter = rate.NewLimiter(rate.Limit(bps), burst)
+	if used >= limit {
+		s.appThrottled.Store(true)
+	}
+}
+
+// IsAppThrottled, uygulama trafigi kotasinin asilip asilmadigi.
+func (s *TenantRuntimeState) IsAppThrottled() bool { return s.appThrottled.Load() }
+
+// LimiterFor, trafigin turune gore hiz sinirlayicisini doner: uygulama tuneli ve
+// uygulama kotasi asilmissa kisitli uygulama limiter'i, aksi halde kiracinin
+// genel limiter'i (nil = sinirsiz). Uygulama kotasi asilmisken genel kota da
+// asilmissa ikisi de ayni kisitli hizdadir.
+func (s *TenantRuntimeState) LimiterFor(app bool) *rate.Limiter {
+	if app && s.appLimiter != nil && s.appThrottled.Load() {
+		return s.appLimiter
+	}
+	return s.limiter
+}
+
+// RecordFor, Record'un uygulama farkindalikli hali: app=true ise baytlar
+// uygulama sayacina da yazilir ve uygulama kotasi asildiysa uygulama limiter'i
+// kisitli hiza gecer.
+func (s *TenantRuntimeState) RecordFor(bytesIn, bytesOut int64, app bool) {
 	total := bytesIn + bytesOut
 	if total <= 0 {
 		return
+	}
+	if app {
+		newApp := s.AppBytesUsed.Add(total)
+		if s.AppMonthlyLimitBytes > 0 && newApp >= s.AppMonthlyLimitBytes {
+			s.appThrottled.Store(true)
+		}
 	}
 	newTotal := s.BytesUsedThisMonth.Add(total)
 

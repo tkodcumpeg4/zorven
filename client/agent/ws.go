@@ -3,6 +3,7 @@ package agent
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"net"
 	"net/http"
 	"net/url"
@@ -21,6 +22,10 @@ func (cs *clientSession) handleWSOpen(m protocol.WSOpen) {
 	base := cs.targetFor(m.TunnelID)
 	if base == "" {
 		cs.sendWSAccept(m.ReqID, 0, nil, protocol.CodeLocalUnreachable, "bu tunel icin yerel hedef tanimli degil")
+		return
+	}
+	if base == zappUnavailable {
+		cs.sendWSAccept(m.ReqID, 0, nil, protocol.CodeLocalUnreachable, "uygulama calismiyor")
 		return
 	}
 	u, err := url.Parse(base)
@@ -49,10 +54,26 @@ func (cs *clientSession) handleWSOpen(m protocol.WSOpen) {
 	}
 	reqURL := wsRequestURL(host, m.Path, m.Query)
 
-	conn, err := (&net.Dialer{Timeout: wsDialTimeout}).Dial("tcp", host)
+	// Dial iptal edilebilir (ws_close dial surerken gelirse) ve SSRF korumali:
+	// HTTP/akis yollariyla ayni guardedDial (cozumleme sonrasi IP denetimi + port listesi).
+	dctx, endDial := cs.beginDial(m.ReqID, context.Background())
+	defer endDial()
+	conn, err := guardedDial(dctx, "tcp", host, true, wsDialTimeout)
 	if err != nil {
 		cs.sendWSAccept(m.ReqID, 0, nil, protocol.CodeLocalUnreachable, "yerel servise baglanilamadi: "+err.Error())
 		return
+	}
+	if u.Scheme == "https" || u.Scheme == "wss" {
+		tconn := tls.Client(conn, &tls.Config{ServerName: u.Hostname(), MinVersion: tls.VersionTLS12})
+		hctx, hcancel := context.WithTimeout(dctx, wsDialTimeout)
+		herr := tconn.HandshakeContext(hctx)
+		hcancel()
+		if herr != nil {
+			conn.Close()
+			cs.sendWSAccept(m.ReqID, 0, nil, protocol.CodeLocalUnreachable, "yerel TLS el sikismasi basarisiz: "+herr.Error())
+			return
+		}
+		conn = tconn
 	}
 
 	// Upgrade istegini yerel servise oldugu gibi yaz (Sec-WebSocket-Key vb.
@@ -92,9 +113,20 @@ func (cs *clientSession) handleWSOpen(m protocol.WSOpen) {
 		return
 	}
 
-	// Basari: 101 el sikismasini sunucuya bildir, baglantiyi kaydet.
-	cs.sendWSAccept(m.ReqID, resp.StatusCode, resp.Header, "", "")
+	// Basari: ONCE kaydet, SONRA ws_accept gonder. Tarayici accept'i alir almaz
+	// veri yollar; kayit sonra olsaydi ilk cerceveler sessizce dusurulurdu
+	// (stream.go ile ayni yaris). Accept gonderilemezse kaydi geri al.
 	cs.registerWS(m.ReqID, conn)
+	cs.noteConn(m.ReqID, m.TunnelID)
+	cs.tm.request(m.TunnelID)
+	if err := cs.sendWSAccept(m.ReqID, resp.StatusCode, resp.Header, "", ""); err != nil {
+		cs.closeWS(m.ReqID)
+		return
+	}
+	if dctx.Err() != nil { // dial sirasinda ws_close geldi
+		cs.closeWS(m.ReqID)
+		return
+	}
 
 	// yerel -> sunucu (br: hijack sonrasi tamponlanmis baytlari da kapsar).
 	go func() {
@@ -107,6 +139,7 @@ func (cs *clientSession) handleWSOpen(m protocol.WSOpen) {
 				}); serr != nil {
 					break
 				}
+				cs.tm.addOut(m.TunnelID, n)
 			}
 			if rerr != nil {
 				break
@@ -119,26 +152,41 @@ func (cs *clientSession) handleWSOpen(m protocol.WSOpen) {
 	}()
 }
 
-// routeWSData, sunucudan gelen (tarayici -> yerel) baytlari yerel baglantiya yazar.
+// routeWSData, sunucudan gelen (tarayici -> yerel) baytlari yerel baglantinin
+// SINIRLI yazma kuyruguna koyar. Okuma dongusunu BLOKLAMAZ; tasma/yazim zaman
+// asiminda yalniz bu WS akisi kapatilir.
 func (cs *clientSession) routeWSData(reqID uint64, payload []byte) {
 	cs.wsMu.Lock()
 	conn, ok := cs.wsConns[reqID]
-	cs.wsMu.Unlock()
 	if !ok {
+		cs.wsMu.Unlock()
 		return
 	}
-	if _, err := conn.Write(payload); err != nil {
-		cs.closeWS(reqID)
+	q := cs.wsQ[reqID]
+	if q == nil {
+		if cs.wsQ == nil {
+			cs.wsQ = make(map[uint64]*writeQueue)
+		}
+		q = newConnWriteQueue(conn, func(err error) {
+			cs.log.Warn("ws yazma kuyrugu basarisiz, akis kapatiliyor", "req_id", reqID, "hata", err)
+			_ = cs.sendControl(context.Background(), protocol.WSClose{Type: protocol.TypeWSClose, ReqID: reqID}, protocol.TypeWSClose)
+			cs.closeWS(reqID)
+		})
+		cs.wsQ[reqID] = q
 	}
+	cs.wsMu.Unlock()
+	cs.tm.addIn(cs.tunnelOfConn(reqID), len(payload))
+	_ = q.push(payload)
 }
 
 // handleWSClose, sunucu WS akisini kapattiginda yerel baglantiyi kapatir.
 func (cs *clientSession) handleWSClose(reqID uint64) {
+	cs.cancelDial(reqID)
 	cs.closeWS(reqID)
 }
 
-func (cs *clientSession) sendWSAccept(reqID uint64, status int, headers map[string][]string, code, msg string) {
-	_ = cs.sendControl(context.Background(), protocol.WSAccept{
+func (cs *clientSession) sendWSAccept(reqID uint64, status int, headers map[string][]string, code, msg string) error {
+	return cs.sendControl(context.Background(), protocol.WSAccept{
 		Type: protocol.TypeWSAccept, ReqID: reqID, Status: status,
 		Headers: headers, Code: code, Message: msg,
 	}, protocol.TypeWSAccept)
@@ -154,8 +202,14 @@ func (cs *clientSession) closeWS(reqID uint64) {
 	cs.wsMu.Lock()
 	conn, ok := cs.wsConns[reqID]
 	delete(cs.wsConns, reqID)
+	q := cs.wsQ[reqID]
+	delete(cs.wsQ, reqID)
 	cs.wsMu.Unlock()
+	if q != nil {
+		q.stop()
+	}
 	if ok {
+		cs.forgetConn(reqID)
 		conn.Close()
 	}
 }
@@ -168,7 +222,12 @@ func (cs *clientSession) closeAllWS() {
 		conns = append(conns, c)
 	}
 	cs.wsConns = make(map[uint64]net.Conn)
+	qs := cs.wsQ
+	cs.wsQ = nil
 	cs.wsMu.Unlock()
+	for _, q := range qs {
+		q.stop()
+	}
 	for _, c := range conns {
 		c.Close()
 	}

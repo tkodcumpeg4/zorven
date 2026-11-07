@@ -57,6 +57,8 @@ type AccessQuery struct {
 	Node  string
 	Since time.Time
 	Limit int
+	// Offset: atlanacak satir sayisi (sayfalama).
+	Offset int
 }
 
 // AccessStore (opsiyonel; Store ayrica uygularsa): erisim kayitlari. Uygulanmazsa
@@ -212,7 +214,7 @@ func (m *Manager) AccessLog(ctx context.Context, tenantID string, q AccessQuery)
 	if !ok {
 		return nil, nil
 	}
-	if q.Limit <= 0 || q.Limit > 500 {
+	if q.Limit <= 0 || q.Limit > 501 { // 501 = 500 + "devami var mi" icin 1 ek satir
 		q.Limit = 200
 	}
 	return as.ListAccess(ctx, tenantID, q)

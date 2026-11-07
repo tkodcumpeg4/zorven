@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -15,7 +16,9 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -37,6 +40,7 @@ import (
 	"github.com/tkodcumpeg4/zorven/server/mcpserver"
 	"github.com/tkodcumpeg4/zorven/server/netctl"
 	"github.com/tkodcumpeg4/zorven/server/oauthas"
+	"github.com/tkodcumpeg4/zorven/server/obs"
 	"github.com/tkodcumpeg4/zorven/server/ratelimit"
 	"github.com/tkodcumpeg4/zorven/server/rawproxy"
 	"github.com/tkodcumpeg4/zorven/server/reqlog"
@@ -92,7 +96,6 @@ func serveCmd() *cobra.Command {
 	var authRate, reqRate, adminRate float64
 	var authBurst, reqBurst, adminBurst int
 	var githubClientID, githubClientSecret, githubBaseURL string
-	var githubOpenSignup bool
 	var githubAllow []string
 	var platformDomain string
 	var authUpstream string
@@ -155,6 +158,7 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 			defer publicLimiter.Close()
 
 			router := ingress.NewRouter(st)
+			router.OnReload = func(d time.Duration, err error) { obs.ReloadDone(d, err) }
 
 			// Geo/IP (FAZ 1 Part 2 / F03a). Zorven veritabani DAGITMAZ; yol
 			// isletmeciden gelir. Tanimsizsa ozellik kapali kalir ve Geo kosullari
@@ -249,10 +253,6 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 			}
 			if github.Enabled() {
 				log.Info("GitHub ile giris ACIK", "izinli_kullanici_sayisi", len(github.Allow))
-				if github.OpenSignup {
-					log.Warn("GitHub ACIK KAYIT etkin — GitHub hesabi olan herkes " +
-						"kaydolabilir ve kendi kiracisini alir")
-				}
 			}
 
 			// rawMgr, ham TCP/UDP rezerve-port dinleyicilerini yonetir (FAZ 3 / D2).
@@ -317,6 +317,10 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 			var mailSender *mail.Sender
 			var mailSysLocalParts []string
 			var mailAuto *mail.AutoConfigHandler
+			// Gelen SMTP (:25) STARTTLS sertifika kaynagi; TLS yoneticisi asagida
+			// kurulunca doldurulur. MTA-STS "enforce" yayinlandiginda MX'in STARTTLS
+			// sunmasi sarttir; yoksa Gmail/Outlook gibi gondericiler teslimi reddeder.
+			var inboundCertMgr atomic.Pointer[tlscert.DualCertManager]
 			if mailDomain != "" {
 				relay := firstNonEmpty(os.Getenv("ZORVEN_MAIL_RELAY"), "mail:587")
 				inboundAddr := firstNonEmpty(os.Getenv("ZORVEN_MAIL_INBOUND_ADDR"), ":25")
@@ -339,9 +343,29 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				// dogrudan INBOX'a teslim edilir (gelen :25 ile ayni kurallar).
 				mailLocal := mail.NewLocal(st, mailDomain, apiSrv.PlatformDomain, sysLocalParts)
 				apiSrv.MailSender.Local = mailLocal
-				mailSrv := mail.NewServerLocal(mailLocal, inboundAddr)
+				// Gelen posta kimlik dogrulamasi (SPF/DKIM/DMARC + Authentication-Results):
+				// ZORVEN_MAIL_AUTH = enforce (vars.) | monitor (yalniz basliga yaz, ret/Onemsiz yok) | off.
+				authMode, authKnown := mail.ParseInboundAuthMode(os.Getenv("ZORVEN_MAIL_AUTH"))
+				if !authKnown {
+					log.Warn("webmail: ZORVEN_MAIL_AUTH taninmiyor, varsayilan (enforce) kullaniliyor",
+						"deger", os.Getenv("ZORVEN_MAIL_AUTH"))
+				}
+				mailSrv := mail.NewServerLocalAuth(mailLocal, inboundAddr, mail.NewInboundAuth(mailLocal, authMode, nil))
+				if useTLS {
+					// STARTTLS istege bagli kalir (TLS'siz gondericiler duz metinle teslim eder).
+					mailSrv.TLSConfig = &tls.Config{
+						MinVersion: tls.VersionTLS12,
+						GetCertificate: func(h *tls.ClientHelloInfo) (*tls.Certificate, error) {
+							if m := inboundCertMgr.Load(); m != nil {
+								return m.GetCertificate(h)
+							}
+							return nil, errors.New("gelen SMTP: TLS sertifikasi henuz hazir degil")
+						},
+					}
+				}
 				go func() {
-					log.Info("webmail: gelen SMTP alicisi baslatildi", "addr", inboundAddr, "domain", mailDomain)
+					log.Info("webmail: gelen SMTP alicisi baslatildi", "addr", inboundAddr, "domain", mailDomain,
+						"kimlik_dogrulama", string(authMode), "starttls", useTLS)
 					if err := mailSrv.ListenAndServe(); err != nil {
 						log.Warn("webmail: SMTP alicisi durdu", "hata", err)
 					}
@@ -365,6 +389,7 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 			}
 
 			tunnelHandler := &tunnel.Handler{
+				Events:         broker,
 				Store:          st,
 				Hub:            hub,
 				Log:            log,
@@ -380,6 +405,10 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 			control.Handle("/_tunnel/v1/connect", tunnelHandler)
 			// FAZ 6.4: metrik uyarı değerlendiricisi (arka planda periyodik).
 			go apiSrv.RunAlertEvaluator(ctx, time.Minute)
+			// Kopuk ajan operator alarmi. ZORVEN_OFFLINE_ALERT_MIN=0 kapatir.
+			if w := agentOfflineWatchFromEnv(false, hub); w != nil {
+				go apiSrv.RunAgentOfflineWatch(ctx, w, time.Minute)
+			}
 			apiRoutes := apiSrv.Routes()
 			control.Handle("/api/v1/", apiRoutes)
 			control.Handle("/install.sh", apiRoutes)
@@ -400,6 +429,8 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				betterAuthVerifier = auth.NewBetterAuthVerifier(pgSt.Pool(), 30*time.Second)
 				if sec := firstNonEmpty(os.Getenv("BETTER_AUTH_SECRET"), os.Getenv("ZORVEN_SESSION_SECRET")); sec != "" {
 					betterAuthVerifier.SetSecret(sec)
+					// Hesap silme ic ucu (web -> Go) ayni ana sirdan turetilen anahtarla imzalanir.
+					apiSrv.AccountKey = deriveKey([]byte(sec), keyPurposeAccount)
 				} else {
 					log.Warn("BETTER_AUTH_SECRET tanimli degil: Better Auth cerez imzasi dogrulanamiyor (imzasiz cerez kabul); Bearer oturum token'i kapali")
 				}
@@ -445,6 +476,7 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				},
 			}
 
+			var proxyObs http.Handler // proxy kurulunca obs.Instrument ile sarilir
 			proxy := &ingress.Handler{
 				Router: router, Hub: hub, Log: log, ReqLimiter: reqLimiter,
 				IPFilter:          ipFilter,
@@ -455,6 +487,7 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				BandwidthTracker:  bandwidthRecorder,
 				PlatformDomain:    apiSrv.PlatformDomain,
 				Captures:          captures,
+				AbuseReports:      st,
 				PortHost:          portCfg.Host,
 				MCPLog:            mcpLogger,
 			}
@@ -549,6 +582,7 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 			proxy.TLSFP = botguard.NewTLSFPStore()
 			doorSvc.TokenKey = deriveKey([]byte(visitorSecret), keyPurposeDoorAddr)
 			proxy.AccessEvents = accessPersister
+			proxyObs = obs.Instrument(proxy)
 			visitorMgr.OnEvent = proxy.RecordVisitorEvent
 			if visitorMgr.Enabled() {
 				log.Info("ziyaretci OAuth erisim denetimi ACIK",
@@ -556,6 +590,8 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 			}
 
 			// Ham TCP/UDP rezerve-port dinleyici yoneticisi (FAZ 3 / D2, Mod A).
+			rawproxy.SetUDPDefaultPPS(envIntDefault("ZORVEN_UDP_FLOW_PPS", rawproxy.DefaultUDPFlowPPS),
+				envIntDefault("ZORVEN_UDP_TUNNEL_PPS", rawproxy.DefaultUDPTunnelPPS))
 			rawMgr = rawproxy.New(hub, ipFilter, log, func(lctx context.Context) ([]rawproxy.TunnelInfo, error) {
 				tuns, err := st.ListReservedPortTunnels(lctx)
 				if err != nil {
@@ -607,6 +643,13 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				} else {
 					log.Warn("rawproxy: UDP sinirlari okunamadi, varsayilanlar kullaniliyor", "hata", uerr)
 				}
+				// Replikalar (FAZ 5 / HA): ham TCP/UDP de HTTP gibi birincil + replikalar
+				// arasinda dagitilir. Tek sorgu; okunamazsa Reload iptal edilir ve ONCEKI
+				// durum korunur (bos haritaya gecmek replikalara yapisik UDP flow'larini keserdi).
+				replicas, rerr := st.ListAllTunnelReplicas(lctx)
+				if rerr != nil {
+					return nil, rerr
+				}
 				out := make([]rawproxy.TunnelInfo, 0, len(tuns))
 				for _, tn := range tuns {
 					// O5: dondurulmus tunelin ham portu da acilmaz (freeze -> Reload kapatir).
@@ -626,7 +669,8 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 						TunnelID: tn.ID, ClientID: tn.ClientID, TenantID: tn.TenantID,
 						Proto: tn.Proto, Port: tn.PublicPort,
 						BindAddr: bind, ListenPort: lport,
-						UDP: udpLimitsOf(udpCfg[tn.ID]),
+						UDP:      udpLimitsOf(udpCfg[tn.ID]),
+						Replicas: replicas[tn.ID],
 					})
 				}
 				return out, nil
@@ -635,6 +679,9 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 			rawMgr.Usage = bandwidthRecorder
 			// Z3: ham TCP/UDP icin tunel ulke kurali (ayni mmdb cozumleyicisi).
 			rawMgr.Geo = router
+			// FAZ 5 / HA: replikali ham TCP/UDP tunelleri icin aday secimi HTTP ile
+			// ayni algoritma ve saglik tablosuyla (strateji, agirlik, saglik, panik modu).
+			rawMgr.Balancer = router
 			// Z2: yetki/politika/posture/guvenlik ayari degisince ham akislar ve
 			// acik ziyaretci WebSocket'leri yeniden degerlendirilir.
 			apiSrv.OnAuthzChange = func(tenantID string) {
@@ -646,8 +693,19 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 			rawMgr.Start(ctx)
 
 			// Gecici tunel supurucusu (FAZ 2 / F07): suresi dolan tunelleri
-			// dakikada bir kaldirir. Yalnizca gercekten silme olduysa router
-			// yeniden yuklenir — bos tur hicbir sey yapmaz.
+			// dakikada bir kaldirir. Yalnizca gercekten silme olduysa yan etkiler
+			// yayilir — bos tur hicbir sey yapmaz. Yan etkiler panelden silmeyle
+			// aynidir (apiSrv.TunnelsExpired): router + ham TCP/UDP dinleyicileri
+			// tazelenir (suresi dolan ham tunelin portu kapanir), kiraciya
+			// tunnel.deleted olayi gider, bagli istemciye guncel config_update itilir.
+			// Saklama suresi: ZORVEN_EPHEMERAL_RETAIN (Go suresi, or. 24h; varsayilan 24 saat).
+			if v := strings.TrimSpace(os.Getenv("ZORVEN_EPHEMERAL_RETAIN")); v != "" {
+				if d, perr := time.ParseDuration(v); perr == nil && d >= 0 {
+					store.EphemeralRetain = d
+				} else {
+					log.Warn("ZORVEN_EPHEMERAL_RETAIN gecersiz, varsayilan kullaniliyor", "deger", v)
+				}
+			}
 			go func() {
 				tk := time.NewTicker(time.Minute)
 				defer tk.Stop()
@@ -657,20 +715,27 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 						return
 					case <-tk.C:
 					}
-					n, err := st.DeleteExpiredTunnels(ctx)
+					// 1) Suresi yeni dolanlar trafige kapanir (silinmez).
+					expiredNow, eerr := st.ExpireEphemeralTunnels(ctx)
+					if eerr != nil {
+						log.Warn("gecici tunel sureleri isaretlenemedi", "hata", eerr)
+					}
+					if len(expiredNow) > 0 {
+						log.Info("gecici tunelin suresi doldu, saklaniyor", "adet", len(expiredNow), "saklama", store.EphemeralRetain.String())
+						apiSrv.TunnelsExpiredNow(expiredNow)
+					}
+					// 2) Saklama suresi dolanlar (ve otomatik adlari) silinir.
+					deleted, err := st.DeleteExpiredTunnels(ctx)
 					if err != nil {
 						log.Warn("gecici tunel supurucusu hata verdi", "hata", err)
+					}
+					// Hata kismi sonuc dondurmus olabilir: silinmis satirlarin yan
+					// etkileri yine de yayilmali (kalan satirlar bir sonraki turda).
+					if len(deleted) == 0 {
 						continue
 					}
-					if n == 0 {
-						continue
-					}
-					log.Info("suresi dolmus gecici tunel kaldirildi", "adet", n)
-					if err := router.Reload(ctx); err != nil {
-						log.Warn("supurme sonrasi tunel eslestirmeleri yenilenemedi", "hata", err)
-					}
-					// Suresi dolan ham TCP/UDP gecici tunelin dinleyicisi de kapansin.
-					rawMgr.Reload()
+					log.Info("saklama suresi dolan gecici tunel silindi", "adet", len(deleted))
+					apiSrv.TunnelsExpired(deleted)
 				}
 			}()
 
@@ -963,7 +1028,7 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				OAuth:         oauthVerifier,
 			})
 
-			cspMode := cspModeFromEnv(os.Getenv("ZORVEN_CSP_MODE"))
+			cspMode := cspModeFromEnvs(os.Getenv("ZORVEN_CSP_MODE"), os.Getenv("ZORVEN_CSP_REPORT_ONLY"))
 			mux := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				// Mail istemcisi otomatik yapilandirma (Thunderbird autoconfig, Outlook
 				// Autodiscover): public, IP basina hiz sinirli; yalnizca kendi hostlarinda.
@@ -1014,6 +1079,9 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 							return
 						}
 						control.ServeHTTP(w, r)
+					case r.URL.Path == "/readyz":
+						// Kimliksiz hazir olma ucu (govdede sir yok); /api/v1/health degismedi.
+						obs.ReadyHandler().ServeHTTP(w, r)
 					case r.URL.Path == "/_zva/callback":
 						// Ziyaretçi OAuth callback'i (SABİT kayıtlı redirect_uri).
 						// Public: kendi state HMAC'i doğrular. IP başına hız sınırlı.
@@ -1077,12 +1145,20 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 					}
 					return
 				}
-				proxy.ServeHTTP(w, r)
+				proxyObs.ServeHTTP(w, r)
 			})
+
+			var rootHandler http.Handler = mux
+
+			// Gozlemlenebilirlik: /readyz girdileri, gauge'lar ve (yalniz ZORVEN_METRICS_ADDR
+			// verilirse) ayri metrik/pprof dinleyicisi. Ana porta metrik baglanmaz.
+			setupObsReadiness(st)
+			registerObsGauges(st, hub, router)
+			obs.Serve(ctx, obs.ConfigFromEnv(os.Getenv), log)
 
 			srv := &http.Server{
 				Addr:              addr,
-				Handler:           mux,
+				Handler:           rootHandler,
 				ReadHeaderTimeout: 5 * time.Second,
 				IdleTimeout:       60 * time.Second,
 				MaxHeaderBytes:    1 << 20, // 1 MB baslik siniri (slowloris/DoS korumasi)
@@ -1102,6 +1178,11 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				if err != nil {
 					return fmt.Errorf("TLS sertifikasi yuklenemedi: %w", err)
 				}
+				if len(defaultCert.Certificate) > 0 {
+					if leaf, perr := x509.ParseCertificate(defaultCert.Certificate[0]); perr == nil {
+						obs.SetCertNotAfter(leaf.NotAfter)
+					}
+				}
 				var autocertCache autocert.Cache
 				if pgSt, ok := st.(*pgstore.Store); ok {
 					autocertCache = pgSt.AutocertCache()
@@ -1109,6 +1190,12 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				acmeEmail = firstNonEmpty(acmeEmail, os.Getenv("ZORVEN_ACME_EMAIL"))
 				platDomain := firstNonEmpty(platformDomain, os.Getenv("ZORVEN_PLATFORM_DOMAIN"))
 				dualCertMgr = tlscert.NewDualCertManager(&defaultCert, platDomain, controlHosts, st, acmeEmail, autocertCache)
+				// Sertifika dosyasi degisince (acme.sh yenilemesi) ya da SIGHUP
+				// gelince sunucuyu yeniden baslatmadan yeniden yukle. Tek dugumde de calisir.
+				reloader := &tlscert.FileReloader{CertFile: tlsCert, KeyFile: tlsKey, Apply: dualCertMgr.SetDefaultCert, Log: log}
+				reloader.Prime()
+				go reloader.Run(ctx, 30*time.Second)
+				inboundCertMgr.Store(dualCertMgr)
 
 				// Mail istemcisi erisimi: IMAP (993) + kimlik dogrulamali SMTP gonderim
 				// (587 STARTTLS, 465 TLS). Yalnizca ZORVEN_MAIL_DOMAIN + TLS varken.
@@ -1246,8 +1333,12 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 					redirectHandler = dualCertMgr.AutocertManager.HTTPHandler(redirectHandler)
 				}
 				redirect := &http.Server{
-					Addr:              httpAddr,
-					ReadHeaderTimeout: 10 * time.Second,
+					Addr: httpAddr,
+					// Yalniz yonlendirme + ACME HTTP-01 sunar: siki sureler.
+					ReadHeaderTimeout: 5 * time.Second,
+					ReadTimeout:       10 * time.Second,
+					WriteTimeout:      10 * time.Second,
+					IdleTimeout:       60 * time.Second,
 					Handler:           redirectHandler,
 				}
 				go func() {
@@ -1301,6 +1392,7 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 					return rawproxy.TunnelInfo{
 						TunnelID: hr.TunnelID, ClientID: hr.ClientID,
 						TenantID: hr.TenantID, Proto: hr.Proto,
+						Replicas: hr.ReplicaClientIDs,
 					}, true
 				}
 				demux := rawproxy.NewDemuxListener(baseLn, srv.TLSConfig, sniLookup, rawMgr.HandleSNIConn, log)
@@ -1356,8 +1448,6 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 		"GitHub OAuth App Client Secret (env: ZORVEN_GITHUB_CLIENT_SECRET)")
 	cmd.Flags().StringSliceVar(&githubAllow, "github-allow", nil,
 		"GitHub ile girisine izin verilen kullanici adlari (virgulle; env: ZORVEN_GITHUB_ALLOW)")
-	cmd.Flags().BoolVar(&githubOpenSignup, "github-open-signup", false,
-		"GitHub hesabi olan HERKESIN kaydolmasina izin ver (varsayilan: yalnizca --github-allow listesi)")
 	cmd.Flags().StringVar(&githubBaseURL, "github-base-url", "",
 		"OAuth callback icin sabit taban URL (or. https://sunucu:8443); bos ise istekten turetilir (env: ZORVEN_GITHUB_BASE_URL)")
 	cmd.Flags().StringVar(&authUpstream, "auth-upstream", "",
@@ -1847,4 +1937,50 @@ func splitCSV(s string) []string {
 		}
 	}
 	return out
+}
+
+// envIntDefault, tamsayi ortam degiskenini okur; bos/gecersiz/negatif ise def doner.
+// 0 gecerlidir (UDP PPS icin sinirsiz).
+func envIntDefault(name string, def int) int {
+	v := strings.TrimSpace(os.Getenv(name))
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return def
+	}
+	return n
+}
+
+// registerObsGauges: metriklerde kullanilan anlik degerler.
+func registerObsGauges(st store.Store, hub *tunnel.Hub, router *ingress.Router) {
+	obs.RegisterGauge("zorven_connected_clients", "Bu dugume bagli istemci oturumu sayisi.", func() float64 { return float64(hub.Count()) })
+	obs.RegisterGauge("zorven_active_tunnels", "Bellekteki yonlendirme kaydi sayisi (tam + joker host).", func() float64 { return float64(router.RouteCount()) })
+	pg, ok := st.(*pgstore.Store)
+	if !ok || pg.Pool() == nil {
+		return
+	}
+	stat := func(f func(total, idle, acq, max int32, empty int64) float64) func() float64 {
+		return func() float64 { return f(pg.PoolStats()) }
+	}
+	obs.RegisterGauge("zorven_db_pool_total_conns", "pgx havuzu: acik baglanti.", stat(func(t, _, _, _ int32, _ int64) float64 { return float64(t) }))
+	obs.RegisterGauge("zorven_db_pool_idle_conns", "pgx havuzu: bosta baglanti.", stat(func(_, i, _, _ int32, _ int64) float64 { return float64(i) }))
+	obs.RegisterGauge("zorven_db_pool_acquired_conns", "pgx havuzu: kullanimdaki baglanti.", stat(func(_, _, a, _ int32, _ int64) float64 { return float64(a) }))
+	obs.RegisterGauge("zorven_db_pool_max_conns", "pgx havuzu: izin verilen en fazla baglanti.", stat(func(_, _, _, m int32, _ int64) float64 { return float64(m) }))
+	obs.RegisterGauge("zorven_db_pool_empty_acquires_total", "pgx havuzu: bosta baglanti bulunamadigi icin beklenen alim sayisi (sayac).", stat(func(_, _, _, _ int32, e int64) float64 { return float64(e) }))
+}
+
+// setupObsReadiness: /readyz girdileri.
+func setupObsReadiness(st store.Store) {
+	r := obs.Readiness{}
+	if v := strings.TrimSpace(os.Getenv("ZORVEN_READY_MAX_STALE")); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			r.MaxStale = d
+		}
+	}
+	if pg, ok := st.(*pgstore.Store); ok && pg.Pool() != nil {
+		r.DBPing = pg.Ping
+	}
+	obs.SetReadiness(r)
 }

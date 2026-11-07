@@ -19,12 +19,12 @@ var verbRe = regexp.MustCompile(`%[-+# 0-9.]*[a-zA-Z]`)
 func TestDesktopMessagesComplete(t *testing.T) {
 	for k, m := range dmessages {
 		for i, s := range m {
-			if s == "" && i != 2 { // acik surumde ja sutunu bostur
+			if s == "" && i < 2 { // acik surumde ja ve zh sutunu bostur
 				t.Errorf("%s: dil %d bos", k, i)
 			}
 		}
 		base := verbRe.FindAllString(m[0], -1)
-		for i := 1; i < 3; i++ {
+		for i := 1; i < 4; i++ {
 			if m[i] == "" {
 				continue
 			}

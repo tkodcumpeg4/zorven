@@ -213,6 +213,14 @@ export interface Tunnel {
   hostnames?: Hostname[]
   /** Özel kaynağın adı (F17), ör. "db.internal". Yalnızca exposure === 'private'. */
   private_name?: string
+  /** Geçici tünel (F07): true ise `expires_at` dolunca sunucu tüneli kendiliğinden siler. */
+  ephemeral?: boolean
+  /** Geçici tünelin bitiş zamanı (ISO 8601); kalıcı tünelde yok. */
+  expires_at?: string
+  /** Süresi dolup trafiğe kapandığı an; silinene kadar saklanır (varsayılan 24 sa). */
+  expired_at?: string
+  /** Sunucunun tüneli ve otomatik adını sileceği an (expired_at + saklama süresi). */
+  delete_at?: string
 }
 
 /**
@@ -718,6 +726,33 @@ export interface TunnelTCPResp {
   series: TCPStatMinute[]
 }
 
+// Hesap silme onizlemesi (GET /api/v1/account/deletion-preview; server/store/account.go).
+export interface AccountOrg {
+  id: string
+  slug: string
+  name: string
+  role: string
+  members: number
+  /** Yalniz engellerde: tek sahip olunan baska uyeli org ya da platform org'u. */
+  reason?: 'sole_owner' | 'platform'
+  /** Icerik sayilari yalniz silinecek organizasyonlarda. */
+  tunnels?: number
+  clients?: number
+  domains?: number
+  secrets?: number
+}
+
+export interface AccountDeletionPlan {
+  user_id: string
+  /** Tek uyesi oldugun organizasyonlar: tum kaynaklariyla silinir. */
+  delete_orgs: AccountOrg[]
+  /** Baska uyeli organizasyonlar: yalniz uyelik/cihaz/kisisel anahtar kalkar. */
+  leave_orgs: AccountOrg[]
+  /** Dolu ise hesap silinemez. */
+  blocking_orgs: AccountOrg[]
+  can_delete: boolean
+}
+
 // ZTNA Z3 — tunel WAF + Geo.
 export interface TunnelBotSettings {
   mode: 'off' | 'suspicious' | 'always'
@@ -729,7 +764,7 @@ export interface TunnelBotSettings {
 }
 export interface TunnelRateSettings {
   enabled: boolean
-  requests?: number            // 1-100000 (vars. 120)
+  requests?: number            // 1-1000000 (vars. 120)
   window_seconds?: number      // 1-3600 (vars. 60)
   action?: 'block' | 'challenge'
   exclude_paths?: string[]
@@ -741,6 +776,8 @@ export interface TunnelSecurity {
   // Bot koruması + hız sınırı (eski sunucuda yok olabilir; varsayılanlarla doldurulur).
   bot?: TunnelBotSettings
   rate?: TunnelRateSettings
+  // Güvenilir IP'ler: WAF/bot/hız sınırı (ve skip_geo ile Geo) muaf.
+  trusted?: { cidrs: string[], skip_geo?: boolean }
   updated_at?: string
   rules?: { id: string, category: string }[]
   geo_db_loaded?: boolean
@@ -781,6 +818,11 @@ export interface AbuseReport {
   fqdn: string
   reason: string
   reporter_ip?: string
+  category?: string
+  reporter_ua?: string
+  reporter_id?: string
+  reporter_tls?: string
+  reporter_lang?: string
   handled: boolean
   created_at: string
 }
@@ -809,6 +851,7 @@ export interface LogFilter {
   hostname?: string
   tunnel_id?: string
   q?: string                 // path içinde arama
+  ip?: string                // istemci IP (tam adres ya da önek)
   min_dur?: number
   max_dur?: number
   rejected?: string          // "true" => yalnizca ingress'in reddettigi istekler

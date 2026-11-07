@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/tkodcumpeg4/zorven/server/store"
 )
 
 // Log saklama (retention): ACIK SURUMDE sabit, yapilandirilabilir sure.
@@ -25,6 +27,10 @@ type RetentionResult struct {
 	RequestLogs int64
 	UDPStats    int64
 	TCPStats    int64
+	// MCPCalls, mcp_calls (MCP cagri logu) silme sayisi.
+	MCPCalls int64
+	// IdempotencyKeys, 24 saatten eski idempotency_keys silme sayisi.
+	IdempotencyKeys int64
 	// Captures, request_captures (istek govdesi yakalama) silme sayisi.
 	Captures int64
 	// AccessEvents, tunnel_access_events (ziyaretci giris olaylari) silme sayisi.
@@ -64,12 +70,18 @@ func (s *Store) PruneRetention(ctx context.Context) (RetentionResult, error) {
 
 func (s *Store) pruneRetentionAt(ctx context.Context, now time.Time, days int) (RetentionResult, error) {
 	var res RetentionResult
+	// Idempotency anahtarlari log saklamasindan bagimsiz: 24 saatlik TTL her zaman uygulanir.
+	n, err := s.PruneIdempotency(ctx, now.Add(-store.IdempotencyKeyTTL))
+	res.IdempotencyKeys = n
+	if err != nil {
+		return res, fmt.Errorf("retention: idempotency_keys: %w", err)
+	}
 	if days <= 0 {
 		return res, nil
 	}
 	cutoff := now.Add(-time.Duration(days) * 24 * time.Hour)
 
-	n, err := s.batchDelete(ctx,
+	n, err = s.batchDelete(ctx,
 		`DELETE FROM request_logs WHERE id IN (
 		   SELECT id FROM request_logs WHERE ts < $1 LIMIT $2)`, cutoff)
 	res.RequestLogs = n
@@ -96,6 +108,13 @@ func (s *Store) pruneRetentionAt(ctx context.Context, now time.Time, days int) (
 	res.AccessEvents = n
 	if err != nil {
 		return res, fmt.Errorf("retention: tunnel_access_events: %w", err)
+	}
+	n, err = s.batchDelete(ctx,
+		`DELETE FROM mcp_calls WHERE id IN (
+		   SELECT id FROM mcp_calls WHERE ts < $1 LIMIT $2)`, cutoff)
+	res.MCPCalls = n
+	if err != nil {
+		return res, fmt.Errorf("retention: mcp_calls: %w", err)
 	}
 	// Istek govdesi yakalamalari: log suresi, varsa ZORVEN_CAPTURE_RETENTION_DAYS
 	// ust siniriyla kisaltilir.

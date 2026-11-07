@@ -163,6 +163,7 @@ func (s *MemStore) ListAccess(_ context.Context, tenantID string, q AccessQuery)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var out []AccessRecord
+	skip := max(q.Offset, 0)
 	for i := len(s.access) - 1; i >= 0; i-- {
 		r := s.access[i]
 		if r.TenantID != tenantID {
@@ -178,6 +179,10 @@ func (s *MemStore) ListAccess(_ context.Context, tenantID string, q AccessQuery)
 			continue
 		}
 		if !q.Since.IsZero() && r.At.Before(q.Since) {
+			continue
+		}
+		if skip > 0 {
+			skip--
 			continue
 		}
 		out = append(out, r)

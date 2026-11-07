@@ -18,9 +18,10 @@ const canManage = computed(() => {
   return r === 'owner' || r === 'admin'
 })
 
-const loading = ref(true)
+const pager = usePagedList<Tunnel>(p => api.pageNetworkResources(p), { immediate: false })
+const loading = pager.loading
 const unavailable = ref('') // plan kapısı vb. — sayfa yerine açıklama gösterilir
-const resources = ref<Tunnel[]>([])
+const resources = pager.items
 const clients = ref<Client[]>([])
 
 function errMsg(e: any, fallback: string): string {
@@ -28,16 +29,14 @@ function errMsg(e: any, fallback: string): string {
 }
 
 async function load() {
-  loading.value = true
   unavailable.value = ''
   try {
-    const [res, cl] = await Promise.all([api.listNetworkResources(), api.listClients()])
-    resources.value = res
+    // Istemciler: ad/secici icin tam liste (limit=500); kaynaklar sayfali.
+    const [cl] = await Promise.all([api.listClients(), pager.reload()])
+    if (pager.error.value) throw pager.error.value
     clients.value = cl
   } catch (e: any) {
     unavailable.value = errMsg(e, t('network.loadError'))
-  } finally {
-    loading.value = false
   }
 }
 
@@ -193,6 +192,7 @@ onMounted(load)
             </div>
           </div>
         </div>
+        <ListPager :list="pager" />
 
         <!-- Ekleme (owner/admin; sunucu da zorlar) -->
         <form v-if="canManage" class="mt-5 space-y-2 border-t border-line pt-4" @submit.prevent="create">

@@ -71,9 +71,11 @@ func Catalog() []ToolInfo {
 // ExpandScopes, ham kapsamlari gercek yetki kumesine genisletir (sunucudaki
 // effectiveScopes ile ayni kural): "*"/"all"/"admin" hepsi; "read" tum :read;
 // "write" tum :write (+:read); "x:write" ayni zamanda "x:read" verir.
+// "apps:deploy" (CI icin sinirli dagitim) HICBIR genislemeye girmez ve MCP OAuth
+// katalogunda sunulmaz; yalniz API anahtari / servis hesabina acikca verilir.
 func ExpandScopes(granted []string) map[string]bool {
-	reads := []string{ScopeClientsRead, ScopeTunnelsRead, ScopeHostnamesRead, "ip_allowlist:read", ScopeAnalyticsRead}
-	writes := []string{"clients:write", ScopeTunnelsWrite, ScopeHostnamesWrite, "ip_allowlist:write"}
+	reads := []string{ScopeClientsRead, ScopeTunnelsRead, ScopeHostnamesRead, "ip_allowlist:read", ScopeAnalyticsRead, ScopeAppsRead}
+	writes := []string{"clients:write", ScopeTunnelsWrite, ScopeHostnamesWrite, "ip_allowlist:write", ScopeAppsWrite}
 	set := map[string]bool{}
 	addWrite := func(w string) {
 		set[w] = true

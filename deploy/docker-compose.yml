@@ -61,7 +61,13 @@ services:
       - "3478:3478/udp"
     environment:
       - ZORVEN_DB_DSN=postgres://${POSTGRES_USER:-rpshell}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD gerekli (deploy/.env)}@postgres:5432/${POSTGRES_DB:-rpshell}?sslmode=disable
+      # Veritabani havuzu: ust sinir ve sorgu zaman asimi (migration/retention muaf).
+      - ZORVEN_DB_MAX_CONNS=${ZORVEN_DB_MAX_CONNS:-20}
+      - ZORVEN_DB_STATEMENT_TIMEOUT_MS=${ZORVEN_DB_STATEMENT_TIMEOUT_MS:-15000}
       - ZORVEN_PLATFORM_DOMAIN=${PLATFORM_DOMAIN:-localhost}
+      # Kopuk ajan operator alarmi (bos: yalniz WARN log); esik dakika (0 kapatir).
+      - ZORVEN_OPS_ALERT_EMAIL=${ZORVEN_OPS_ALERT_EMAIL:-}
+      - ZORVEN_OFFLINE_ALERT_MIN=${ZORVEN_OFFLINE_ALERT_MIN:-10}
       - ZORVEN_ADMIN_KEY=${ADMIN_KEY}
       # Better Auth cerez imzasi (web ile AYNI deger): Go imzayi dogrular, ham token Bearer reddedilir.
       - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET}
@@ -71,6 +77,10 @@ services:
       # Webmail: gelen SMTP alıcısını (:25) ve giden relay'i (mail:587) etkinleştirir.
       # Adresler org-slug@mail.<domain> biçimindedir. Boş bırakılırsa webmail kapalı.
       - ZORVEN_MAIL_DOMAIN=mail.${PLATFORM_DOMAIN:-localhost}
+      # Gelen posta kimlik dogrulamasi (SPF/DKIM/DMARC + Authentication-Results):
+      # bos/enforce = politika uygulanir (DMARC reject -> 550, quarantine -> Onemsiz klasoru);
+      # monitor = yalniz basliga yazilir, hicbir ileti reddedilmez/ayrilmaz; off = dogrulama yok.
+      - ZORVEN_MAIL_AUTH=${ZORVEN_MAIL_AUTH:-}
       # Mail istemcisi sunuculari (IMAP/SMTP gonderim; yalniz MAIL_DOMAIN + TLS sertifikasi
       # varken calisir). Sunucu adi varsayilan mail.<platform domain>; sertifika bu adi kapsamali.
       - ZORVEN_IMAP_ADDR=${ZORVEN_IMAP_ADDR:-:993}
@@ -172,6 +182,15 @@ services:
       # ve relay'i bozar). Bu yüzden aralarında boşluk var.
       - ALLOWED_SENDER_DOMAINS=${PLATFORM_DOMAIN:-localhost} mail.${PLATFORM_DOMAIN:-localhost}
       - DKIM_AUTOGENERATE=true
+      # Duyuru e-postalari List-Unsubscribe ve List-Unsubscribe-Post
+      # (RFC 8058) tasir; Gmail'in tek tik cikisi bu iki basligin DKIM imzasinda olmasini
+      # ister. boky/postfix OPENDKIM_<Ayar> degiskenlerini opendkim.conf'a yazar
+      # (functions.sh opendkim_custom_commands); asagidaki liste imajin varsayilan
+      # SignHeaders listesi + iki liste basligidir. NOT: imajin yeni surumlerinde varsayilan
+      # DKIM_BACKEND=rspamd'dir ve rspamd bu iki basligi zaten varsayilan olarak imzalar
+      # (OPENDKIM_* o durumda yalniz OpenDKIM anahtarlari ilk kez rspamd'ye aktarilirken
+      # sign_headers'a cevrilir; zararsizdir). OpenDKIM arka ucu ya da eski imaj icin gecerlidir.
+      - OPENDKIM_SignHeaders=From,Sender,To,CC,Subject,Message-Id,Date,MIME-Version,Content-Type,Reply-To,List-Unsubscribe,List-Unsubscribe-Post
       - POSTFIX_myhostname=mail.${PLATFORM_DOMAIN:-localhost}
     volumes:
       - dkim_keys:/etc/opendkim/keys

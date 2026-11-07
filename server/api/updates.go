@@ -51,7 +51,7 @@ func (s *Server) registerUpdates(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/admin/updates/{id}/publish", s.adminPublishUpdate)
 	mux.HandleFunc("POST /api/v1/admin/updates/{id}/unpublish", s.adminUnpublishUpdate)
 	mux.HandleFunc("POST /api/v1/admin/updates/{id}/test-email", s.adminTestUpdateEmail)
-	mux.HandleFunc("POST /api/v1/admin/updates/{id}/send", s.adminSendUpdate)
+	mux.HandleFunc("POST /api/v1/admin/updates/{id}/send", s.idempotentFunc(s.adminSendUpdate))
 	mux.HandleFunc("GET /api/v1/announcements/preference", s.getAnnouncementPref)
 	mux.HandleFunc("PUT /api/v1/announcements/preference", s.putAnnouncementPref)
 	mux.HandleFunc("PUT /api/v1/announcements/preference/lang", s.putAnnouncementLang)
@@ -142,6 +142,8 @@ type updateBody struct {
 	BodyEN           string     `json:"body_en"`
 	TitleJA          string     `json:"title_ja"`
 	BodyJA           string     `json:"body_ja"`
+	TitleZH          string     `json:"title_zh"`
+	BodyZH           string     `json:"body_zh"`
 	MaintenanceStart *time.Time `json:"maintenance_start"`
 	MaintenanceEnd   *time.Time `json:"maintenance_end"`
 }
@@ -159,6 +161,7 @@ func (b *updateBody) validate() (store.UpdatePost, string) {
 		Slug: strings.ToLower(strings.TrimSpace(b.Slug)), Kind: strings.TrimSpace(b.Kind), Version: strings.TrimSpace(b.Version),
 		TitleTR: strings.TrimSpace(b.TitleTR), BodyTR: b.BodyTR, TitleEN: strings.TrimSpace(b.TitleEN), BodyEN: b.BodyEN,
 		TitleJA: strings.TrimSpace(b.TitleJA), BodyJA: b.BodyJA,
+		TitleZH: strings.TrimSpace(b.TitleZH), BodyZH: b.BodyZH,
 		MaintenanceStart: b.MaintenanceStart, MaintenanceEnd: b.MaintenanceEnd,
 	}
 	if p.Kind == "" {
@@ -174,12 +177,12 @@ func (b *updateBody) validate() (store.UpdatePost, string) {
 	case len(p.Version) > 40 || !oneLine(p.Version):
 		return p, "surum gecersiz"
 	}
-	for _, t := range []string{p.TitleTR, p.TitleEN, p.TitleJA} {
+	for _, t := range []string{p.TitleTR, p.TitleEN, p.TitleJA, p.TitleZH} {
 		if len(t) > maxTitleLen || !oneLine(t) {
 			return p, "baslik cok uzun veya birden cok satir"
 		}
 	}
-	for _, t := range []string{p.BodyTR, p.BodyEN, p.BodyJA} {
+	for _, t := range []string{p.BodyTR, p.BodyEN, p.BodyJA, p.BodyZH} {
 		if len(t) > maxBodyLen {
 			return p, "metin cok uzun"
 		}
@@ -209,13 +212,16 @@ func (s *Server) adminListUpdates(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
-	posts, total, err := us.ListUpdatePosts(r.Context(), false, limit, offset)
+	pg, okPg := pageOf(w, r)
+	if !okPg {
+		return
+	}
+	posts, total, err := us.ListUpdatePosts(r.Context(), false, pg.Limit, pg.Offset)
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
+	setPageTotals(w, pg, len(posts), total)
 	writeJSON(w, http.StatusOK, map[string]any{"updates": posts, "total": total})
 }
 

@@ -36,7 +36,10 @@ func (w *windowTable) acquire(ctx context.Context, reqID uint64, n int) error {
 		w.mu.Lock()
 		rem, ok := w.remaining[reqID]
 		if !ok {
+			// Ilk gonderim: kaydi BURADA ac. add() yalniz kayitli (aktif) istekler
+			// icin kredi isler; biten istegin gec window_update'i kayit sizdirmaz.
 			rem = protocol.InitialWindowBytes
+			w.remaining[reqID] = rem
 		}
 		if rem >= n {
 			w.remaining[reqID] = rem - n
@@ -68,7 +71,10 @@ func (w *windowTable) add(reqID uint64, n int) {
 	w.mu.Lock()
 	rem, ok := w.remaining[reqID]
 	if !ok {
-		rem = protocol.InitialWindowBytes
+		// Bilinmeyen / bitmis istek: yok say (aksi halde her gec gelen
+		// window_update icin kalici bir kayit sizardi).
+		w.mu.Unlock()
+		return
 	}
 	w.remaining[reqID] = rem + n
 	ch := w.waiters[reqID]

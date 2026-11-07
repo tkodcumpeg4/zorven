@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"mime"
 	"mime/multipart"
@@ -14,6 +15,8 @@ import (
 	"net/textproto"
 	"strings"
 	"time"
+
+	"github.com/tkodcumpeg4/zorven/server/backoff"
 )
 
 // Attachment, giden bir maile eklenecek dosya.
@@ -32,6 +35,11 @@ type Sender struct {
 	// relay'e GITMEZ (Postfix "loops back to myself" ile geri cevirir); dogrudan
 	// INBOX'a teslim edilir.
 	Local *Local
+
+	// Test icin ayarlanabilir (0/nil = varsayilan).
+	dialTimeout time.Duration
+	msgTimeout  time.Duration
+	sleeper     backoff.Sleeper
 }
 
 // NewSender, relay adresi ve mail domaini ile bir gonderici olusturur.
@@ -217,12 +225,71 @@ func BuildRFC822(from, to, subject, body, htmlBody, inReplyTo, messageID string,
 	return b.String()
 }
 
+const (
+	// smtpDialTimeout, relay'e TCP baglanti kurma ust siniri.
+	smtpDialTimeout = 10 * time.Second
+	// smtpMessageTimeout, tek mesajin TUM denemeleri icin toplam ust sinir;
+	// takilan bir relay kampanyayi/istegi bundan fazla bekletemez.
+	smtpMessageTimeout = 2 * time.Minute
+)
+
+// smtpRetry, gecici hatalarda (baglanti, 4xx) yeniden deneme politikasi.
+var smtpRetry = backoff.Policy{Attempts: 3, Base: time.Second, Max: 10 * time.Second}
+
 // deliver, relay'e baglanir, varsa STARTTLS yapar (self-signed'a izin verir) ve
-// mesaji teslim eder. Auth kullanmaz.
+// mesaji teslim eder. Auth kullanmaz. Gecici hatalar (baglanti kopmasi/zaman
+// asimi, 4xx yanitlari) ustel backoff + jitter ile yeniden denenir; 5xx kalici
+// hata olarak hemen doner. Toplam sure smtpMessageTimeout ile sinirlidir.
 func (s *Sender) deliver(from string, to []string, msg []byte) error {
-	c, err := smtp.Dial(s.relayAddr)
+	total := s.msgTimeout
+	if total <= 0 {
+		total = smtpMessageTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), total)
+	defer cancel()
+	return backoff.DoWith(ctx, smtpRetry, s.sleep(), func(ctx context.Context) error {
+		return s.deliverOnce(ctx, from, to, msg)
+	})
+}
+
+func (s *Sender) sleep() backoff.Sleeper {
+	if s.sleeper != nil {
+		return s.sleeper
+	}
+	return backoff.RealSleep
+}
+
+// classifySMTP, hatayi tekrar denenebilir/denenemez ayirir (5xx -> Permanent).
+func classifySMTP(err error) error {
+	var te *textproto.Error
+	if errors.As(err, &te) && te.Code >= 500 {
+		return backoff.Permanent(err)
+	}
+	return err
+}
+
+func (s *Sender) deliverOnce(ctx context.Context, from string, to []string, msg []byte) error {
+	dt := s.dialTimeout
+	if dt <= 0 {
+		dt = smtpDialTimeout
+	}
+	d := net.Dialer{Timeout: dt}
+	conn, err := d.DialContext(ctx, "tcp", s.relayAddr)
 	if err != nil {
 		return fmt.Errorf("relay baglantisi kurulamadi: %w", err)
+	}
+	// Tum oturum icin kesin son tarih: takilan relay konusmayi sonsuza dek tutamaz.
+	if dl, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(dl)
+	}
+	host, _, splitErr := net.SplitHostPort(s.relayAddr)
+	if splitErr != nil {
+		host = s.relayAddr
+	}
+	c, err := smtp.NewClient(conn, host)
+	if err != nil {
+		_ = conn.Close()
+		return classifySMTP(fmt.Errorf("relay selamlamasi basarisiz: %w", err))
 	}
 	defer c.Close()
 
@@ -231,39 +298,42 @@ func (s *Sender) deliver(from string, to []string, msg []byte) error {
 		helo = "localhost"
 	}
 	if err := c.Hello(helo); err != nil {
-		return fmt.Errorf("HELO basarisiz: %w", err)
+		return classifySMTP(fmt.Errorf("HELO basarisiz: %w", err))
 	}
 
 	if ok, _ := c.Extension("STARTTLS"); ok {
-		host, _, splitErr := net.SplitHostPort(s.relayAddr)
-		if splitErr != nil {
-			host = s.relayAddr
-		}
 		// Yerel Postfix self-signed sertifika kullanabilir.
 		if err := c.StartTLS(&tls.Config{ServerName: host, InsecureSkipVerify: true}); err != nil {
-			return fmt.Errorf("STARTTLS basarisiz: %w", err)
+			return classifySMTP(fmt.Errorf("STARTTLS basarisiz: %w", err))
 		}
 	}
 
 	if err := c.Mail(from); err != nil {
-		return fmt.Errorf("MAIL FROM reddedildi: %w", err)
+		return classifySMTP(fmt.Errorf("MAIL FROM reddedildi: %w", err))
 	}
 	for _, rcpt := range to {
 		if err := c.Rcpt(rcpt); err != nil {
-			return fmt.Errorf("RCPT TO reddedildi (%s): %w", rcpt, err)
+			return classifySMTP(fmt.Errorf("RCPT TO reddedildi (%s): %w", rcpt, err))
 		}
 	}
 	w, err := c.Data()
 	if err != nil {
-		return fmt.Errorf("DATA acilamadi: %w", err)
+		return classifySMTP(fmt.Errorf("DATA acilamadi: %w", err))
 	}
 	if _, err := w.Write(msg); err != nil {
 		return fmt.Errorf("govde yazilamadi: %w", err)
 	}
 	if err := w.Close(); err != nil {
-		return fmt.Errorf("DATA kapatilamadi: %w", err)
+		var te *textproto.Error
+		if !errors.As(err, &te) {
+			// Govde gitti ama sonuc bilinmiyor (baglanti koptu/zaman asimi):
+			// mesaj teslim edilmis olabilir; cift e-posta riskine karsi tekrar denenmez.
+			return backoff.Permanent(fmt.Errorf("DATA sonucu belirsiz: %w", err))
+		}
+		return classifySMTP(fmt.Errorf("DATA kapatilamadi: %w", err))
 	}
-	return c.Quit()
+	_ = c.Quit()
+	return nil
 }
 
 // SendRaw, hazir bir RFC 5322 mesajini (mail istemcisinden gelen) verilen

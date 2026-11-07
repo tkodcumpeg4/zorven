@@ -4,8 +4,6 @@ import (
 	"context"
 	"net/http"
 	"time"
-
-	"github.com/tkodcumpeg4/zorven/server/store"
 )
 
 // getSubscription, GET /api/v1/subscription
@@ -69,9 +67,11 @@ func (s *Server) listPlans(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if plans == nil {
-		plans = []store.Plan{}
+	pg, okPg := pageOf(w, r)
+	if !okPg {
+		return
 	}
+	plans = slicePage(w, pg, plans)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"plans": plans,

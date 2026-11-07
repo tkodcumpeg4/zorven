@@ -30,6 +30,7 @@ import (
 
 type netConnFlags struct {
 	server, apiToken string
+	apiTokenFile     string
 	insecure         bool
 	caCert           string
 }
@@ -37,41 +38,80 @@ type netConnFlags struct {
 func (f *netConnFlags) add(c *cobra.Command) {
 	c.Flags().StringVar(&f.server, "server", "", i18n.T("net.flag.server"))
 	c.Flags().StringVar(&f.apiToken, "api-token", "", i18n.T("net.flag.apitoken"))
+	c.Flags().StringVar(&f.apiTokenFile, "api-token-file", "", i18n.T("v3.flag.apitokenfile"))
 	c.Flags().BoolVar(&f.insecure, "insecure", false, i18n.T("net.flag.insecure"))
 	c.Flags().StringVar(&f.caCert, "ca-cert", "", i18n.T("net.flag.cacert"))
 }
 
 func (f *netConnFlags) resolveServer() (string, bool, string) {
 	cfg, _ := config.Load()
-	srv := strings.TrimSpace(f.server)
-	if srv == "" {
-		srv = strings.TrimSpace(os.Getenv("ZORVEN_SERVER"))
-	}
-	if srv == "" {
-		srv = strings.TrimSpace(cfg.ServerAddr)
-	}
-	if srv == "" || srv == "localhost:8443" {
-		srv = "zorven.app:443"
-	}
+	srv := resolveServerAddr(f.server, cfg)
 	ca := f.caCert
 	if ca == "" {
 		ca = cfg.CACertPath
 	}
-	return srv, f.insecure || cfg.Insecure, ca
+	insecure := f.insecure || cfg.Insecure
+	warnPlaintext(insecure)
+	return srv, insecure, ca
 }
 
 func (f *netConnFlags) token() (string, error) {
-	t := strings.TrimSpace(f.apiToken)
-	if t == "" {
-		t = strings.TrimSpace(os.Getenv("ZORVEN_API_TOKEN"))
+	t, err := resolveAPIToken(f.apiToken, f.apiTokenFile)
+	if err != nil {
+		return "", err
 	}
 	if t == "" {
 		return "", errors.New(i18n.T("net.err.token"))
 	}
-	if strings.HasPrefix(t, "zrv_live_") || strings.HasPrefix(t, "rpsh_live_") {
+	if isAgentToken(t) {
 		return "", errors.New(i18n.T("net.err.agenttoken"))
 	}
 	return t, nil
+}
+
+// explicitAccessToken: acikca verilen token (--api-token / --api-token-file /
+// ZORVEN_API_TOKEN). `zorven access` hem API token'i (zrv_api_) hem istemci
+// token'ini (zrv_live_) kabul eder; ikisi de ayni oturum ucuna baglanir.
+// Kayitli (zorven login) API token'i BURADA yok: calisan ajan varsa o tercih edilir.
+func (f *netConnFlags) explicitAccessToken() (string, error) {
+	return explicitAPIToken(f.apiToken, f.apiTokenFile)
+}
+
+// clientAccessToken: istemci token'i (--token, ZORVEN_TOKEN, kayitli ayar).
+func clientAccessToken(flagTok string) string {
+	t := strings.TrimSpace(flagTok)
+	if t == "" {
+		t = strings.TrimSpace(os.Getenv("ZORVEN_TOKEN"))
+	}
+	if t == "" {
+		cfg, _ := config.Load()
+		t = strings.TrimSpace(cfg.Token)
+	}
+	return t
+}
+
+// accessViaLocalAgent: calisan ajan varsa erisimi ona actirir (ajan zaten kimlikli
+// bir baglantiya ve cihaz kimligine sahip; ayri token gerekmez).
+func accessViaLocalAgent(target string, local int, bind string) (found bool, err error) {
+	ep, ok := findRunning()
+	if !ok {
+		return false, nil
+	}
+	// Port bos birakilirsa ajan paylasimin portunu kullanir ("host:").
+	loc := net.JoinHostPort(bind, "")
+	if local > 0 {
+		loc = net.JoinHostPort(bind, strconv.Itoa(local))
+	} else if _, p, ok := strings.Cut(target, ":"); ok {
+		if n, e := strconv.Atoi(p); e == nil && n > 0 {
+			loc = net.JoinHostPort(bind, strconv.Itoa(n))
+		}
+	}
+	resp, err := callAgent(*ep, localctl.Request{Op: "access_open", Target: target, Local: loc})
+	if err != nil {
+		return true, mapAgentErr(err)
+	}
+	fmt.Fprintln(outW, i18n.T("share.access.open", target, resp.Local))
+	return true, nil
 }
 
 func (f *netConnFlags) httpClient(ca string) (*http.Client, error) {
@@ -104,7 +144,7 @@ func newShareCmd() *cobra.Command {
 	var name, expires, token, server, caCert, logLevel string
 	var insecure bool
 	cmd := &cobra.Command{
-		Use:     "share <port> --to <kullanici|grup|cihaz> [--udp] [--name x] [--expires 24h]",
+		Use:     "share <port> --to <user|group|device> [--udp] [--name x] [--expires 24h]",
 		Short:   i18n.T("net.share.short"),
 		Long:    i18n.T("net.share.long"),
 		Example: "  zorven share 5432 --to ali@firma.com --name db\n  zorven share 25565 --udp --to group:everyone --expires 4h",
@@ -236,21 +276,34 @@ func watchAccessPaths(ctx context.Context, acc *wgnet.Accessor) {
 func newAccessCmd() *cobra.Command {
 	var cf netConnFlags
 	var local int
-	var bind string
+	var bind, clientTok string
 	cmd := &cobra.Command{
-		Use:     "access <paylasim|cihaz>[:port] [--local <port>]",
+		Use:     "access <share|device>[:port] [--local <port>]",
 		Short:   i18n.T("net.access.short"),
 		Long:    i18n.T("net.access.long"),
-		Example: "  ZORVEN_API_TOKEN=... zorven access db --local 15432\n  psql -h 127.0.0.1 -p 15432 app",
+		Example: "  zorven access db --local 15432\n  psql -h 127.0.0.1 -p 15432 app\n  ZORVEN_API_TOKEN=zrv_api_... zorven access db",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			tok, err := cf.token()
-			if err != nil {
-				return err
-			}
 			if ip := net.ParseIP(bind); ip == nil || !ip.IsLoopback() {
 				return errors.New(i18n.T("net.access.err.bind"))
 			}
+			// 1) Acik token (API token veya istemci token'i) verildiyse onunla;
+			// 2) yoksa calisan ajan; 3) yoksa kayitli istemci token'i.
+			tok, terr := cf.explicitAccessToken()
+			if terr != nil {
+				return terr
+			}
+			if tok == "" {
+				if found, ferr := accessViaLocalAgent(args[0], local, bind); found {
+					return ferr
+				}
+				if tok = clientAccessToken(clientTok); tok == "" {
+					if tok = config.LoadAPIToken(); tok == "" {
+						return errors.New(i18n.T("net.access.err.noauth"))
+					}
+				}
+			}
+			var err error
 			srv, insecure, ca := cf.resolveServer()
 			hc, err := cf.httpClient(ca)
 			if err != nil {
@@ -306,14 +359,14 @@ func newAccessCmd() *cobra.Command {
 				if err != nil {
 					return fmt.Errorf("%s: %w", i18n.T("net.access.err.listen", addr), err)
 				}
-				fmt.Printf("Zorven Net: %s (udp) -> %s\n", args[0], addr)
+				fmt.Println(i18n.T("v3.net.serving", args[0], "udp", addr))
 				go wgnet.ServeUDP(ctx, pc, dial, onErr)
 			} else {
 				ln, err := net.Listen("tcp", addr)
 				if err != nil {
 					return fmt.Errorf("%s: %w", i18n.T("net.access.err.listen", addr), err)
 				}
-				fmt.Printf("Zorven Net: %s (tcp) -> %s\n", args[0], addr)
+				fmt.Println(i18n.T("v3.net.serving", args[0], "tcp", addr))
 				go wgnet.ServeTCP(ctx, ln, dial, onErr)
 			}
 			fmt.Println(i18n.T("net.access.quit"))
@@ -329,6 +382,7 @@ func newAccessCmd() *cobra.Command {
 	cf.add(cmd)
 	cmd.Flags().IntVar(&local, "local", 0, i18n.T("net.access.flag.local"))
 	cmd.Flags().StringVar(&bind, "bind", "127.0.0.1", i18n.T("net.access.flag.bind"))
+	cmd.Flags().StringVar(&clientTok, "token", "", i18n.T("net.access.flag.token"))
 	return cmd
 }
 

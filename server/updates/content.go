@@ -13,14 +13,17 @@ const (
 	LangTR = "tr"
 	LangEN = "en"
 	LangJA = "ja"
+	LangZH = "zh"
 )
 
-// NormLang, serbest metni tr/en/ja'ya indirger (bilinmiyorsa tr).
+// NormLang, serbest metni tr/en/ja/zh'ya indirger (bilinmiyorsa tr).
 func NormLang(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
 	switch {
 	case strings.HasPrefix(s, "ja"):
 		return LangJA
+	case strings.HasPrefix(s, "zh"):
+		return LangZH
 	case strings.HasPrefix(s, "en"):
 		return LangEN
 	default:
@@ -29,7 +32,7 @@ func NormLang(s string) string {
 }
 
 // Pick, istenen dil icin baslik/govde secer. Eksik ceviri sirasiyla
-// ja -> en -> tr, en -> tr yoluyla doner; used gercekte kullanilan dildir.
+// ja -> en -> tr, zh -> en -> tr, en -> tr yoluyla doner; used gercekte kullanilan dildir.
 func Pick(p store.UpdatePost, lang string) (title, body, used string) {
 	lang = NormLang(lang)
 	type cand struct{ l, t, b string }
@@ -37,11 +40,14 @@ func Pick(p store.UpdatePost, lang string) (title, body, used string) {
 		LangTR: {LangTR, p.TitleTR, p.BodyTR},
 		LangEN: {LangEN, p.TitleEN, p.BodyEN},
 		LangJA: {LangJA, p.TitleJA, p.BodyJA},
+		LangZH: {LangZH, p.TitleZH, p.BodyZH},
 	}
 	order := []string{LangTR}
 	switch lang {
 	case LangJA:
 		order = []string{LangJA, LangEN, LangTR}
+	case LangZH:
+		order = []string{LangZH, LangEN, LangTR}
 	case LangEN:
 		order = []string{LangEN, LangTR}
 	}
@@ -60,6 +66,8 @@ func Has(p store.UpdatePost, lang string) bool {
 		return strings.TrimSpace(p.TitleEN) != ""
 	case LangJA:
 		return strings.TrimSpace(p.TitleJA) != ""
+	case LangZH:
+		return strings.TrimSpace(p.TitleZH) != ""
 	}
 	return strings.TrimSpace(p.TitleTR) != ""
 }
@@ -79,10 +87,10 @@ func ValidKind(k string) bool {
 // KindLabel, turun dile gore etiketi.
 func KindLabel(kind, lang string) string {
 	l := NormLang(lang)
-	m := map[string][3]string{
-		store.UpdateKindRelease:     {"Sürüm", "Release", "リリース"},
-		store.UpdateKindUpdate:      {"Güncelleme", "Update", "アップデート"},
-		store.UpdateKindMaintenance: {"Bakım", "Maintenance", "メンテナンス"},
+	m := map[string][4]string{
+		store.UpdateKindRelease:     {"Sürüm", "Release", "リリース", "版本发布"},
+		store.UpdateKindUpdate:      {"Güncelleme", "Update", "アップデート", "更新"},
+		store.UpdateKindMaintenance: {"Bakım", "Maintenance", "メンテナンス", "维护"},
 	}
 	v, ok := m[kind]
 	if !ok {
@@ -93,6 +101,8 @@ func KindLabel(kind, lang string) string {
 		return v[1]
 	case LangJA:
 		return v[2]
+	case LangZH:
+		return v[3]
 	}
 	return v[0]
 }
@@ -131,6 +141,8 @@ func ListPath(lang string) string {
 		return "/en/updates"
 	case LangJA:
 		return "/ja/updates"
+	case LangZH:
+		return "/zh/updates"
 	}
 	return "/updates"
 }

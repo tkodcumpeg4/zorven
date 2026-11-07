@@ -91,6 +91,9 @@ func validatePolicyRule(r rawPolicyRule) error {
 		if strings.TrimSpace(a.SecretRef) == "" {
 			return fmt.Errorf("verify_webhook icin secret_ref gerekli")
 		}
+		if strings.ToLower(strings.TrimSpace(a.Provider)) == "hmac" && strings.TrimSpace(a.SignatureHeader) == "" {
+			return fmt.Errorf("provider=hmac icin signature_header gerekli")
+		}
 	case "waf":
 		if _, ok := wafRuleset(a.Ruleset); !ok {
 			return fmt.Errorf("bilinmeyen waf kumesi: %q", a.Ruleset)

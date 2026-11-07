@@ -17,9 +17,13 @@ const { duration, bytes, clock } = useFormat()
 const { t } = useI18n()
 const { isPrivileged } = useRole()
 
-const rows = ref<RequestLog[]>([])
+// Toplam pahali oldugu icin hasMore-tabanli sayfalama (X-Has-More). Filtreler "Uygula" ile
+// uygulanir; sayfalayici son uygulanan filtreyi kullanir.
+const appliedFilter = ref<LogFilter>({})
+const pager = usePagedList<RequestLog>(p => api.pageRequests(p, appliedFilter.value), { immediate: false })
+const rows = pager.items
 const tunnels = ref<Tunnel[]>([])
-const pending = ref(true)
+const pending = pager.loading
 const live = ref(true)
 const selected = ref<RequestLog | null>(null)
 
@@ -158,12 +162,13 @@ const fStatus = ref('')          // '' | 2xx | 3xx | 4xx | 5xx | kesin kod
 const fHost = ref('')
 const fQ = ref('')
 const fMinDur = ref<number | ''>('')
+const fIp = ref('')               // istemci IP: tam adres ya da önek
 const fRejected = ref(false)
 
 // Popout acilirken opener'in filtreleri URL sorgusundan gelir.
 const qs = (k: string) => (typeof route.query[k] === 'string' ? (route.query[k] as string) : '')
 if (isPopout) {
-  fMethod.value = qs('method'); fStatus.value = qs('status'); fHost.value = qs('hostname'); fQ.value = qs('q')
+  fMethod.value = qs('method'); fStatus.value = qs('status'); fHost.value = qs('hostname'); fQ.value = qs('q'); fIp.value = qs('ip')
   const md = Number(qs('min_dur'))
   fMinDur.value = md > 0 ? md : ''
   fRejected.value = qs('rejected') === 'true'
@@ -176,6 +181,7 @@ function openPopout() {
   if (fStatus.value) p.set('status', fStatus.value)
   if (fHost.value) p.set('hostname', fHost.value)
   if (fQ.value.trim()) p.set('q', fQ.value.trim())
+  if (fIp.value.trim()) p.set('ip', fIp.value.trim())
   if (fMinDur.value !== '' && Number(fMinDur.value) > 0) p.set('min_dur', String(fMinDur.value))
   if (fRejected.value) p.set('rejected', 'true')
   const url = `/requests?${p.toString()}`
@@ -210,6 +216,7 @@ function buildFilter(): LogFilter {
   if (fStatus.value) f.status = fStatus.value
   if (fHost.value) f.hostname = fHost.value
   if (fQ.value.trim()) f.q = fQ.value.trim()
+  if (fIp.value.trim()) f.ip = fIp.value.trim()
   if (fMinDur.value !== '' && Number(fMinDur.value) > 0) f.min_dur = Number(fMinDur.value)
   if (fRejected.value) f.rejected = 'true'
   return f
@@ -217,19 +224,15 @@ function buildFilter(): LogFilter {
 
 // Hata olursa spinner kalici olmasin; kullaniciya toast gosterilir.
 async function applyFilters() {
-  pending.value = true
-  try {
-    rows.value = await api.listRequests(buildFilter())
-    selected.value = null
-  } catch (e: any) {
-    toast.error(e?.data?.error?.message || t('requests.loadFailed'))
-  } finally {
-    pending.value = false
-  }
+  appliedFilter.value = buildFilter()
+  selected.value = null
+  if (pager.page.value !== 1) pager.setPage(1)
+  else await pager.reload()
+  if (pager.error.value) toast.error((pager.error.value as any)?.data?.error?.message || t('requests.loadFailed'))
 }
 
 function clearFilters() {
-  fMethod.value = ''; fStatus.value = ''; fHost.value = ''; fQ.value = ''; fMinDur.value = ''; fRejected.value = false
+  fMethod.value = ''; fStatus.value = ''; fHost.value = ''; fQ.value = ''; fIp.value = ''; fMinDur.value = ''; fRejected.value = false
   applyFilters()
 }
 
@@ -245,6 +248,12 @@ function matches(r: RequestLog): boolean {
   if (fHost.value && (r.hostname || hostOf(r.tunnel_id)) !== fHost.value) return false
   if (fQ.value.trim() && !r.path.includes(fQ.value.trim())) return false
   if (fMinDur.value !== '' && r.duration_ms < Number(fMinDur.value)) return false
+  if (fIp.value.trim()) {
+    const want = fIp.value.trim(), ip = r.client_ip || ''
+    // Sunucuyla ayni kural: tam IP birebir, eksik adres onek.
+    const full = /^\d{1,3}(\.\d{1,3}){3}$/.test(want) || (want.includes(':') && !want.endsWith(':'))
+    if (full ? ip !== want : !ip.startsWith(want)) return false
+  }
   if (fRejected.value && !r.reject_reason) return false
   return true
 }
@@ -262,7 +271,7 @@ onMounted(async () => {
   await applyFilters()
   if (unmounted) return
   stopStream = api.streamRequests((r) => {
-    if (live.value && matches(r)) rows.value = [r, ...rows.value].slice(0, 1000)
+    if (live.value && pager.page.value === 1 && matches(r)) rows.value = [r, ...rows.value].slice(0, pager.pageSize)
   })
 })
 
@@ -366,6 +375,10 @@ function rejectText(r: string): string {
         <input v-model="fQ" placeholder="/api/…" class="rounded border border-line bg-surface-2 px-2 py-1.5 font-mono text-xs" @keyup.enter="applyFilters">
       </label>
       <label class="flex flex-col gap-1">
+        <span class="label-sys">{{ t('requests.clientIp') }}</span>
+        <input v-model="fIp" :placeholder="t('requests.ipPlaceholder')" class="w-40 rounded border border-line bg-surface-2 px-2 py-1.5 font-mono text-xs" @keyup.enter="applyFilters">
+      </label>
+      <label class="flex flex-col gap-1">
         <span class="label-sys">{{ t('requests.minDur') }}</span>
         <input v-model="fMinDur" type="number" min="0" placeholder="0" class="w-24 rounded border border-line bg-surface-2 px-2 py-1.5 font-mono text-xs" @keyup.enter="applyFilters">
       </label>
@@ -391,6 +404,7 @@ function rejectText(r: string): string {
                 <th class="label-sys px-3 py-2 font-normal">{{ t('requests.colTime') }}</th>
                 <th class="label-sys px-3 py-2 font-normal">{{ t('requests.method') }}</th>
                 <th class="label-sys px-3 py-2 font-normal">{{ t('requests.colPath') }}</th>
+                <th class="label-sys px-3 py-2 font-normal">{{ t('requests.colIp') }}</th>
                 <th class="label-sys px-3 py-2 font-normal">{{ t('requests.status') }}</th>
                 <th class="label-sys px-3 py-2 font-normal">{{ t('requests.colDuration') }}</th>
               </tr>
@@ -405,6 +419,7 @@ function rejectText(r: string): string {
                 <td class="px-3 py-2 font-mono text-[11px] text-fg-subtle">{{ clock(r.ts) }}</td>
                 <td class="px-3 py-2"><MethodBadge :method="r.method" /></td>
                 <td class="max-w-[280px] truncate px-3 py-2 font-mono text-xs" :title="r.path">{{ r.path }}</td>
+                <td class="max-w-[150px] truncate px-3 py-2 font-mono text-[11px] text-fg-muted" :title="r.client_ip">{{ r.client_ip || '—' }}</td>
                 <td class="px-3 py-2">
                   <span class="inline-flex items-center gap-1.5"><StatusCode :code="r.status" /><RejectBadge :reason="r.reject_reason" /></span>
                 </td>
@@ -413,6 +428,7 @@ function rejectText(r: string): string {
             </tbody>
           </table>
         </div>
+        <ListPager class="px-4 pb-3" :list="pager" />
       </PanelFrame>
 
       <!-- Detay paneli -->
@@ -425,7 +441,13 @@ function rejectText(r: string): string {
           <div v-if="selected.reject_reason"><dt class="label-sys mb-1">{{ t('requests.rejectReason') }}</dt><dd class="flex items-center gap-2 text-xs"><RejectBadge :reason="selected.reject_reason" /><span class="text-fg-muted">{{ rejectText(selected.reject_reason) }}</span></dd></div>
           <div><dt class="label-sys mb-1">{{ t('requests.colPath') }}</dt><dd class="break-all font-mono text-xs">{{ selected.path }}</dd></div>
           <div><dt class="label-sys mb-1">{{ t('requests.colDuration') }}</dt><dd class="font-mono text-xs tabular-nums">{{ duration(selected.duration_ms) }}</dd></div>
-          <div><dt class="label-sys mb-1">{{ t('requests.clientIp') }}</dt><dd class="font-mono text-xs text-fg-muted">{{ selected.client_ip || '—' }}</dd></div>
+          <div>
+            <dt class="label-sys mb-1">{{ t('requests.clientIp') }}</dt>
+            <dd class="flex flex-wrap items-center gap-2 font-mono text-xs text-fg-muted">
+              <span>{{ selected.client_ip || '—' }}</span>
+              <button v-if="selected.client_ip" type="button" class="cursor-pointer rounded border border-line px-1.5 py-0.5 text-[10px] text-fg-muted transition hover:bg-surface-2" @click="fIp = selected.client_ip!; applyFilters()">{{ t('requests.filterByIp') }}</button>
+            </dd>
+          </div>
           <div class="flex gap-6">
             <div><dt class="label-sys mb-1">{{ t('requests.bytesIn') }}</dt><dd class="font-mono text-xs tabular-nums text-fg-subtle">{{ bytes(selected.bytes_in) }}</dd></div>
             <div><dt class="label-sys mb-1">{{ t('requests.bytesOut') }}</dt><dd class="font-mono text-xs tabular-nums text-fg-subtle">{{ bytes(selected.bytes_out) }}</dd></div>

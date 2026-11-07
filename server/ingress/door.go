@@ -27,7 +27,9 @@ import (
 //	/_zva/*       OAuth giris uclari (mevcut visitorauth)
 //	/_zvb/*       Basic giris formu uclari (mevcut)
 //	/_zvd/close   POST: ziyaretcinin kendi IP'si icin kapiyi kapat
-//	/             giris sayfasi; giris varsa grant acar ve "kapi acildi" sayfasini gosterir
+//	/             GET: giris sayfasi; giris varsa YALNIZ onay sayfasi (grant ACMAZ)
+//	/             POST: Origin/Referer + imzali CSRF jetonu dogrulanirsa grant acar
+//	              ve "kapi acildi" sayfasini gosterir
 //
 // Giris dogrulamasi tunelin MEVCUT erisim politikasini (basic/oauth) kullanir.
 
@@ -80,19 +82,21 @@ func (h *Handler) serveDoor(w http.ResponseWriter, r *http.Request, tun store.Ho
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
-	if !isClose && r.Method != http.MethodGet && r.Method != http.MethodHead {
-		w.Header().Set("Allow", "GET, HEAD")
+	if !isClose && r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodPost {
+		w.Header().Set("Allow", "GET, HEAD, POST")
 		writeError(w, r, http.StatusMethodNotAllowed, protocol.CodeAccessDenied, "Yontem desteklenmiyor.")
 		return
 	}
-	// Kapatma istegi: baska siteden tetiklenemesin (Origin varsa ayni host olmali).
-	if isClose {
-		if o := r.Header.Get("Origin"); o != "" && o != "null" {
-			if u, err := url.Parse(o); err != nil || !strings.EqualFold(normalizeHost(u.Host), normalizeHost(r.Host)) {
-				writeError(w, r, http.StatusForbidden, protocol.CodeAccessDenied, "Gecersiz istek kaynagi.")
-				return
-			}
+	// Durum degistiren istekler (kapi ac/kapat): baska siteden tetiklenemesin.
+	// Origin (yoksa Referer) bu kapi hostuyla ayni olmali; ikisi de yoksa reddedilir.
+	isOpen := !isClose && r.Method == http.MethodPost
+	if isClose || isOpen {
+		if !sameOriginRequest(r) {
+			writeError(w, r, http.StatusForbidden, protocol.CodeAccessDenied, "Gecersiz istek kaynagi.")
+			return
 		}
+		r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
+		_ = r.ParseForm()
 	}
 
 	// Oturum iptali: grant iptal edilen (ya da kapiyi kapatan) kisinin ESKI oturum
@@ -130,10 +134,24 @@ func (h *Handler) serveDoor(w http.ResponseWriter, r *http.Request, tun store.Ho
 		return
 	}
 
-	// HEAD kapi acmaz (yan etkisiz).
-	if r.Method == http.MethodHead {
-		w.Header().Set("Cache-Control", "no-store")
-		w.WriteHeader(http.StatusOK)
+	// GET/HEAD kapi ACMAZ (yan etkisiz): linkler (e-posta vb.) ve guvenlik taramalari
+	// bu sayfaya duser; grant yalniz imzali jetonlu POST ile acilir (CSRF).
+	if r.Method != http.MethodPost {
+		if r.Method == http.MethodHead {
+			w.Header().Set("Cache-Control", "no-store")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		renderAccessPage(w, r, http.StatusOK, accessPageData{
+			Lang: lang, Code: "door_confirm", Kind: pageDoorConfirm,
+			Heading: t.doorConfirmTitle, Message: t.doorConfirmMsg,
+			OpenText: t.doorConfirmBtn,
+			CSRF:     h.Door.IssueCSRFToken(tun.TunnelID, normalizeHost(r.Host), ip),
+		})
+		return
+	}
+	if !h.Door.VerifyCSRFToken(r.PostFormValue("zv_csrf"), tun.TunnelID, normalizeHost(r.Host), ip) {
+		writeError(w, r, http.StatusForbidden, protocol.CodeAccessDenied, "Gecersiz ya da suresi dolmus istek jetonu. Sayfayi yenileyin.")
 		return
 	}
 
@@ -155,6 +173,22 @@ func (h *Handler) serveDoor(w http.ResponseWriter, r *http.Request, tun store.Ho
 	}
 	h.attachAddrProbe(&pd, g, normalizeHost(r.Host))
 	renderAccessPage(w, r, http.StatusOK, pd)
+}
+
+// sameOriginRequest: Origin varsa (ve "null" degilse) host'u istek hostuyla ayni olmali;
+// Origin yoksa Referer'in host'u ayni olmali. Ikisi de yoksa ya da "null" ise false.
+func sameOriginRequest(r *http.Request) bool {
+	check := func(raw string) bool {
+		u, err := url.Parse(raw)
+		return err == nil && u.Host != "" && strings.EqualFold(normalizeHost(u.Host), normalizeHost(r.Host))
+	}
+	if o := r.Header.Get("Origin"); o != "" {
+		return o != "null" && check(o)
+	}
+	if ref := r.Header.Get("Referer"); ref != "" {
+		return check(ref)
+	}
+	return false
 }
 
 // attachAddrProbe, kapi sayfasina diger IP ailesini ogrenen yan kanal fetch'ini ekler.

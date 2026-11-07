@@ -52,9 +52,9 @@ func (g GitHubAuth) Enabled() bool {
 	if g.ClientID == "" || g.ClientSecret == "" {
 		return false
 	}
-	// Allow listesi VEYA acik kayit gerekir. Ikisi de yoksa giris kapalidir:
-	// kimsenin giremeyecegi bir sunucu, kazara herkese acilmis olandan iyidir.
-	return len(g.Allow) > 0 || g.OpenSignup
+	// Izin listesi ZORUNLU. Bos ise giris kapalidir: kimsenin giremeyecegi bir sunucu,
+	// kazara herkese acilmis olandan iyidir.
+	return len(g.Allow) > 0
 }
 
 // authConfig, dashboard'a hangi giris yontemlerinin mevcut oldugunu bildirir.
@@ -161,9 +161,8 @@ func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 4. Izinli mi? Allow listesi VARSA baglayicidir; yoksa acik kayit
-	//    gecerlidir (Enabled() ikisinden biri olmadan girisi zaten acmaz).
-	if len(s.GitHub.Allow) > 0 && !s.GitHub.Allow[strings.ToLower(login)] {
+	// 4. Izinli mi? Izin listesi baglayicidir (Enabled() bos liste ile girisi zaten acmaz).
+	if !s.GitHub.Allow[strings.ToLower(login)] {
 		s.Logger.Warn("izinsiz github kullanicisi giris denedi", "login", login)
 		http.Redirect(w, r, "/?auth_error=forbidden", http.StatusSeeOther)
 		return

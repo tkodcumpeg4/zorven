@@ -144,20 +144,24 @@ func TestCachedMetricsRespectsInterval(t *testing.T) {
 	n := 0
 	collect := func() int { n++; return n }
 	now := time.Now()
-	// Aralik yok: her cagri toplar (eski davranis).
+	// Aralik yok: varsayilan aralik (10 sn) icinde tekrar toplanmaz.
 	cachedMetrics(st, now, collect)
-	cachedMetrics(st, now, collect)
+	cachedMetrics(st, now.Add(time.Second), collect)
+	if n != 1 {
+		t.Fatalf("varsayilan aralikta toplama sayisi = %d, beklenen 1", n)
+	}
+	cachedMetrics(st, now.Add(11*time.Second), collect)
 	if n != 2 {
-		t.Fatalf("aralik yokken toplama sayisi = %d, beklenen 2", n)
+		t.Fatalf("varsayilan aralik dolunca toplama sayisi = %d, beklenen 2", n)
 	}
 	st.apply(&protocol.AgentSettings{MetricsIntervalSec: 30}, quiet())
-	if v := cachedMetrics(st, now, collect); v != 3 {
+	if v := cachedMetrics(st, now.Add(12*time.Second), collect); v != 2 {
 		t.Fatalf("ilk toplama = %d", v)
 	}
-	if v := cachedMetrics(st, now.Add(10*time.Second), collect); v != 3 {
+	if v := cachedMetrics(st, now.Add(30*time.Second), collect); v != 2 {
 		t.Errorf("aralik dolmadan yeniden toplandi: %d", v)
 	}
-	if v := cachedMetrics(st, now.Add(31*time.Second), collect); v != 4 {
+	if v := cachedMetrics(st, now.Add(43*time.Second), collect); v != 3 {
 		t.Errorf("aralik dolunca toplanmadi: %d", v)
 	}
 }

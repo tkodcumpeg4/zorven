@@ -41,6 +41,12 @@ func (a agentCtl) AccessOpen(ctx context.Context, target, local string) (string,
 }
 func (a agentCtl) AccessClose(local string) error { return a.ag.AccessClose(local) }
 
+// localctl istege bagli uzantilari: durum ayrintisi ve canli yeniden yukleme.
+func (a agentCtl) StatusInfo() localctl.StatusInfo { return a.ag.StatusInfo() }
+func (a agentCtl) Reload(ctx context.Context) (localctl.ReloadInfo, error) {
+	return a.ag.Reload(ctx)
+}
+
 // localctl.TunController: tam ag katmani (Mod B, OS TUN).
 func (a agentCtl) NetUp(ctx context.Context) (localctl.TunInfo, error)   { return a.ag.NetUp(ctx) }
 func (a agentCtl) NetDown(ctx context.Context) (localctl.TunInfo, error) { return a.ag.NetDown(ctx) }
@@ -181,23 +187,6 @@ func newCtlCmds() []*cobra.Command {
 		c.Flags().BoolVar(&persist, "persist", false, i18n.T("ctl.flag.persist"))
 		return c
 	}
-	status := &cobra.Command{
-		Use:   "status",
-		Short: i18n.T("ctl.cmd.status"),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			ep, r, err := localctl.Find()
-			if ep == nil {
-				if err != nil {
-					fmt.Print(i18n.T("ctl.status.unreachable", err))
-				} else {
-					fmt.Println(i18n.T("ctl.status.notfound"))
-				}
-				return nil
-			}
-			printCaps(r, ep)
-			return nil
-		},
-	}
 	debugCmd := &cobra.Command{Use: "debug", Short: i18n.T("ctl.cmd.debug")}
 	debugCmd.AddCommand(&cobra.Command{
 		Use:   "stacks",
@@ -222,7 +211,7 @@ func newCtlCmds() []*cobra.Command {
 			return nil
 		},
 	})
-	return []*cobra.Command{mk("enable", true), mk("disable", false), status, debugCmd}
+	return []*cobra.Command{mk("enable", true), mk("disable", false), debugCmd}
 }
 
 // tryForwardFlags: `zorven --enable-terminal` gibi cagrilarda calisan ajan

@@ -5,6 +5,7 @@ package agent
 import (
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"github.com/tkodcumpeg4/zorven/shared/protocol"
@@ -42,6 +43,8 @@ const (
 	mouseeventfRightUp     uint32 = 0x0010
 	mouseeventfMiddleDown  uint32 = 0x0020
 	mouseeventfMiddleUp    uint32 = 0x0040
+	mouseeventfXDown       uint32 = 0x0080
+	mouseeventfXUp         uint32 = 0x0100
 	mouseeventfWheel       uint32 = 0x0800
 	mouseeventfHWheel      uint32 = 0x01000
 
@@ -121,6 +124,38 @@ type displayRect struct{ x, y, w, h int }
 // o monitorun icinde yorumlanir, sonra sanal masaustune cevrilir. Aksi halde
 // ikinci monitoru izlerken tiklamalar birinciye giderdi.
 func applyInput(msg protocol.ScreenInput, rect displayRect) inputResult {
+	res := applyInputOnce(msg, rect)
+	// SendInput girdi masaustu degisince (UAC, kilit ekrani, oturum degisimi)
+	// ERROR_ACCESS_DENIED ile basarisiz olur. Is parcacigini girdi masaustune
+	// yeniden bagla ve BIR kez daha dene. Servis modunda (yardimci sureci
+	// kullanici oturumunda ayni islevi calistirir) burada yapilacak is yok.
+	if (res.State == protocol.InputStateBlocked || res.State == protocol.InputStateError) &&
+		msg.Kind != protocol.InputKindSAS && serviceHelper() == nil && reattachDue(time.Now()) {
+		if attachToInputDesktop() {
+			res = applyInputOnce(msg, rect)
+		}
+	}
+	return res
+}
+
+var (
+	reattachMu   sync.Mutex
+	reattachLast time.Time
+)
+
+// reattachDue, basarisizlik yeniden baglanmasini kisar (fare hizinda hata
+// yagarken saniyede 60 OpenInputDesktop yapmamak icin).
+func reattachDue(now time.Time) bool {
+	reattachMu.Lock()
+	defer reattachMu.Unlock()
+	if now.Sub(reattachLast) < 500*time.Millisecond {
+		return false
+	}
+	reattachLast = now
+	return true
+}
+
+func applyInputOnce(msg protocol.ScreenInput, rect displayRect) inputResult {
 	if msg.Kind == protocol.InputKindSAS {
 		// Servis oturum 0'da calisir; sessionPrecheck'e takilmamali.
 		return sendSAS()
@@ -147,6 +182,8 @@ func applyInput(msg protocol.ScreenInput, rect displayRect) inputResult {
 		res = res.merge(keyEvent(msg, true))
 	case "keyup":
 		res = res.merge(keyEvent(msg, false))
+	case protocol.InputKindText:
+		res = res.merge(typeText(msg.Key))
 	}
 	return res
 }
@@ -225,6 +262,12 @@ func mouseButton(button int, down bool) inputResult {
 		flag = boolPick(down, mouseeventfRightDown, mouseeventfRightUp)
 	case 1: // orta
 		flag = boolPick(down, mouseeventfMiddleDown, mouseeventfMiddleUp)
+	case protocol.InputButtonBack, protocol.InputButtonForward: // XBUTTON1 / XBUTTON2
+		xb := uint32(1)
+		if button == protocol.InputButtonForward {
+			xb = 2
+		}
+		return sendInputs(mouseInput{typ: inputMouse, mouseData: xb, dwFlags: boolPick(down, mouseeventfXDown, mouseeventfXUp)})
 	default: // sol
 		flag = boolPick(down, mouseeventfLeftDown, mouseeventfLeftUp)
 	}
@@ -293,6 +336,12 @@ func wheelAmount(delta float64, deltaMode int) int {
 func keyEvent(msg protocol.ScreenInput, down bool) inputResult {
 	shortcut := msg.Ctrl || msg.Alt || msg.Meta
 
+	// AltGr: tarayici Ctrl+Alt bildirir ama kullanici bir KARAKTER uretiyor
+	// (or. Almanca AltGr+Q = "@"). Unicode yolu; modifier'lar gecici birakilir.
+	if shortcut && isAltGrChar(msg) {
+		return typeUnicodeAltGr(oneRune(msg.Key), down)
+	}
+
 	if !shortcut {
 		if r := singleRune(msg.Key); r != 0 && r != ' ' {
 			// Bosluk VK yoluna birakilir: Unicode bosluk bazi uygulamalarda
@@ -309,22 +358,28 @@ func keyEvent(msg protocol.ScreenInput, down bool) inputResult {
 		}
 	}
 
-	// Modifier tuslarinin KENDISI geldiginde sarmalama yapma: sonsuz dongu
-	// olurdu (Ctrl'yi basmak icin Ctrl'yi basmak).
+	// Modifier tuslarinin KENDISI: oldugu gibi ilet (sarmalama yok) ve enjekte
+	// edilen durumu izle. Ctrl+tik / Alt+Tab / Shift+tik bu sayede calisir:
+	// kullanicinin tuttugu modifier kisayol sirasinda birakilmaz.
 	if isModifierVK(vk) {
-		return sendKey(vk, down)
+		res := sendKey(vk, down)
+		if res.State == protocol.InputStateOK {
+			trackModifier(vk, down)
+		}
+		return res
 	}
 
 	if !down {
 		return sendKey(vk, false)
 	}
 
-	// Kisayol: modifier'lari bas, tusa bas, modifier'lari birak.
+	// Kisayol: modifier'lar ZATEN basili degilse (keydown'u kacmis olabilir)
+	// sentetik bas, tusa bas, SENTETIK basilanlari birak.
 	//
 	// Neden tek SendInput cagrisinda: araya baska bir uygulamanin girdisi
 	// karismasin diye Windows dizinin tamamini atomik isler.
 	var batch []keybdInput
-	mods := heldModifiers(msg)
+	mods := missingModifiers(msg)
 	for _, m := range mods {
 		batch = append(batch, keyStroke(m, true))
 	}
@@ -333,6 +388,50 @@ func keyEvent(msg protocol.ScreenInput, down bool) inputResult {
 		batch = append(batch, keyStroke(mods[i], false))
 	}
 	return sendKeyBatch(batch)
+}
+
+// injected, uzak makineye ENJEKTE ettigimiz modifier tuslarinin durumu.
+// Surec geneli: fiziksel klavye durumu da tektir.
+var injected heldMods
+
+// modClassOf, modifier VK'sinin sinifi (ok=false: modifier degil).
+func modClassOf(vk uint16) (int, bool) {
+	switch vk {
+	case vkShift, vkLShift, vkRShift:
+		return modClassShift, true
+	case vkControl, vkLControl, vkRControl:
+		return modClassCtrl, true
+	case vkMenu, vkLMenu, vkRMenu:
+		return modClassAlt, true
+	case vkLWin, vkRWin:
+		return modClassWin, true
+	}
+	return 0, false
+}
+
+func trackModifier(vk uint16, down bool) {
+	c, ok := modClassOf(vk)
+	if !ok {
+		return
+	}
+	if down {
+		injected.Down(c, vk)
+	} else {
+		injected.Up(c, vk)
+	}
+}
+
+// missingModifiers, olayda basili bildirilen ama uzakta henuz basili OLMAYAN
+// modifier'larin VK listesi (yalniz bunlar sentetik sarilir).
+func missingModifiers(msg protocol.ScreenInput) []uint16 {
+	var out []uint16
+	for _, m := range heldModifiers(msg) {
+		if c, ok := modClassOf(m); ok && injected.Held(c) {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
 }
 
 // heldModifiers, olayda basili bildirilen modifier'larin VK listesi.
@@ -367,18 +466,75 @@ func isModifierVK(vk uint16) bool {
 	return false
 }
 
-// typeUnicode, tek bir karakteri Unicode olarak yazar (duzenden bagimsiz).
-func typeUnicode(r rune, down bool) inputResult {
-	// BMP disi karakterler (emoji vb.) iki UTF-16 birimi ister; yaygin
-	// kullanimda gerekmedigi icin atlaniyor.
-	if r > 0xFFFF {
-		return inputResult{State: protocol.InputStateOK}
-	}
+// unicodeUnits, UTF-16 birimleri icin KEYEVENTF_UNICODE girdileri uretir.
+// BMP disi karakterler (emoji) iki birimlik vekil cifti olarak gider.
+func unicodeUnits(units []uint16, down bool) []keybdInput {
 	flags := keyeventfUnicode
 	if !down {
 		flags |= keyeventfKeyup
 	}
-	return sendKeyBatch([]keybdInput{{typ: inputKeyboard, wScan: uint16(r), dwFlags: flags}})
+	out := make([]keybdInput, 0, len(units))
+	for _, u := range units {
+		out = append(out, keybdInput{typ: inputKeyboard, wScan: u, dwFlags: flags})
+	}
+	return out
+}
+
+// typeUnicode, tek bir karakteri Unicode olarak yazar (duzenden bagimsiz).
+func typeUnicode(r rune, down bool) inputResult {
+	return sendKeyBatch(unicodeUnits(textUTF16(string(r), 0), down))
+}
+
+// typeUnicodeAltGr, AltGr ile uretilen karakteri yazar. Uzakta Ctrl/Alt basili
+// ise (gercek modifier olaylari iletildi) karakter kisayol sanilmasin diye
+// onlari gecici birakir ve sonra geri basar.
+func typeUnicodeAltGr(r rune, down bool) inputResult {
+	if r == 0 {
+		return inputResult{State: protocol.InputStateOK}
+	}
+	if !down {
+		return typeUnicode(r, false)
+	}
+	var held []uint16
+	for _, vk := range []uint16{vkControl, vkLControl, vkRControl, vkMenu, vkLMenu, vkRMenu} {
+		if c, _ := modClassOf(vk); c == modClassCtrl || c == modClassAlt {
+			if injected.HeldExact(c, vk) {
+				held = append(held, vk)
+			}
+		}
+	}
+	var batch []keybdInput
+	for _, vk := range held {
+		batch = append(batch, keyStroke(vk, false))
+	}
+	batch = append(batch, unicodeUnits(textUTF16(string(r), 0), true)...)
+	for _, vk := range held {
+		batch = append(batch, keyStroke(vk, true))
+	}
+	return sendKeyBatch(batch)
+}
+
+// typeText, metni (IME sonucu, emoji, yapistirma) Unicode olarak yazar: her
+// UTF-16 birimi icin down+up, tek SendInput cagrisinda (en fazla ~512 olay).
+func typeText(text string) inputResult {
+	units := textUTF16(text, protocol.MaxScreenText)
+	res := inputResult{State: protocol.InputStateOK}
+	const chunk = 256
+	for len(units) > 0 {
+		n := min(chunk, len(units))
+		// Vekil cifti iki parcaya bolunmesin.
+		if n < len(units) && units[n-1] >= 0xD800 && units[n-1] < 0xDC00 {
+			n--
+		}
+		var batch []keybdInput
+		for _, u := range units[:n] {
+			batch = append(batch, unicodeUnits([]uint16{u}, true)...)
+			batch = append(batch, unicodeUnits([]uint16{u}, false)...)
+		}
+		res = res.merge(sendKeyBatch(batch))
+		units = units[n:]
+	}
+	return res
 }
 
 func keyStroke(vk uint16, down bool) keybdInput {

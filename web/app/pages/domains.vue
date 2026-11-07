@@ -8,10 +8,11 @@ const { relativeTime } = useFormat()
 const { platformAdmin, tenantSlug, platformDomain } = useAuth()
 const { isPrivileged } = useRole()
 
-const hostnames = ref<Hostname[]>([])
+const pager = usePagedList<Hostname>(p => api.pageHostnames(p))
+const hostnames = pager.items
 const tunnels = ref<Tunnel[]>([])
 const clients = ref<Client[]>([])
-const pending = ref(true)
+const pending = pager.loading
 const saving = ref(false)
 const formError = ref('')
 
@@ -134,17 +135,17 @@ async function removePath(h: Hostname, routeID: string) {
 
 onMounted(async () => {
   try {
-    ;[hostnames.value, tunnels.value, clients.value] = await Promise.all([
-      api.listHostnames(), api.listTunnels(), api.listClients().catch(() => [] as Client[]),
+    // Tunel/istemci: acilir listeler icin tam liste (limit=500); alan adlari sayfali.
+    ;[tunnels.value, clients.value] = await Promise.all([
+      api.listTunnels(), api.listClients().catch(() => [] as Client[]),
     ])
   } catch (e) {
     // Başarısız yükleme sonsuz spinner bırakmasın.
     toast.error(hostnameError(e, t('domains.loadFailed')))
-  } finally {
-    pending.value = false
   }
-  void loadDNSStatus()
 })
+// Gorunen sayfadaki dogrulanmis ozel adlarin DNS durumu.
+watch(hostnames, () => { void loadDNSStatus() })
 
 const tunnelLabel = (id?: string | null) => {
   if (!id) return t('domains.idle')
@@ -215,13 +216,13 @@ async function submit() {
     if (activeTab.value === 'platform') {
       if (!form.name.trim()) { formError.value = t('domains.errNameRequired'); saving.value = false; return }
       const newH = await api.createHostname(form.name.trim(), undefined, form.kind)
-      hostnames.value.push(newH)
+      void pager.reload(true)
       form.name = ''
       toast.success(t('domains.added', { fqdn: newH.fqdn }))
     } else {
       if (!form.custom_domain.trim()) { formError.value = t('domains.errDomainRequired'); saving.value = false; return }
       const hst = await api.createCustomHostname(form.custom_domain.trim())
-      hostnames.value.push(hst)
+      void pager.reload(true)
       form.custom_domain = ''
       if (hst.auto_verified && hst.dns_pointed) {
         // Üst zone doğrulanmış VE ad zaten platforma yönleniyor → hemen aktif.
@@ -285,6 +286,7 @@ async function remove(h: Hostname) {
   try {
     await api.deleteHostname(h.id)
     hostnames.value = hostnames.value.filter(x => x.id !== h.id)
+    void pager.reload(true)
     toast.info(t('domains.removed', { fqdn: h.fqdn }))
   } catch (err: any) {
     toast.error(err?.data?.error?.message || err?.message || t('domains.removeFailed'))
@@ -689,7 +691,7 @@ async function remove(h: Hostname) {
     </div>
 
     <!-- Domainler Tablosu -->
-    <PanelFrame :label="t('domains.allDomains')" :meta="`${hostnames.length}`">
+    <PanelFrame :label="t('domains.allDomains')" :meta="`${pager.total.value ?? hostnames.length}`">
       <p v-if="pending" class="px-4 py-6 text-sm text-fg-muted">{{ t('common.loading') }}</p>
       <p v-else-if="!hostnames.length" class="px-4 py-8 text-center text-sm text-fg-muted">{{ t('domains.noDomains') }}</p>
 
@@ -867,6 +869,7 @@ async function remove(h: Hostname) {
           </tbody>
         </table>
       </div>
+      <ListPager class="px-4 pb-3" :list="pager" />
     </PanelFrame>
   </div>
 </template>

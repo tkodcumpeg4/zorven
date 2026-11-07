@@ -36,7 +36,8 @@
   var I18N = {
     tr: { idle: 'Ben robot değilim', verifying: 'Doğrulanıyor…', success: 'Doğrulandı', error: 'Doğrulama başarısız', expired: 'Süre doldu', retry: 'Tekrar dene', label: 'Zorven CAPTCHA' },
     en: { idle: 'I am not a robot', verifying: 'Verifying…', success: 'Verified', error: 'Verification failed', expired: 'Expired', retry: 'Try again', label: 'Zorven CAPTCHA' },
-    ja: { idle: '私はロボットではありません', verifying: '確認中…', success: '確認済み', error: '確認に失敗しました', expired: '有効期限切れ', retry: '再試行', label: 'Zorven CAPTCHA' }
+    ja: { idle: '私はロボットではありません', verifying: '確認中…', success: '確認済み', error: '確認に失敗しました', expired: '有効期限切れ', retry: '再試行', label: 'Zorven CAPTCHA' },
+    zh: { idle: '我不是机器人', verifying: '验证中…', success: '已验证', error: '验证失败', expired: '已过期', retry: '重试', label: 'Zorven CAPTCHA' }
   };
   function pickLang(l) {
     l = String(l || 'auto').toLowerCase();

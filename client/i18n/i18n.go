@@ -1,6 +1,6 @@
 // Package i18n, istemcinin (CLI) kullaniciya gosterdigi metinleri Turkce
-// ve Ingilizce sunar (acik surum; Japonca yalniz ticari surumde). Metinler messages.go'da tek tabloda durur: her
-// anahtarin uc sutun (tr, en, ja) yan yana yazilir; acik surumde ja sutunu bostur ve Ingilizceye duser ki biri eksik kalmasin (test denetler).
+// ve Ingilizce sunar (acik surum; Japonca ve Cince yalniz ticari surumde). Metinler messages.go'da tek tabloda durur: her
+// anahtarin uc sutun (tr, en, ja, zh) yan yana yazilir; acik surumde ja ve zh sutunu bostur ve Ingilizceye duser ki biri eksik kalmasin (test denetler).
 package i18n
 
 import (
@@ -15,6 +15,7 @@ const (
 	TR = "tr"
 	EN = "en"
 	JA = "ja"
+	ZH = "zh"
 )
 
 // Supported, ayarlar arayuzunde gosterilen sira.
@@ -114,6 +115,8 @@ func idx(lang string) int {
 		return 0
 	case JA:
 		return 2
+	case ZH:
+		return 3
 	}
 	return 1
 }

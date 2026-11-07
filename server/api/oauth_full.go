@@ -58,6 +58,9 @@ var fullExcludedRoutes = []tokenRoute{
 	{"*", "/api/v1/auth/*"},
 	// Kiraciyi tum veriyle silme: confirm alani olsa bile.
 	{"DELETE", "/api/v1/organization"},
+	// Hesap silme onizlemesi ve ic ucu: hesabin kendisiyle ilgili, arac degil.
+	{"*", "/api/v1/account/*"},
+	{"*", "/api/v1/internal/*"},
 }
 
 // fullExcluded, (method, path) full kapsamindan haric mi.

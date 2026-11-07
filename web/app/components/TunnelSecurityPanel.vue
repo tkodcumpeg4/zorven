@@ -35,6 +35,9 @@ const form = reactive({
   rateWindow: 60,
   rateAction: 'block' as 'block' | 'challenge',
   rateExclude: [] as string[],
+  // Güvenilir IP'ler
+  trustedCidrs: [] as string[],
+  trustedSkipGeo: false,
 })
 
 const DIFFS = [{ id: 'light', bits: 16 }, { id: 'normal', bits: 18 }, { id: 'strong', bits: 20 }]
@@ -71,6 +74,8 @@ function apply(s: TunnelSecurity) {
   form.rateWindow = s.rate?.window_seconds || 60
   form.rateAction = (s.rate?.action || 'block') as typeof form.rateAction
   form.rateExclude = [...(s.rate?.exclude_paths || [])]
+  form.trustedCidrs = [...(s.trusted?.cidrs || [])]
+  form.trustedSkipGeo = !!s.trusted?.skip_geo
   geoDbLoaded.value = s.geo_db_loaded
   planOk.value = s.plan_ok
   catalog.value = s.rules || []
@@ -93,7 +98,7 @@ async function save() {
   if (form.rateEnabled) {
     const rq = Number(form.rateRequests)
     const w = Number(form.rateWindow)
-    if (!Number.isInteger(rq) || rq < 1 || rq > 100000) { toast.error(t('tunbot.errRequests')); return }
+    if (!Number.isInteger(rq) || rq < 1 || rq > 1000000) { toast.error(t('tunbot.errRequests')); return }
     if (!Number.isInteger(w) || w < 1 || w > 3600) { toast.error(t('tunbot.errWindow')); return }
   }
   saving.value = true
@@ -117,6 +122,7 @@ async function save() {
         action: form.rateAction,
         exclude_paths: form.rateExclude,
       },
+      trusted: { cidrs: form.trustedCidrs, skip_geo: form.trustedSkipGeo },
     })
     toast.success(t('tunsec.saved'))
     await load()
@@ -179,6 +185,15 @@ function reasonLabel(r?: string): string {
   if (r.startsWith('bot:') || r.startsWith('rate:')) return t('tunbot.stat_' + r.replace(':', '_'))
   return r
 }
+// Satirdaki IP'yi (onayla) guvenilir listeye ekler ve kaydeder.
+const isTrusted = (ip?: string) => !!ip && form.trustedCidrs.includes(ip.toLowerCase())
+async function trustIp(ip: string) {
+  if (!props.privileged) return
+  if (isTrusted(ip)) { toast.error(t('tunbot.trustedAlready')); return }
+  if (!confirm(t('tunbot.trustedAddConfirm', { ip }))) return
+  form.trustedCidrs = [...form.trustedCidrs, ip.toLowerCase()]
+  await save()
+}
 const observed = (r: RequestLog) => (r.reject_reason || '').startsWith('waf_log:')
 
 onMounted(load)
@@ -194,8 +209,24 @@ onMounted(load)
         <span>{{ t('tunsec.planNotice') }}</span>
       </p>
 
+      <!-- Guvenilir IP'ler -->
+      <section class="space-y-3">
+        <div class="flex items-center gap-2">
+          <Icon name="lucide:shield-check" class="size-4 text-accent" />
+          <span class="label-sys">{{ t('tunbot.trustedTitle') }}</span>
+        </div>
+        <p class="text-[11px] text-fg-subtle">{{ t('tunbot.trustedIntro') }}</p>
+        <TunnelTrustedChips v-model="form.trustedCidrs" :disabled="!privileged" />
+        <p class="text-[11px] text-fg-subtle">{{ t('tunbot.trustedHint') }}</p>
+        <label class="flex cursor-pointer items-center gap-2 text-xs text-fg">
+          <input v-model="form.trustedSkipGeo" type="checkbox" :disabled="!privileged" class="accent-[var(--color-accent)]">
+          {{ t('tunbot.trustedSkipGeo') }}
+        </label>
+        <p class="-mt-1 text-[11px] text-fg-subtle">{{ t('tunbot.trustedSkipGeoHint') }}</p>
+      </section>
+
       <!-- WAF (yalniz HTTP) -->
-      <section v-if="!isRaw" class="space-y-3">
+      <section v-if="!isRaw" class="space-y-3 border-t border-line pt-4">
         <div class="flex items-center gap-2">
           <Icon name="lucide:shield-alert" class="size-4 text-accent" />
           <span class="label-sys">{{ t('tunsec.wafTitle') }}</span>
@@ -364,7 +395,7 @@ onMounted(load)
           <div class="grid gap-3 sm:grid-cols-3">
             <label class="block">
               <span class="label-sys mb-1 block">{{ t('tunbot.requests') }}</span>
-              <input v-model.number="form.rateRequests" type="number" min="1" max="100000" :disabled="!privileged"
+              <input v-model.number="form.rateRequests" type="number" min="1" max="1000000" :disabled="!privileged"
                      class="w-full rounded border border-line bg-bg px-2.5 py-1.5 font-mono text-xs focus:border-accent">
             </label>
             <label class="block">
@@ -432,6 +463,11 @@ onMounted(load)
             <span class="ml-auto rounded px-1.5 py-px font-mono text-[10px]" :class="observed(r) ? 'bg-surface-2 text-fg-muted' : 'bg-warning/10 text-warning'">
               {{ reasonLabel(r.reject_reason) }}
             </span>
+            <button v-if="privileged && r.client_ip && !isTrusted(r.client_ip)" type="button" :title="t('tunbot.trustedAddIp')" :aria-label="t('tunbot.trustedAddIp')"
+                    class="flex items-center gap-1 text-fg-subtle hover:text-accent" @click="trustIp(r.client_ip)">
+              <Icon name="lucide:shield-check" class="size-3.5" />
+              <span class="text-[10px]">{{ t('tunbot.trustedAddIp') }}</span>
+            </button>
           </li>
         </ul>
       </section>

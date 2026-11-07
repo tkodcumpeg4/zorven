@@ -88,3 +88,86 @@ func TestInstallScriptsRejectInjection(t *testing.T) {
 		}
 	}
 }
+
+func TestInstallScriptsHardening(t *testing.T) {
+	mux := (&Server{}).Routes()
+	get := func(path string) string {
+		req := httptest.NewRequest("GET", path, nil)
+		req.Host = "zorven.example"
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: %d", path, rec.Code)
+		}
+		if rec.Header().Get("Cache-Control") != "no-store" {
+			t.Errorf("%s: Cache-Control no-store olmali", path)
+		}
+		return rec.Body.String()
+	}
+	sh := get("/install.sh?token=zrv_live_abc")
+	ps := get("/install.ps1?token=zrv_live_abc")
+
+	for name, body := range map[string]string{"sh": sh, "ps1": ps} {
+		if strings.Contains(body, "__INJECTED_TOKEN__") || strings.Contains(body, "__INJECTED_SERVER__") {
+			t.Errorf("%s: sentinel degistirilmemis", name)
+		}
+		if strings.Contains(body, "localhost") || strings.Contains(body, "127.0.0.1") {
+			t.Errorf("%s: localhost varsayilani bulunmamali", name)
+		}
+		if !strings.Contains(body, "zorven.example") {
+			t.Errorf("%s: sunucu adresi enjekte edilmemis", name)
+		}
+		if !strings.Contains(body, "--token-file") {
+			t.Errorf("%s: token --token-file ile verilmeli", name)
+		}
+		if strings.Contains(body, "config set-token") {
+			t.Errorf("%s: token komut satirina yazilmamali", name)
+		}
+	}
+	if strings.Contains(sh, "curl -kfsSL") || strings.Contains(sh, "CURL_FLAGS") {
+		t.Error("sh: kosulsuz curl -k olmamali")
+	}
+	if !strings.Contains(sh, "--no-check-certificate") || !strings.Contains(sh, `[ "$INSECURE" = true ]`) {
+		t.Error("sh: TLS atlama yalniz INSECURE kosuluyla olmali")
+	}
+	if strings.Contains(ps, "StartsWith(\"localhost\")") {
+		t.Error("ps1: localhost icin otomatik TLS atlama olmamali")
+	}
+	if !strings.Contains(ps, "if ($skipTls)") || !strings.Contains(ps, "$prevCb") {
+		t.Error("ps1: TLS atlama kapsamli (geri alinan) olmali")
+	}
+	if !strings.Contains(sh, "sha256_of") || !strings.Contains(sh, "SHA-256 uyusmuyor") || !strings.Contains(sh, "manifest.json") {
+		t.Error("sh: sha256 dogrulamasi eksik")
+	}
+	if !strings.Contains(ps, "Get-FileHash") || !strings.Contains(ps, "SHA-256 uyusmuyor") {
+		t.Error("ps1: sha256 dogrulamasi eksik")
+	}
+	if !strings.Contains(sh, "mv -f") || !strings.Contains(sh, "--uninstall") || !strings.Contains(sh, "--purge") {
+		t.Error("sh: atomik mv / uninstall eksik")
+	}
+	if !strings.Contains(ps, "Move-Item -Force") || !strings.Contains(ps, "$Uninstall") || !strings.Contains(ps, "-Verb RunAs") {
+		t.Error("ps1: Move-Item / Uninstall / UAC yukseltme eksik")
+	}
+	if strings.Contains(sh, "|| true\n$SUDO \"$INSTALL_PATH\" service") || strings.Contains(sh, "service install || true") || strings.Contains(sh, "service start || true") {
+		t.Error("sh: servis hatalari gizlenmemeli")
+	}
+	if strings.Contains(ps, `-notlike "*$installDir*"`) {
+		t.Error("ps1: PATH alt-dizge karsilastirmasi olmamali")
+	}
+	if !strings.Contains(ps, "32-bit Windows desteklenmiyor") {
+		t.Error("ps1: 386 acik hata vermeli")
+	}
+	if strings.Contains(sh, "#!/bin/bash") || strings.Contains(sh, "[[") {
+		t.Error("sh: POSIX sh uyumlu olmali")
+	}
+}
+
+func TestInstallScriptsNoHost(t *testing.T) {
+	req := httptest.NewRequest("GET", "/install.sh", nil)
+	req.Host = ""
+	rec := httptest.NewRecorder()
+	(&Server{}).Routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("bos Host: beklenen 400, alinan %d", rec.Code)
+	}
+}

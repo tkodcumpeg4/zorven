@@ -81,6 +81,51 @@ type winHelperConnector struct {
 	mu   sync.Mutex
 	proc windows.Handle
 	sess uint32
+
+	// Stale sonucu kisilir: her kare cagrisinda WTS sorgulamayalim.
+	staleAt  time.Time
+	staleVal bool
+}
+
+const helperStaleEvery = 2 * time.Second
+
+// listSessions, WTS oturum listesini doner (hata => bos).
+func listSessions() []sessInfo {
+	var p *windows.WTS_SESSION_INFO
+	var n uint32
+	if err := windows.WTSEnumerateSessions(0, 0, 1, &p, &n); err != nil || p == nil {
+		return nil
+	}
+	defer windows.WTSFreeMemory(uintptr(unsafe.Pointer(p)))
+	out := make([]sessInfo, 0, n)
+	for _, e := range unsafe.Slice(p, n) {
+		out = append(out, sessInfo{ID: e.SessionID, Active: e.State == windows.WTSActive})
+	}
+	return out
+}
+
+// queryUserSession, aday oturumlar arasinda kullanicisi (token) olan ilkini doner.
+func queryUserSession() (sess uint32, tok windows.Token, err error) {
+	cands := pickSessions(windows.WTSGetActiveConsoleSessionId(), listSessions())
+	if len(cands) == 0 {
+		return 0, 0, errNoInteractiveUser
+	}
+	var lastErr error
+	for _, c := range cands {
+		var t windows.Token
+		e := windows.WTSQueryUserToken(c, &t)
+		if e == nil {
+			return c, t, nil
+		}
+		if errors.Is(e, windows.ERROR_NO_TOKEN) {
+			continue // bu oturumda (henuz) kullanici yok
+		}
+		lastErr = fmt.Errorf("WTSQueryUserToken: %w", e)
+	}
+	if lastErr != nil {
+		return 0, 0, lastErr
+	}
+	return 0, 0, errNoInteractiveUser
 }
 
 const (
@@ -97,7 +142,22 @@ const (
 func (w *winHelperConnector) Stale() bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.proc != 0 && windows.WTSGetActiveConsoleSessionId() != w.sess
+	if w.proc == 0 {
+		return false
+	}
+	now := time.Now()
+	if now.Sub(w.staleAt) < helperStaleEvery {
+		return w.staleVal
+	}
+	w.staleAt = now
+	// Daha uygun (kullanicisi olan, konsol oncelikli) bir oturum varsa yardimci
+	// eski oturumda kalmis demektir.
+	sess, tok, err := queryUserSession()
+	if err == nil {
+		tok.Close()
+	}
+	w.staleVal = err == nil && sess != w.sess
+	return w.staleVal
 }
 
 // Shutdown, onceki yardimci sureci (varsa) kisa bir sure sonra sonlandirir;
@@ -120,16 +180,10 @@ func (w *winHelperConnector) Shutdown() {
 
 func (w *winHelperConnector) Connect() (io.ReadWriteCloser, error) {
 	w.Shutdown()
-	sess := windows.WTSGetActiveConsoleSessionId()
-	if sess == noActiveSession || sess == 0 {
-		return nil, errNoInteractiveUser
-	}
-	var tok windows.Token
-	if err := windows.WTSQueryUserToken(sess, &tok); err != nil {
-		if errors.Is(err, windows.ERROR_NO_TOKEN) {
-			return nil, errNoInteractiveUser
-		}
-		return nil, fmt.Errorf("WTSQueryUserToken: %w", err)
+	// Konsol oturumu, yoksa aktif RDP oturumu (sunucu makineler).
+	sess, tok, err := queryUserSession()
+	if err != nil {
+		return nil, err
 	}
 	defer tok.Close()
 	tu, err := tok.GetTokenUser()
@@ -174,7 +228,7 @@ func (w *winHelperConnector) Connect() (io.ReadWriteCloser, error) {
 		}
 	}()
 
-	proc, pid, err := spawnHelperAsUser(tok, name, secret)
+	proc, pid, err := spawnHelperAsUser(tok, sess, name, secret)
 	if err != nil {
 		return nil, err
 	}
@@ -238,24 +292,53 @@ wait:
 	}
 	w.mu.Lock()
 	w.proc, w.sess = proc, sess
+	w.staleAt = time.Time{}
 	w.mu.Unlock()
 	ok = true
 	return pipe, nil
 }
 
-// spawnHelperAsUser, kullanici tokeniyle winsta0\default masaustunde
+// spawnHelperAsUser, kullanici tokeniyle winsta0\default masaustunda
 // "zorven screen-helper --pipe <ad> --token <gizli>" baslatir.
-func spawnHelperAsUser(userTok windows.Token, pipeName, secret string) (windows.Handle, uint32, error) {
+//
+// Kullanici yonetici ise (UAC filtreli token) ONCE yukseltilmis bagli token
+// (TokenLinkedToken) denenir: boylece yukseltilmis pencerelere girdi
+// enjekte edilebilir (UIPI). Herhangi bir adim basarisiz olursa filtreli
+// (mevcut) token ile devam edilir.
+func spawnHelperAsUser(userTok windows.Token, sess uint32, pipeName, secret string) (windows.Handle, uint32, error) {
+	if lt, err := userTok.GetLinkedToken(); err == nil {
+		if lt.IsElevated() {
+			h, pid, e := spawnHelperWithToken(lt, sess, pipeName, secret, true)
+			lt.Close()
+			if e == nil {
+				return h, pid, nil
+			}
+		} else {
+			lt.Close()
+		}
+	}
+	return spawnHelperWithToken(userTok, sess, pipeName, secret, false)
+}
+
+func spawnHelperWithToken(srcTok windows.Token, sess uint32, pipeName, secret string, setSession bool) (windows.Handle, uint32, error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return 0, 0, err
 	}
 	var dup windows.Token
-	if err := windows.DuplicateTokenEx(userTok, windows.MAXIMUM_ALLOWED, nil,
+	if err := windows.DuplicateTokenEx(srcTok, windows.MAXIMUM_ALLOWED, nil,
 		windows.SecurityImpersonation, windows.TokenPrimary, &dup); err != nil {
 		return 0, 0, fmt.Errorf("DuplicateTokenEx: %w", err)
 	}
 	defer dup.Close()
+	if setSession {
+		// Bagli token'in oturum kimligi garanti degil: hedef oturuma sabitle
+		// (aksi halde yardimci oturum 0'da acilirdi). Basarisizsa cagiran
+		// filtreli token ile devam eder.
+		if err := windows.SetTokenInformation(dup, windows.TokenSessionId, (*byte)(unsafe.Pointer(&sess)), 4); err != nil {
+			return 0, 0, fmt.Errorf("SetTokenInformation(session): %w", err)
+		}
+	}
 	var env *uint16
 	if err := windows.CreateEnvironmentBlock(&env, dup, false); err != nil {
 		return 0, 0, fmt.Errorf("CreateEnvironmentBlock: %w", err)

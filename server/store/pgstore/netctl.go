@@ -230,12 +230,12 @@ func (n *NetStore) ListAccess(ctx context.Context, tenantID string, q netctl.Acc
 		add("at >= ?", q.Since)
 	}
 	limit := q.Limit
-	if limit <= 0 || limit > 500 {
+	if limit <= 0 || limit > 501 {
 		limit = 200
 	}
 	rows, err := n.pool.Query(ctx,
 		`SELECT id, at, src_ip, src_name, src_client_id, dst_ip, dst_name, dst_client_id, proto, port, decision, rule, resource, flows, packets, bytes
-		   FROM wg_access_events WHERE `+where+` ORDER BY at DESC, id DESC LIMIT `+strconv.Itoa(limit), args...)
+		   FROM wg_access_events WHERE `+where+` ORDER BY at DESC, id DESC LIMIT `+strconv.Itoa(limit)+` OFFSET `+strconv.Itoa(max(q.Offset, 0)), args...)
 	if err != nil {
 		return nil, err
 	}

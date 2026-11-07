@@ -35,8 +35,6 @@ const (
 	layerQualityHigh    = 90 // izleyici acikca "yuksek" kalite istediyse
 	layerQualityMid     = 75 // aksi halde yuksek katman
 	viewerFPSDefault    = 15
-	viewerFPSMax        = 30
-	agentFPSMax         = 30
 
 	// gonderici: bir turda en fazla bu kadar yuk (kuyrukta yer oranina gore azalir).
 	senderMsgBytes = 180 << 10
@@ -173,11 +171,47 @@ func resolveWidth(w int) int {
 	return min(w, 16384)
 }
 
-func resolveFPS(f int) int {
+// resolveFPS, istenen fps'i izleyici tavanina (limit) kirpar; istek yoksa
+// (<= 0) varsayilan 15 (tavan altindaysa). Varsayilan hicbir plan icin yukselmez.
+func resolveFPS(f, limit int) int {
 	if f <= 0 {
-		return viewerFPSDefault
+		f = viewerFPSDefault
 	}
-	return min(f, viewerFPSMax)
+	return min(f, limit)
+}
+
+// planFPSCap, planin ekran fps degerini (entitlements.ScreenStreamSpec.MaxFPS)
+// izleyici tavanina cevirir: plan bilinmiyorsa (0/negatif; yetkilendirme servisi
+// yok) 30, 60'in ustu 60 (Screen2FPSMax mutlak sinirdir).
+func planFPSCap(planMax int) int {
+	switch {
+	case planMax <= 0:
+		return protocol.Screen2FPSBase
+	case planMax > protocol.Screen2FPSMax:
+		return protocol.Screen2FPSMax
+	}
+	return planMax
+}
+
+// fpsAgent, 30 fps ustu yakalamayi (screen2_fps60) pazarlayan istemci oturumu
+// (*tunnel.Session); screen2Agent'a EKLENMEZ ki eski sahte uygulamalar bozulmasin.
+type fpsAgent interface {
+	SupportsScreen2FPS60() bool
+}
+
+// agentFPSCap, ajanin yetenegine gore fps tavani: screen2_fps60 pazarlanmadiysa
+// 30 (eski ajan 30 ustu degeri gecersiz sayip 15'e duser), pazarlandiysa 60.
+func agentFPSCap(a screen2Agent) int {
+	if fa, ok := a.(fpsAgent); ok && fa.SupportsScreen2FPS60() {
+		return protocol.Screen2FPSMax
+	}
+	return protocol.Screen2FPSBase
+}
+
+// viewerFPSCap, bir izleyicinin fps tavani: planin degeri ile ajanin yeteneginin
+// asgarisi. Sunucu zorlar; istemcinin (panelin) istegine guvenilmez.
+func viewerFPSCap(planMax, agentCap int) int {
+	return min(planFPSCap(planMax), agentCap)
 }
 
 // computeSpecs, izleyici ozetlerinden etkin katman parametrelerini uretir.
@@ -390,8 +424,20 @@ func (v *screen2Viewer) effectiveLayerLocked() int {
 }
 
 func (v *screen2Viewer) interval() time.Duration {
-	return time.Second / time.Duration(resolveFPS(v.fps))
+	return time.Second / time.Duration(v.effFPS())
 }
+
+// fpsLimit, izleyicinin fps tavani (join'de plan ve ajan yetenegiyle belirlenir;
+// 0 => 30: elle kurulmus izleyici).
+func (v *screen2Viewer) fpsLimit() int {
+	if v.fpsCap <= 0 {
+		return protocol.Screen2FPSBase
+	}
+	return v.fpsCap
+}
+
+// effFPS, izleyicinin etkin fps'i: istegi tavana kirpilmis hali (istek yoksa 15).
+func (v *screen2Viewer) effFPS() int { return resolveFPS(v.fps, v.fpsLimit()) }
 
 type tileBatch struct {
 	rects []protocol.Screen2Rect
@@ -559,7 +605,7 @@ func (v *screen2Viewer) stateMsg() []byte {
 	defer h.mu.Unlock()
 	b, _ := json.Marshal(map[string]any{
 		"type": "viewer_state", "layered": true, "layer": layerName(v.layer),
-		"auto": v.pref == prefAuto, "fps": resolveFPS(v.fps),
+		"auto": v.pref == prefAuto, "fps": v.effFPS(),
 	})
 	return b
 }
@@ -582,7 +628,7 @@ func (v *screen2Viewer) applySettings(c screenControl) {
 		return
 	}
 	if o.FPS > 0 {
-		v.fps = min(o.FPS, viewerFPSMax)
+		v.fps = min(o.FPS, v.fpsLimit())
 	}
 	if o.MaxWidth > 0 {
 		v.maxWidth = o.MaxWidth
@@ -640,7 +686,7 @@ func (h *screen2Hub) syncLayers() {
 		fps := 0
 		for v := range h.viewers {
 			in = append(in, specIn{v.layer, v.maxWidth, v.quality})
-			fps = max(fps, resolveFPS(v.fps))
+			fps = max(fps, v.effFPS())
 		}
 		specs, active := computeSpecs(in)
 		key := false
@@ -653,7 +699,7 @@ func (h *screen2Hub) syncLayers() {
 			}
 			h.wasActive[l] = active[l]
 		}
-		fps = min(fps, agentFPSMax)
+		fps = min(fps, h.agentFPSLimit())
 		sendSpecs := key || !specsEqual(specs, h.sentSpecs)
 		sendFPS := fps > 0 && fps != h.sentFPS
 		if sendSpecs {

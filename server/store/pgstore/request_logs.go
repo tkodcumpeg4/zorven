@@ -3,6 +3,7 @@ package pgstore
 import (
 	"context"
 	"fmt"
+	"net"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -122,6 +123,13 @@ func (s *Store) QueryRequestLogs(ctx context.Context, f reqlog.Filter) ([]reqlog
 	if f.TunnelID != "" {
 		add("tunnel_id = $%d", f.TunnelID)
 	}
+	if f.ProjectID != "" {
+		// Proje kapsami: kayit tunel uzerinden projeye baglanir (reddedilenler de
+		// tunel kimligi tasir). Tunelsiz kayitlar proje gorunumunde yer almaz.
+		args = append(args, f.TenantID, f.ProjectID)
+		where = append(where, fmt.Sprintf(
+			"tunnel_id IN (SELECT id FROM tunnels WHERE tenant_id = $%d AND project_id = $%d)", len(args)-1, len(args)))
+	}
 	if f.Hostname != "" {
 		add("hostname = $%d", f.Hostname)
 	}
@@ -148,6 +156,16 @@ func (s *Store) QueryRequestLogs(ctx context.Context, f reqlog.Filter) ([]reqlog
 	}
 	if f.MaxDurMS > 0 {
 		add("duration_ms <= $%d", f.MaxDurMS)
+	}
+	if f.ClientIP != "" {
+		// Tam IP verilirse birebir esleme ("1.2.3.4" "1.2.3.45"i yakalamaz);
+		// degilse "84.38." gibi bir ag onegi (LIKE joker karakterleri kacirilir).
+		if net.ParseIP(f.ClientIP) != nil {
+			add("client_ip = $%d", f.ClientIP)
+		} else {
+			esc := strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(f.ClientIP)
+			add("client_ip LIKE $%d", esc+"%")
+		}
 	}
 
 	if f.Reason != "" {
@@ -176,10 +194,10 @@ func (s *Store) QueryRequestLogs(ctx context.Context, f reqlog.Filter) ([]reqlog
 	if len(where) > 0 {
 		sql += " WHERE " + strings.Join(where, " AND ")
 	}
-	sql += " ORDER BY ts DESC"
+	sql += " ORDER BY ts DESC, id DESC"
 
 	limit := f.Limit
-	if limit <= 0 || limit > 1000 {
+	if limit <= 0 || limit > 1001 { // 1001 = 1000 + "devami var mi" icin 1 ek satir
 		limit = 200
 	}
 	args = append(args, limit)

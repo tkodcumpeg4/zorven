@@ -9,6 +9,7 @@ package tunsec
 import (
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"regexp"
 	"sort"
 	"strings"
@@ -60,6 +61,8 @@ type Config struct {
 	// Bot (B1-B3) ve Rate (B2): bot korumasi + tunel+IP hiz siniri. Bkz. bot.go.
 	Bot  BotConfig  `json:"bot"`
 	Rate RateConfig `json:"rate"`
+	// Trusted: WAF/bot/hiz siniri (ve istege bagli Geo) muaf IP'ler. Bkz. trusted.go.
+	Trusted TrustedConfig `json:"trusted"`
 }
 
 var countryRe = regexp.MustCompile(`^[A-Z]{2}$`)
@@ -137,6 +140,9 @@ func Normalize(c Config) (Config, error) {
 	if c.Rate, err = normalizeRate(c.Rate); err != nil {
 		return c, err
 	}
+	if c.Trusted, err = normalizeTrusted(c.Trusted); err != nil {
+		return c, err
+	}
 	return c, nil
 }
 
@@ -169,6 +175,9 @@ type Compiled struct {
 	// Bot ve Rate: B1-B3 (bkz. bot.go). Kapaliyken de varsayilanlarla doludur.
 	Bot  BotSettings
 	Rate RateSettings
+	// trusted: guvenilir IP/CIDR listesi; trustSkipGeo Geo'yu da atlar.
+	trusted      []netip.Prefix
+	trustSkipGeo bool
 }
 
 // Compile, ayari derler. WAF, Geo, bot ve hiz siniri hicbiri acik degilse nil doner.
@@ -185,6 +194,12 @@ func Compile(c Config) *Compiled {
 			ExcludePaths: n.Bot.ExcludePaths, AllowVerified: n.Bot.AllowVerifiedBots, BlockEmptyUA: n.Bot.BlockEmptyUA},
 		Rate: RateSettings{Enabled: n.Rate.Enabled, Requests: n.Rate.Requests, WindowSeconds: n.Rate.WindowSeconds,
 			Action: n.Rate.Action, ExcludePaths: n.Rate.ExcludePaths}}
+	cp.trustSkipGeo = n.Trusted.SkipGeo
+	for _, s := range n.Trusted.CIDRs {
+		if p, err := parseTrusted(s); err == nil {
+			cp.trusted = append(cp.trusted, p)
+		}
+	}
 	if len(n.WAF.DisabledRules) > 0 {
 		cp.off = make(map[string]bool, len(n.WAF.DisabledRules))
 		for _, id := range n.WAF.DisabledRules {
@@ -229,6 +244,9 @@ func (c *Compiled) GeoAllows(country string, known bool) bool {
 // GeoCheck, IP icin karar + log icin ulke etiketi (cozulemezse "unknown").
 func (c *Compiled) GeoCheck(res CountryResolver, ip string) (allowed bool, country string) {
 	if !c.GeoActive() {
+		return true, ""
+	}
+	if c.trustSkipGeo && c.IsTrusted(ip) {
 		return true, ""
 	}
 	country = UnknownCountry

@@ -59,6 +59,36 @@ func (t *wsTransport) SendBinary(ctx context.Context, b []byte) error {
 	return t.c.Write(wctx, websocket.MessageBinary, b)
 }
 
+// Oturum canlilik ayarlari (testler kisaltabilir).
+var (
+	sessionPingEvery   = 30 * time.Second
+	sessionPingTimeout = 20 * time.Second
+)
+
+// sessionKeepalive, periyodik WebSocket ping gonderir; pong gelmezse (olu es)
+// baglantiyi kapatir, boylece RunSession'daki Read hata ile doner. Pong'u
+// Read dongusu isler.
+func sessionKeepalive(ctx context.Context, c *websocket.Conn, every, timeout time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		pctx, cancel := context.WithTimeout(ctx, timeout)
+		err := c.Ping(pctx)
+		cancel()
+		if err != nil {
+			if ctx.Err() == nil {
+				c.CloseNow()
+			}
+			return
+		}
+	}
+}
+
 // RunSession, tek bir oturum baglantisi kurar; baglanti bitince doner.
 // Dugum ilk netmap'i alinca onReady cagrilir.
 func RunSession(ctx context.Context, cfg SessionConfig, onReady func(*Node)) error {
@@ -77,7 +107,7 @@ func RunSession(ctx context.Context, cfg SessionConfig, onReady func(*Node)) err
 		if resp != nil {
 			switch resp.StatusCode {
 			case http.StatusUnauthorized:
-				return &FatalSessionError{"API token gecersiz (401)"}
+				return &FatalSessionError{"token gecersiz (401): API token veya cihazin istemci token'i gecerli olmali"}
 			case http.StatusForbidden:
 				return &FatalSessionError{"ag oturumu reddedildi (403): token kullaniciya bagli ve net:read kapsamli olmali"}
 			case http.StatusServiceUnavailable, http.StatusPaymentRequired:
@@ -117,6 +147,7 @@ func RunSession(ctx context.Context, cfg SessionConfig, onReady func(*Node)) err
 		case <-ctx.Done():
 		}
 	}()
+	go sessionKeepalive(ctx, c, sessionPingEvery, sessionPingTimeout)
 	for {
 		typ, data, err := c.Read(ctx)
 		if err != nil {

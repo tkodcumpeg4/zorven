@@ -17,6 +17,11 @@ var (
 	ErrVerificationFailed = errors.New("DNS dogrulamasi basarisiz: CNAME veya TXT kaydi eslesmedi")
 )
 
+// ErrWildcardDomain, "*." ile baslayan (joker) ozel alan adlari icin: ACME ile joker sertifika
+// alinamadigindan desteklenmez. ValidateDomain bunu ErrInvalidDomain ile birlikte sarar, boylece
+// API ve Zorven Apps hatalari mevcut bicimde (invalid_domain / invalid_hostname) acik bir mesajla doner.
+var ErrWildcardDomain = errors.New("joker alan adlari (*.alan.com) desteklenmiyor; her alt alan adini ayri ekleyin")
+
 // DNSVerifier, DNS sorgularini soyutlar (testlerde mock'lanabilmesi icin).
 type DNSVerifier interface {
 	LookupCNAME(ctx context.Context, host string) (string, error)
@@ -151,6 +156,13 @@ func ValidateDomain(fqdn, platformDomain string) error {
 
 	if strings.Contains(fqdn, " ") || strings.Contains(fqdn, "/") || strings.Contains(fqdn, ":") {
 		return ErrInvalidDomain
+	}
+	// Joker (*.alan) alan adlari desteklenmez: yonlendirici (ingress/router.go) joker eslesmeyi
+	// bilir, ama ACME HTTP-01 / TLS-ALPN-01 ile joker sertifika ALINAMAZ (DNS-01 gerekir; henuz yok).
+	// Sessizce kabul edip sertifikasiz birakmak yerine acik hatayla reddedilir (Ek 1 madde 28).
+	// Hem API hem Zorven Apps ozel adlari (apps.NormalizeSpec) bu fonksiyondan gecer.
+	if strings.Contains(fqdn, "*") {
+		return fmt.Errorf("%w: %w", ErrInvalidDomain, ErrWildcardDomain)
 	}
 
 	if ip, perr := netip.ParseAddr(fqdn); perr == nil && ip.IsValid() {

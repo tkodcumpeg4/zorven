@@ -438,6 +438,11 @@ func (b *inprocBackend) Do(ctx context.Context, r mcptools.Request) (mcptools.Re
 		req.Header.Set("Authorization", b.auth)
 	}
 	req.Header.Set("Accept", "application/json")
+	// Denetim icin bilgi basliklari (yetkilendirmede ASLA kullanilmaz).
+	req.Header.Set("X-Zorven-Client", "mcp")
+	if b.principal != nil && b.principal.ClientID != "" {
+		req.Header.Set("X-Zorven-Client-Id", b.principal.ClientID)
+	}
 	if r.Body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

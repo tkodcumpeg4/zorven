@@ -172,10 +172,7 @@ func TestDoorBasicLoginOpensGrant(t *testing.T) {
 	if cookie == nil {
 		t.Fatal("oturum cerezi yok")
 	}
-	r := doorReq("GET", "/")
-	r.AddCookie(cookie)
-	w = httptest.NewRecorder()
-	h.ServeHTTP(w, r)
+	w = doorOpenFlow(h, func(r *http.Request) { r.AddCookie(cookie) })
 	body := w.Body.String()
 	if w.Code != http.StatusOK || !strings.Contains(body, "203.0.113.7") ||
 		!strings.Contains(body, "example.com:10007") || !strings.Contains(body, "/_zvd/close") {
@@ -186,9 +183,7 @@ func TestDoorBasicLoginOpensGrant(t *testing.T) {
 		t.Fatalf("grant beklenmedik: %+v", ms.grants)
 	}
 	// Yeniden yukleme grant'i cogaltmaz.
-	r = doorReq("GET", "/")
-	r.AddCookie(cookie)
-	h.ServeHTTP(httptest.NewRecorder(), r)
+	doorOpenFlow(h, func(r *http.Request) { r.AddCookie(cookie) })
 	if len(ms.grants) != 1 {
 		t.Fatal("ikinci ziyaret yeni grant acmamali")
 	}
@@ -231,10 +226,7 @@ func TestDoorPlanGateBlocksOpen(t *testing.T) {
 	hash, _ := auth.HashSecret("pw")
 	h, ms := newDoorHandler(t, "basic", `{"username":"alice","password_hash":"`+hash+`"}`, true)
 	h.Door.Gate = func(context.Context, string) error { return context.Canceled }
-	r := doorReq("GET", "/")
-	r.SetBasicAuth("alice", "pw")
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, r)
+	w := doorOpenFlow(h, func(r *http.Request) { r.SetBasicAuth("alice", "pw") })
 	if w.Code != http.StatusForbidden || len(ms.grants) != 0 {
 		t.Fatalf("plan kapisi grant'i engellemeli: %d", w.Code)
 	}

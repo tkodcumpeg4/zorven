@@ -3,7 +3,6 @@ import { currentLang, dateLocale } from '~/plugins/i18n'
 const REL = {
   tr: { now: 'şimdi', s: (n: number) => `${n}sn önce`, m: (n: number) => `${n}dk önce`, h: (n: number) => `${n}sa önce`, d: (n: number) => `${n}g önce` },
   en: { now: 'now', s: (n: number) => `${n}s ago`, m: (n: number) => `${n}m ago`, h: (n: number) => `${n}h ago`, d: (n: number) => `${n}d ago` },
-  ja: { now: 'たった今', s: (n: number) => `${n}秒前`, m: (n: number) => `${n}分前`, h: (n: number) => `${n}時間前`, d: (n: number) => `${n}日前` },
 }
 
 export function useFormat() {

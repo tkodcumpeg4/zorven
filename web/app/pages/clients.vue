@@ -7,10 +7,11 @@ const toast = useToast()
 const { relativeTime } = useFormat()
 const { openUpgrade, loadBillingData } = useBilling()
 
-const clients = ref<Client[]>([])
+const pager = usePagedList<Client>(p => api.pageClients(p))
+const clients = pager.items
 const { isPrivileged } = useRole()
 
-const pending = ref(true)
+const pending = pager.loading
 const saving = ref(false)
 const newName = ref('')
 
@@ -27,27 +28,16 @@ const origin = computed(() => {
 })
 
 // Temizlik setup'ta senkron kaydedilir (await sonrasi kayit calismaz).
-let interval: ReturnType<typeof setInterval> | undefined
-let unmounted = false
-onUnmounted(() => {
-  unmounted = true
-  if (interval) clearInterval(interval)
-})
-
-onMounted(async () => {
-  await fetchClients()
-  if (unmounted) return
-  // Her 10 saniyede bir metrikleri tazelemek icin polling
-  interval = setInterval(fetchClients, 10000)
-})
+// client.* olayinda yenile; SSE ayaktayken 60 sn, degilken eski 10 sn;
+// hatada ussel bekleme, sekme gizliyken durur.
+useLiveRefresh(fetchClients, { events: ['client.*'], fallbackMs: 10000 })
 
 async function fetchClients() {
   try {
-    clients.value = await api.listClients()
-  } catch (err) {
-    // sessizce devam et
-  } finally {
-    pending.value = false
+    await pager.reload(true) // sessiz tazeleme; hata sessizce yutulur
+    return !pager.error.value
+  } catch {
+    return false
   }
 }
 
@@ -245,7 +235,7 @@ const currentCmd = computed(() => {
     </PanelFrame>
 
     <!-- Kayıtlı İstemciler Listesi -->
-    <PanelFrame :label="t('clients.registered')" :meta="String(clients.length)">
+    <PanelFrame :label="t('clients.registered')" :meta="String(pager.total.value ?? clients.length)">
       <p v-if="pending" class="px-4 py-6 text-sm text-fg-muted">{{ t('common.loading') }}</p>
 
       <div v-else class="overflow-x-auto">
@@ -400,6 +390,7 @@ const currentCmd = computed(() => {
           </tbody>
         </table>
       </div>
+      <ListPager class="px-4 pb-3" :list="pager" />
     </PanelFrame>
   </div>
 </template>

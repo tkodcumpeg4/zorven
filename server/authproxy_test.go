@@ -129,6 +129,42 @@ func TestAuthProxyInvalidatesSessionCache(t *testing.T) {
 	}
 }
 
+// Hesap silme onay baglantisi (GET /delete-user/callback) kullaniciyi siler: Go oturum
+// onbellegi istekten ONCE (kullanici hala cozulebilirken) ve yanittan sonra
+// temizlenmeli; silinen hesabin oturumu 30 sn gecerli kalmamali. Cerezsiz istek
+// (Better Auth zaten reddeder) onbellege dokunmamali.
+func TestAuthProxyDeleteUserCallbackInvalidatesCache(t *testing.T) {
+	cache := &fakeCache{users: map[string]string{"tokA": "usrA"}}
+	var atUpstream []string
+	front := newTestAuthProxy(t, cache, func(r *http.Request) {
+		atUpstream = cache.snapshot()
+	})
+	do := func(withCookie bool) []string {
+		cache.reset()
+		atUpstream = nil
+		req, _ := http.NewRequest(http.MethodGet, front.URL+"/api/auth/delete-user/callback?token=abc&callbackURL=%2F", nil)
+		if withCookie {
+			req.AddCookie(&http.Cookie{Name: "__Host-zorven.session_token", Value: "tokA.sig"})
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return cache.snapshot()
+	}
+	ev := do(true)
+	if len(atUpstream) < 2 || atUpstream[0] != "user:usrA" || atUpstream[1] != "tok:tokA" {
+		t.Fatalf("upstream'den once kullanici ve oturum temizlenmeli, gelen %v", atUpstream)
+	}
+	if len(ev) != 4 || ev[len(ev)-1] != "tok:tokA" {
+		t.Fatalf("istekten once ve yanittan sonra temizlenmeli (tumden bosaltma yok): %v", ev)
+	}
+	if ev := do(false); len(ev) != 0 {
+		t.Fatalf("cerezsiz hesap silme onayi onbellege dokunmamali: %v", ev)
+	}
+}
+
 func TestDropTossedAuthCookies(t *testing.T) {
 	r := httptest.NewRequest("GET", "https://panel.example/api/auth/get-session", nil)
 	r.Header.Set("Cookie", "__Host-zorven.session_token=saldirgan; theme=dark; __Host-zorven.session_token=kurban")

@@ -65,6 +65,7 @@ func RunScreenHelper(pipeName, token, version string) error {
 		return errors.New(i18n.T("scr.err.session0"))
 	}
 	captureVersion = version
+	ensureDPIAware() // yakalama/girdi koordinatlari fiziksel piksel olsun (surec basina bir kez)
 	// Masaustu baglama ve girdi enjeksiyonu is parcacigina baglidir.
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()

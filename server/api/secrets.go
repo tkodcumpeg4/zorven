@@ -21,11 +21,16 @@ func (s *Server) listSecrets(w http.ResponseWriter, r *http.Request) {
 	}
 	projID, _ := s.projectFor(r)
 
-	secrets, err := s.Store.ListSecrets(r.Context(), tenantID, projID)
+	pg, ok := pageOf(w, r)
+	if !ok {
+		return
+	}
+	secrets, total, err := s.Store.ListSecretsPage(r.Context(), tenantID, projID, pg)
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
+	setPageTotals(w, pg, len(secrets), total)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"secrets": secrets,
 		"count":   len(secrets),

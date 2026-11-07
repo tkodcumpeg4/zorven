@@ -144,7 +144,7 @@ func (fm *fileManager) open(ctx context.Context, m protocol.FileOpen) {
 func createUnique(dir, name string) (*os.File, string, error) {
 	for n := 0; n < 1000; n++ {
 		cand := protocol.UniqueFileName(name, n)
-		f, err := os.OpenFile(filepath.Join(dir, cand), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		f, err := os.OpenFile(filepath.Join(dir, cand), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if err == nil {
 			return f, cand, nil
 		}
@@ -244,7 +244,9 @@ func (fm *fileManager) runPut(ctx context.Context, x *agentXfer, f *os.File, nam
 				fm.log.Warn("dosya sha256 uyusmazligi", "xfer", x.id, "ad", name)
 				return
 			}
-			if err := f.Close(); err != nil {
+			// Kalicilik: kapatmadan once diske zorla (fsync).
+			serr := f.Sync()
+			if cerr := f.Close(); serr != nil || cerr != nil {
 				os.Remove(path)
 				done.Code, done.Message, done.Name = protocol.FileErrIO, "dosya kapatilamadi", ""
 				_ = fm.sink.sendControl(context.Background(), done, protocol.TypeFileDone)

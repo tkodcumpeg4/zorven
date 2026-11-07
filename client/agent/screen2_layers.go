@@ -91,6 +91,8 @@ type layerState struct {
 	scaler  frameScaler
 	// nextDue, katmanin bir sonraki isleme vadesi (katman basina fps; captureLoop).
 	nextDue time.Time
+	// acc, bu katmanin son isleminden beri biriken kaynak ipuclari (screen2_resilience.go).
+	acc hintAccum
 }
 
 // applyLayerUpdate, etkin kumeyi gunceller: yeni katman tam kare ister,

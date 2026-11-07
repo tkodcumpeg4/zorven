@@ -10,6 +10,9 @@ const { usage, effectiveMaxClients, effectiveBandwidthBytes, formatBytes, loadBi
 const tunnels = ref<Tunnel[]>([])
 const clients = ref<Client[]>([])
 const requests = ref<RequestLog[]>([])
+// Ozet pano: "ilk 50" gosterilir (sayfalayici yok); tam liste /tunnels ve /clients sayfalarinda.
+const tunnelsTotal = ref<number | null>(null)
+const clientsTotal = ref<number | null>(null)
 const pending = ref(true)
 
 let stopStream: (() => void) | undefined
@@ -18,13 +21,16 @@ let loadErrorShown = false
 async function fetchDashboard() {
   try {
     const [t, c, r] = await Promise.all([
-      api.listTunnels(),
-      api.listClients(),
+      api.pageTunnels({ limit: 50, offset: 0 }),
+      api.pageClients({ limit: 50, offset: 0 }),
       api.listRequests(40),
     ])
-    tunnels.value = t
-    clients.value = c
+    tunnels.value = t.items
+    tunnelsTotal.value = t.total
+    clients.value = c.items
+    clientsTotal.value = c.total
     requests.value = r
+    return true
   } catch (e: any) {
     // Polling her 10 sn'de tekrarlar; ayni hatayi yalnizca bir kez goster.
     if (!loadErrorShown) {
@@ -38,24 +44,45 @@ async function fetchDashboard() {
 
 // Temizlik setup'ta SENKRON kaydedilmeli: await sonrasi onUnmounted
 // aktif bilesen olmadigindan kaydedilmez ve polling/SSE sizar.
-let interval: ReturnType<typeof setInterval> | undefined
 let unmounted = false
 onUnmounted(() => {
   unmounted = true
-  if (interval) clearInterval(interval)
   stopStream?.()
 })
+
+// client.*/tunnel.* olayinda yenile; SSE ayaktayken 60 sn, degilken eski 10 sn;
+// hatada ussel bekleme, sekme gizliyken durur.
+useLiveRefresh(fetchDashboard, { events: ['client.*', 'tunnel.*'], fallbackMs: 10000 })
 
 onMounted(async () => {
   void loadBillingData()
   await fetchDashboard()
   if (unmounted) return
-  interval = setInterval(fetchDashboard, 10000)
+  startStream()
+})
 
-  // Canli akis: yeni istekler basa eklenir, liste 40 kayitta tutulur
+// Canli akis: yeni istekler basa eklenir, liste 40 kayitta tutulur
+function startStream() {
+  stopStream?.()
   stopStream = api.streamRequests((r) => {
     requests.value = [r, ...requests.value].slice(0, 40)
   })
+}
+
+// Proje veya kiraci (Yonetime Gec) degisince: listeleri sifirla, yeniden yukle,
+// akisi secili projeyle yeniden baslat.
+const { activeProject } = useActiveProject()
+const { adminTenant } = useAdminTenant()
+watch([activeProject, adminTenant], async () => {
+  if (unmounted || !stopStream) return
+  stopStream()
+  requests.value = []
+  tunnels.value = []
+  clients.value = []
+  pending.value = true
+  await fetchDashboard()
+  if (unmounted) return
+  startStream()
 })
 
 const clientName = (id: string) => clients.value.find(c => c.id === id)?.name ?? id
@@ -99,9 +126,9 @@ const avgCpu = computed(() => {
     <!-- Metrikler -->
     <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
       <StatTile index="01" :label="t('overview.statActiveTunnel')" :value="pending ? '—' : activeTunnels"
-                :hint="t('overview.statDefined', { n: tunnels.length })" tone="accent" />
+                :hint="t('overview.statDefined', { n: tunnelsTotal ?? tunnels.length })" tone="accent" />
       <StatTile index="02" :label="t('overview.statConnectedClient')" :value="pending ? '—' : onlineClients"
-                :hint="t('overview.statRegisteredDevices', { n: clients.length })" />
+                :hint="t('overview.statRegisteredDevices', { n: clientsTotal ?? clients.length })" />
       <StatTile index="03" :label="t('overview.statCpuLoad')" :value="pending ? '—' : avgCpu"
                 :hint="t('overview.statOnlineMachines')" />
       <StatTile index="04" :label="t('overview.statP95')" :value="pending ? '—' : p95" :hint="t('overview.statLast40')" />
@@ -152,7 +179,7 @@ const avgCpu = computed(() => {
     <!-- Tüneller & İstek Akışı -->
     <div class="grid gap-4 xl:grid-cols-2">
       <!-- Tüneller -->
-      <PanelFrame :label="t('overview.tunnelsTitle')" :meta="`${tunnels.length}`">
+      <PanelFrame :label="t('overview.tunnelsTitle')" :meta="`${tunnelsTotal ?? tunnels.length}`">
         <template #actions>
           <NuxtLink to="/tunnels"
                     class="cursor-pointer font-mono text-[11px] text-accent hover:underline">
@@ -207,7 +234,7 @@ const avgCpu = computed(() => {
     </div>
 
     <!-- Bağlı Cihazlar & Canlı Sistem Telemetrisi -->
-    <PanelFrame :label="t('overview.devicesTitle')" :meta="`${clients.length}`">
+    <PanelFrame :label="t('overview.devicesTitle')" :meta="`${clientsTotal ?? clients.length}`">
       <template #actions>
         <NuxtLink to="/clients" class="cursor-pointer font-mono text-[11px] text-accent hover:underline">
           {{ t('overview.allDevices') }}

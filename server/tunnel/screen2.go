@@ -55,6 +55,23 @@ func (s *Session) Screen2Layers(ctx context.Context, sessionID string,
 	}, protocol.TypeScreen2Layers)
 }
 
+// SupportsScreen2FPS60, istemci 30 fps ustu yakalamayi (screen2_fps60, en fazla 60)
+// pazarlamis mi. Pazarlanmadiysa ajana 30'un ustunde fps YOLLANMAZ: eski ajan
+// bu degeri gecersiz sayip 15'e duser.
+func (s *Session) SupportsScreen2FPS60() bool { return s.screen2 && s.screen2FPS60 }
+
+// ClampFPS, ajana gidecek fps'i ajanin yetenegine kirpar: screen2_fps60 yoksa
+// 30, varsa 60 (Screen2FPSMax) ustune cikmaz. 0/negatif ("varsayilan"/"degistirme")
+// aynen gecer. Plan siniri api katmaninda uygulanir; bu, tek gecis noktasinda
+// son emniyettir (30 ustu bir deger eski ajani 15 fps'e dusurur).
+func (s *Session) ClampFPS(fps int) int {
+	limit := protocol.Screen2FPSBase
+	if s.SupportsScreen2FPS60() {
+		limit = protocol.Screen2FPSMax
+	}
+	return min(fps, limit)
+}
+
 // SupportsScreen2Feedback, istemci izleyici geri bildirimini (screen2_feedback) pazarlamis mi.
 func (s *Session) SupportsScreen2Feedback() bool { return s.screen2 && s.screen2Feedback }
 
@@ -108,7 +125,7 @@ func (s *Session) OpenScreen2(ctx context.Context, sessionID string, o Screen2Op
 	err = s.Send(ctx, protocol.ScreenOpen{
 		Type:      protocol.TypeScreenOpen,
 		SessionID: sessionID,
-		FPS:       o.FPS,
+		FPS:       s.ClampFPS(o.FPS),
 		Quality:   o.Quality,
 		MaxWidth:  o.MaxWidth,
 		Display:   o.Display,
@@ -146,7 +163,7 @@ func (s *Session) Screen2Settings(ctx context.Context, sessionID string, o Scree
 	return s.Send(ctx, protocol.Screen2Settings{
 		Type:      protocol.TypeScreen2Settings,
 		SessionID: sessionID,
-		FPS:       o.FPS,
+		FPS:       s.ClampFPS(o.FPS),
 		Quality:   o.Quality,
 		MaxWidth:  o.MaxWidth,
 		Display:   o.Display,

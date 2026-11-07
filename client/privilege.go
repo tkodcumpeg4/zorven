@@ -15,6 +15,7 @@ import (
 const (
 	flagNoElevate = "no-elevate"
 	flagElevated  = "zv-elevated" // dahili: yukseltilmis alt surec
+	flagLogFile   = "zv-log-file" // dahili: yukseltilmis surecin ciktisini yazacagi dosya
 )
 
 var (
@@ -27,6 +28,64 @@ func addPrivilegeFlags(root *cobra.Command) {
 	root.PersistentFlags().BoolVar(&noElevate, flagNoElevate, false, i18n.T("svc.priv.flag.noelev"))
 	root.PersistentFlags().BoolVar(&elevatedProc, flagElevated, false, "")
 	_ = root.PersistentFlags().MarkHidden(flagElevated)
+	root.PersistentFlags().StringVar(&elevatedLog, flagLogFile, "", "")
+	_ = root.PersistentFlags().MarkHidden(flagLogFile)
+}
+
+var elevatedLog string // --zv-log-file
+
+// logFileFromArgs, cobra ayrisitirmadan ONCE argumanlardan --zv-log-file degerini
+// okur: cikti kopyalama erken (herhangi bir komut yazmadan once) kurulmali.
+func logFileFromArgs(args []string) string {
+	for i, a := range args {
+		if a == "--"+flagLogFile && i+1 < len(args) {
+			return args[i+1]
+		}
+		if v, ok := strings.CutPrefix(a, "--"+flagLogFile+"="); ok {
+			return v
+		}
+	}
+	return ""
+}
+
+// teeOutputToFile, os.Stdout ve os.Stderr'i hem asil hedefe hem path dosyasina
+// yazar (yukseltilmis alt surec: ust surec dosyayi okuyup kendi terminaline
+// basar; yeni UAC penceresi kapaninca cikti kaybolmasin). Donen fonksiyon
+// tamponu bosaltir ve eski hedefleri geri koyar; os.Exit'ten once cagrilmali.
+func teeOutputToFile(path string) func() {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
+	if err != nil {
+		return func() {}
+	}
+	origOut, origErr := os.Stdout, os.Stderr
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		f.Close()
+		return func() {}
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		buf := make([]byte, 8192)
+		for {
+			n, rerr := pr.Read(buf)
+			if n > 0 {
+				_, _ = origOut.Write(buf[:n])
+				_, _ = f.Write(buf[:n])
+			}
+			if rerr != nil {
+				return
+			}
+		}
+	}()
+	os.Stdout, os.Stderr = pw, pw
+	return func() {
+		_ = pw.Close()
+		<-done
+		_ = f.Sync()
+		_ = f.Close()
+		os.Stdout, os.Stderr = origOut, origErr
+	}
 }
 
 // requireAdmin, yonetici/root yetkisi isteyen komutlarin PreRunE'sidir.
@@ -48,7 +107,24 @@ func requireAdmin(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("%s: %w", i18n.T("svc.priv.win.err"), err)
 	}
 	fmt.Println(i18n.T("svc.priv.win.relaunch"))
-	code, err := runElevatedWait(exe, windowsCmdLine(elevatedArgs(os.Args[1:])))
+	// Yukseltilmis alt surec ayri bir pencerede calisir; ciktisi bu dosyaya da
+	// yazilir ve bitince buraya basilir.
+	logPath := ""
+	if lf, lerr := os.CreateTemp("", "zorven-elevated-*.log"); lerr == nil {
+		logPath = lf.Name()
+		lf.Close()
+		defer os.Remove(logPath)
+	}
+	args := elevatedArgs(os.Args[1:])
+	if logPath != "" {
+		args = append([]string{"--" + flagLogFile, logPath}, args...)
+	}
+	code, err := runElevatedWait(exe, windowsCmdLine(args))
+	if logPath != "" {
+		if b, rerr := os.ReadFile(logPath); rerr == nil && len(b) > 0 {
+			fmt.Print(string(b))
+		}
+	}
 	if err != nil {
 		if isUACDeclined(err) {
 			return errors.New(i18n.T("svc.priv.win.declined"))

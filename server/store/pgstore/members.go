@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/tkodcumpeg4/zorven/server/store"
 )
 
@@ -172,6 +173,11 @@ func (s *Store) AddTeamMember(ctx context.Context, tenantID, email, name, role, 
 		 VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7)`,
 		invID, tenantID, email, role, now.Add(7*24*time.Hour), inviter, now)
 	if err != nil {
+		// Es zamanli ikinci istek ayni anda bekleyen davet ekledi (0105 kismi benzersiz indeks).
+		var pe *pgconn.PgError
+		if errors.As(err, &pe) && pe.Code == "23505" {
+			return store.TeamMember{}, fmt.Errorf("bu e-posta icin zaten bekleyen bir davet var")
+		}
 		return store.TeamMember{}, fmt.Errorf("davet olusturulamadi: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -363,10 +369,36 @@ func (s *Store) RemoveTeamMember(ctx context.Context, tenantID, memberID string)
 		return fmt.Errorf("uye silinemedi: %w", err)
 	}
 
-	// Uyenin istemcilerini temizle
-	_, err = tx.Exec(ctx, `DELETE FROM clients WHERE tenant_id = $1 AND user_id = $2`, tenantID, userID)
+	// Uyenin istemcilerini temizle, kisisel API token'larini iptal et.
+	if _, err := removeMemberResourcesTx(ctx, tx, tenantID, userID); err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
+}
+
+// removeMemberResourcesTx, kullanicinin BU kiracidaki istemcilerini siler ve
+// kisisel API token'larini iptal eder; silinen istemci kimliklerini doner
+// (canli baglantilari kesmek icin). Uyelik satirini silmez (cagiran siler).
+// Hesap silme (account_delete.go) ayni temizligi kullanir.
+func removeMemberResourcesTx(ctx context.Context, tx pgx.Tx, tenantID, userID string) ([]string, error) {
+	rows, err := tx.Query(ctx,
+		`DELETE FROM clients WHERE tenant_id = $1 AND user_id = $2 RETURNING id`, tenantID, userID)
 	if err != nil {
-		return fmt.Errorf("uyeye bagli istemciler silinemedi: %w", err)
+		return nil, fmt.Errorf("uyeye bagli istemciler silinemedi: %w", err)
+	}
+	var clientIDs []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		clientIDs = append(clientIDs, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("uyeye bagli istemciler silinemedi: %w", err)
 	}
 
 	// Uyenin kisisel API token'larini iptal et: aksi halde cikarilan kisi
@@ -376,8 +408,7 @@ func (s *Store) RemoveTeamMember(ctx context.Context, tenantID, memberID string)
 		 WHERE tenant_id = $1 AND user_id = $2 AND revoked_at IS NULL`,
 		tenantID, userID)
 	if err != nil {
-		return fmt.Errorf("uyenin API token'lari iptal edilemedi: %w", err)
+		return nil, fmt.Errorf("uyenin API token'lari iptal edilemedi: %w", err)
 	}
-
-	return tx.Commit(ctx)
+	return clientIDs, nil
 }

@@ -13,6 +13,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/tkodcumpeg4/zorven/server/store"
 )
 
@@ -42,7 +43,25 @@ func (s *Store) DeleteOrganization(ctx context.Context, tenantID string) ([]stri
 		return nil, err
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // Commit sonrasi etkisiz
+	if err := relaxTimeout(ctx, tx); err != nil {
+		return nil, err
+	}
 
+	clientIDs, err := deleteOrganizationTx(ctx, tx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return clientIDs, nil
+}
+
+// deleteOrganizationTx, DeleteOrganization'in adimlarini VERILEN islem icinde
+// uygular (commit/rollback cagiranin). Hesap silme de ayni adimlari kullanir;
+// boylece kisisel organizasyon tam olarak "Organizasyonu sil" ile ayni sekilde
+// tum kaynaklariyla silinir.
+func deleteOrganizationTx(ctx context.Context, tx pgx.Tx, tenantID string) ([]string, error) {
 	// Once istemci kimliklerini topla: silindikten sonra canli oturumlari
 	// koparmak icin gerekecek.
 	rows, err := tx.Query(ctx, `SELECT id FROM clients WHERE tenant_id = $1`, tenantID)
@@ -75,9 +94,6 @@ func (s *Store) DeleteOrganization(ctx context.Context, tenantID string) ([]stri
 		if _, err := tx.Exec(ctx, st.sql, tenantID); err != nil {
 			return nil, fmt.Errorf("%s silinemedi: %w", st.what, err)
 		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, err
 	}
 	return clientIDs, nil
 }

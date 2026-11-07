@@ -5,8 +5,10 @@ go 1.26.0
 toolchain go1.27.3
 
 require (
+	blitiri.com.ar/go/spf v1.6.0
 	github.com/emersion/go-imap/v2 v2.0.0-beta.8
 	github.com/emersion/go-message v0.18.2
+	github.com/emersion/go-msgauth v0.7.0
 	github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6
 	github.com/emersion/go-smtp v0.25.0
 	github.com/jackc/pgx/v5 v5.10.0
@@ -15,6 +17,7 @@ require (
 	golang.org/x/crypto v0.57.0
 	golang.org/x/net v0.60.0
 	golang.org/x/time v0.15.0
+	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.58.0
 )
 
@@ -49,3 +52,5 @@ require (
 )
 
 replace github.com/tkodcumpeg4/zorven/shared => ../shared
+
+replace github.com/emersion/go-smtp => ./third_party/go-smtp

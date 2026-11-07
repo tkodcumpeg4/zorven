@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/tkodcumpeg4/zorven/server/accesslog"
@@ -60,6 +61,8 @@ type Handler struct {
 	// Captures, FAZ 2 istek inspector: opt-in tam istek/yanit yakalama deposu.
 	// nil veya kiraci icin kapaliysa hicbir yakalama yapilmaz (sifir maliyet).
 	Captures *reqlog.CaptureStore
+	// AbuseReports, uyari sayfasindaki "Bu siteyi bildir" formunun deposu (nil: kapali).
+	AbuseReports AbuseReporter
 
 	// LogPersister, istek kayitlarini Postgres'e toplu yazar. nil olabilir
 	// (kalicilik kapali; yalnizca bellek ici ring).
@@ -169,6 +172,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		writeError(w, r, http.StatusNotFound, protocol.CodeTunnelNotFound,
 			"Bu hostname hicbir tunele bagli degil: "+r.Host)
+		return
+	}
+	// Gecici tunelin suresi doldu (saklama penceresi): 410 Gone, net mesaj.
+	if tun.Expired {
+		writeError(w, r, http.StatusGone, protocol.CodeTunnelExpired,
+			"Bu gecici tunelin suresi doldu.")
 		return
 	}
 	if !tun.Enabled {
@@ -466,11 +475,21 @@ func (h *Handler) proxy(w http.ResponseWriter, r *http.Request, sess *tunnel.Ses
 	ctx := r.Context()
 	hasBody := r.Body != nil && r.ContentLength != 0
 
+	// Akis G1: gRPC (HTTP/2 + application/grpc). Ajan yetenegi yoksa gRPC
+	// istemcisinin anlayacagi net bir hata doner (HTTP/1.1 ile gRPC calismaz).
+	grpc := isGRPCRequest(r)
+	if grpc && !sess.HTTPTrailers() {
+		writeGRPCError(w, grpcStatusUnavailable,
+			"Tunel istemcisi (ajan) gRPC desteklemiyor; istemciyi guncelleyin (zorven update)")
+		return
+	}
+
 	// FAZ 2: opt-in tam yakalama (kapaliyken sifir maliyet). Istek govdesini
 	// tavana kadar yakala; yanit writeResponse'da tee edilir.
 	var capt *reqlog.Capture
 	// MCP modunda yakalama ZORLA kapali: arac argumanlari/sonuclari sir icerebilir.
-	if mc == nil && h.Captures != nil && h.Captures.Enabled(tenantID) {
+	// gRPC'de de kapali: ikili ve uzun omurlu akislar bellege tee edilmez.
+	if mc == nil && !grpc && h.Captures != nil && h.Captures.Enabled(tenantID) {
 		capt = &reqlog.Capture{
 			ID:         newCaptureID(),
 			TunnelID:   tunnelID,
@@ -490,6 +509,7 @@ func (h *Handler) proxy(w http.ResponseWriter, r *http.Request, sess *tunnel.Ses
 
 	// Yanit durumunu ve boyutunu yakalayabilmek icin ResponseWriter'i sar.
 	rec := &recorder{ResponseWriter: w, status: http.StatusOK}
+	rec.in = countUnknownLenBody(r)
 	var targetWriter http.ResponseWriter = rec
 	if runtimeState != nil && runtimeState.GetLimiter() != nil {
 		targetWriter = bandwidth.NewThrottledWriter(ctx, rec, runtimeState.GetLimiter())
@@ -505,7 +525,7 @@ func (h *Handler) proxy(w http.ResponseWriter, r *http.Request, sess *tunnel.Ses
 			}
 			h.Captures.Put(capt)
 		}
-		h.recordWithID(tunnelID, tenantID, r, rec, started, captureID(capt))
+		h.recordWithID(tunnelID, tenantID, false, r, rec, started, captureID(capt))
 	}()
 
 	// FAZ 6: trafik politikasi istek basliklari (backend'e iletilen).
@@ -524,6 +544,8 @@ func (h *Handler) proxy(w http.ResponseWriter, r *http.Request, sess *tunnel.Ses
 		HasBody:       hasBody,
 		ContentLength: r.ContentLength, // >0 ise ajan chunked yerine Content-Length kullanir
 		RemoteAddr:    clientIP(r),
+		HTTPMajor:     visitorHTTPMajor(r, sess),
+		TETrailers:    sess.HTTPTrailers() && (grpc || teTrailers(r)),
 	})
 	if err != nil {
 		h.Log.Warn("istek istemciye gonderilemedi", "hata", err)
@@ -539,7 +561,17 @@ func (h *Handler) proxy(w http.ResponseWriter, r *http.Request, sess *tunnel.Ses
 	// Bekleyen istek tablosunda sizinti olmamasi icin her cikista temizle.
 	defer sess.FinishExchange(ex.ReqID())
 
-	if hasBody {
+	if hasBody && grpc {
+		// gRPC: istek govdesi yanit beklenirken es zamanli akar (client-streaming /
+		// bidi). Sunucu yaniti erken bitirirse ctx iptaliyle okuma da durur.
+		reqID := ex.ReqID()
+		go func() {
+			if err := sess.StreamRequestBodyUnbounded(ctx, reqID, r.Body); err != nil && ctx.Err() == nil {
+				h.Log.Debug("gRPC istek govdesi aktarimi bitti", "hata", err)
+				sess.SendCancel(context.Background(), reqID, "request_body_failed")
+			}
+		}()
+	} else if hasBody {
 		if err := sess.StreamRequestBody(ctx, ex.ReqID(), r.Body); err != nil {
 			if errors.Is(err, tunnel.ErrBodyTooLarge) {
 				writeError(w, r, http.StatusRequestEntityTooLarge, protocol.CodeBodyTooLarge,
@@ -554,6 +586,9 @@ func (h *Handler) proxy(w http.ResponseWriter, r *http.Request, sess *tunnel.Ses
 	}
 
 	headTimeout := UpstreamTimeout
+	if grpc {
+		headTimeout = grpcHeadTimeout
+	}
 	var idle time.Duration
 	if mc != nil {
 		headTimeout = mc.rt.cfg.HeadTimeout()
@@ -589,6 +624,10 @@ func (h *Handler) proxy(w http.ResponseWriter, r *http.Request, sess *tunnel.Ses
 			if head.ErrCode == protocol.CodeUpstreamTimeout {
 				status = http.StatusGatewayTimeout
 			}
+			if grpc {
+				writeGRPCError(w, grpcStatusUnavailable, head.ErrMsg)
+				return
+			}
 			writeError(w, r, status, head.ErrCode, head.ErrMsg)
 			return
 		}
@@ -620,6 +659,20 @@ func (h *Handler) writeResponse(w http.ResponseWriter, head tunnel.ResponseHead,
 	tp.applyToResponse(dst)
 	w.WriteHeader(head.Status)
 
+	// gRPC / akan yanit: basliklar hemen ziyaretciye gitsin (sunucu ilk mesajdan
+	// once baslik yollayip bekleyebilir; istemci bunu gormeden ilerlemez).
+	//
+	// ISTISNA (trailers-only): grpc-status BASLIKLARDA geldiyse yanit tek HEADERS
+	// + END_STREAM olmali. Erken Flush basliklari END_STREAM'siz yollar, sonra
+	// bos DATA ile kapanir; grpc-go bunu "server closed the stream without
+	// sending trailers" olarak reddeder (grpcurl yansima cagrisi). Flush
+	// edilmezse net/http h2 sunucusu govdesiz yanitta END_STREAM'i basliga koyar.
+	if isGRPCContentType(dst.Get("Content-Type")) && dst.Get("Grpc-Status") == "" {
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+	}
+
 	if !head.HasBody {
 		return
 	}
@@ -640,7 +693,21 @@ func (h *Handler) writeResponse(w http.ResponseWriter, head tunnel.ResponseHead,
 	}
 	if _, err := io.Copy(out, ex.Body()); err != nil {
 		h.Log.Debug("yanit govdesi yazilirken kesildi", "hata", err)
+		return
 	}
+	// Yanit trailer'lari (gRPC grpc-status/grpc-message dahil): govde bitti.
+	if tr := ex.Trailers(); len(tr) > 0 {
+		writeTrailers(w, tr)
+	}
+}
+
+// visitorHTTPMajor, ajana bildirilecek ziyaretci HTTP surumu (yetenek yoksa 0:
+// eski ajanlara yeni alan gitmesin).
+func visitorHTTPMajor(r *http.Request, sess *tunnel.Session) int {
+	if !sess.HTTPTrailers() {
+		return 0
+	}
+	return r.ProtoMajor
 }
 
 // --- yardimcilar -----------------------------------------------------------
@@ -793,6 +860,36 @@ type recorder struct {
 	http.ResponseWriter
 	status  int
 	written int64
+	// in, uzunlugu bilinmeyen (chunked / gRPC) istek govdesinin gercek bayt
+	// sayaci; nil ise bytes_in r.ContentLength'ten gelir.
+	in *countingBody
+}
+
+// countingBody, istek govdesinden ajana/dugume gercekten okunan baytlari sayar.
+type countingBody struct {
+	io.ReadCloser
+	n atomic.Int64
+}
+
+func (c *countingBody) Read(p []byte) (int, error) {
+	n, err := c.ReadCloser.Read(p)
+	if n > 0 {
+		c.n.Add(int64(n))
+	}
+	return n, err
+}
+
+// countUnknownLenBody, ContentLength bilinmeyen (-1) bir istek govdesini sayaca
+// sarar ve r.Body'yi degistirir. Bilinen uzunlukta davranis degismez (bytes_in
+// = ContentLength). Sayilan: govdeden okunup iletilen ham baytlar (gRPC'de 5
+// baytlik mesaj onekleri dahil; HTTP/2 DATA/chunk cercevesi haric).
+func countUnknownLenBody(r *http.Request) *countingBody {
+	if r.ContentLength >= 0 || r.Body == nil || r.Body == http.NoBody {
+		return nil
+	}
+	cb := &countingBody{ReadCloser: r.Body}
+	r.Body = cb
+	return cb
 }
 
 func (rec *recorder) WriteHeader(code int) {
@@ -825,8 +922,11 @@ func captureID(capt *reqlog.Capture) string {
 
 // recordWithID, istegi halka tampona yazar ve dashboard'a olay yayinlar.
 // id bos degilse log kaydi o kimligi kullanir (yakalama ile eslesir).
-func (h *Handler) recordWithID(tunnelID, tenantID string, r *http.Request, rec *recorder, started time.Time, id string) {
+func (h *Handler) recordWithID(tunnelID, tenantID string, _ bool, r *http.Request, rec *recorder, started time.Time, id string) {
 	bytesIn := max(r.ContentLength, 0)
+	if rec.in != nil {
+		bytesIn = rec.in.n.Load()
+	}
 	bytesOut := rec.written
 
 	if h.BandwidthRecorder != nil && tenantID != "" {

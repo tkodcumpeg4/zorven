@@ -64,6 +64,63 @@ var owaspLite = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\b(sqlmap|nikto|nmap|masscan|acunetix|nessus|dirbuster|wpscan|havij)\b`),
 }
 
+// wafHintSrc, yerlesik kurallar icin ucuz on-suzgec: kural ancak alanin kucuk
+// harfli halinde LISTELENEN alt dizgelerden en az biri varsa calistirilir.
+// Davranis DEGISMEZ: her liste, ilgili regex'in eslesebilmesi icin zorunlu olan
+// alt dizgelerdir (bunlar yoksa regex de eslesmez). Yalnizca ASCII alanlara
+// uygulanir (Go'nun (?i) kati katlamasi ASCII disi karakterleri de eslestirir;
+// ASCII disi alanlar suzgecsiz taranir). Regex taramasi temiz bir istekte
+// ~70 us'nin neredeyse tamamiydi.
+var wafHintSrc = map[string][]string{
+	`(?i)union\s+(all\s+)?select`:                         {"union"},
+	`(?i)'\s*or\s+'?1'?\s*=\s*'?1`:                        {"'"},
+	`(?i)\bor\s+1\s*=\s*1\b`:                              {"or"},
+	`(?i);\s*drop\s+table\b`:                              {"drop"},
+	`(?i)\binformation_schema\b`:                          {"information_schema"},
+	`(?i)\b(sleep|benchmark|pg_sleep)\s*\(`:               {"sleep", "benchmark"},
+	`(?i)\bwaitfor\s+delay\b`:                             {"waitfor"},
+	`(?i)<\s*script\b`:                                    {"script"},
+	`(?i)<\s*iframe\b`:                                    {"iframe"},
+	`(?i)javascript:`:                                     {"javascript:"},
+	`(?i)\bon(error|load|click|mouseover)\s*=`:            {"="},
+	`(?i)document\s*\.\s*cookie`:                          {"cookie"},
+	`\.\.[/\\]`:                                           {".."},
+	`(?i)/etc/(passwd|shadow)\b`:                          {"/etc/"},
+	`(?i)\bwin\.ini\b`:                                    {"win.ini"},
+	`(?i)[;|&]\s*(cat|wget|curl|nc|bash|sh|powershell)\s`: {";", "|", "&"},
+	`\$\(.+\)`: {"$("},
+	`(?i)\b(sqlmap|nikto|nmap|masscan|acunetix|nessus|dirbuster|wpscan|havij)\b`: {"sqlmap", "nikto", "nmap", "masscan", "acunetix", "nessus", "dirbuster", "wpscan", "havij"},
+}
+
+// wafHints, derlenmis kural isaretcisi -> on-suzgec listesi.
+var wafHints = func() map[*regexp.Regexp][]string {
+	m := make(map[*regexp.Regexp][]string, len(owaspLite))
+	for _, re := range owaspLite {
+		if h, ok := wafHintSrc[re.String()]; ok {
+			m[re] = h
+		}
+	}
+	return m
+}()
+
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
+}
+
+func hintHit(lower string, hints []string) bool {
+	for _, h := range hints {
+		if strings.Contains(lower, h) {
+			return true
+		}
+	}
+	return false
+}
+
 // wafRuleset, ad -> yerlesik kume. Bilinmeyen ad compileAction'da kurali dusurur.
 func wafRuleset(name string) ([]*regexp.Regexp, bool) {
 	switch strings.ToLower(strings.TrimSpace(name)) {
@@ -121,8 +178,22 @@ func wafScan(r *http.Request, rules []*regexp.Regexp) (string, bool) {
 		}
 	}
 
+	// Kucuk harfli kopya + ASCII bayragi (on-suzgec icin); tek seferlik.
+	lower := make([]string, len(fields))
+	ascii := make([]bool, len(fields))
+	for i, f := range fields {
+		ascii[i] = isASCII(f)
+		if ascii[i] {
+			lower[i] = strings.ToLower(f)
+		}
+	}
+
 	for _, re := range rules {
-		for _, f := range fields {
+		hints := wafHints[re]
+		for i, f := range fields {
+			if hints != nil && ascii[i] && !hintHit(lower[i], hints) {
+				continue
+			}
 			if re.MatchString(f) {
 				return re.String(), true
 			}

@@ -49,7 +49,7 @@ func (h *Handler) enforceTunnelGeo(w http.ResponseWriter, r *http.Request, tun s
 // enforceTunnelWAF, tunelin WAF ayarini uygular. true = istek sonlandirildi.
 // log kipinde istek gecer ama bulgu reqlog'a "waf_log:<kural>" olarak yazilir.
 func (h *Handler) enforceTunnelWAF(w http.ResponseWriter, r *http.Request, tun store.HostRoute, sec *tunsec.Compiled, started time.Time) bool {
-	if !sec.WAFActive() || internalVisitorPath(r.URL.Path) {
+	if !sec.WAFActive() || internalVisitorPath(r.URL.Path) || sec.IsTrusted(clientIP(r)) {
 		return false
 	}
 	hit, found := sec.ScanRequest(r)

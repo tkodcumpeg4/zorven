@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/netip"
 	"os"
@@ -30,6 +31,17 @@ import (
 	"sync/atomic"
 	"time"
 )
+
+// ipListClient, IP listesi indirmeleri icin zaman asimli istemci (ortam vekili korunur).
+var ipListClient = newIPListClient()
+
+func newIPListClient() *http.Client {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.DialContext = (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext
+	tr.TLSHandshakeTimeout = 10 * time.Second
+	tr.ResponseHeaderTimeout = 30 * time.Second
+	return &http.Client{Transport: tr, Timeout: ipListFetchTimeout}
+}
 
 const (
 	// ipListFetchTimeout, tek bir kaynagin indirilmesi icin ust sinir.
@@ -187,7 +199,7 @@ func fetchIPList(ctx context.Context, src string) (string, error) {
 		return "", err
 	}
 	req.Header.Set("User-Agent", "Zorven-IPIntel/1.0")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := ipListClient.Do(req)
 	if err != nil {
 		return "", err
 	}

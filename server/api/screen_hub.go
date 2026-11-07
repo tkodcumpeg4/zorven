@@ -76,6 +76,11 @@ type screen2Viewer struct {
 	locked   bool   // sunucu zorlamali: izleyici kendisi acamaz
 	fileTok  string // dosya aktarimi HTTP uclari icin izleyiciye ozel belirtec (screen_files.go)
 
+	// fpsCap, izleyicinin fps tavani: planin ekran fps degeri ile ajanin yeteneginin
+	// (screen2_fps60) asgarisi. join'de bir kez atanir, sonra degismez; istemcinin
+	// istegine guvenilmez (0 => 30).
+	fpsCap int
+
 	// Katmanli mod (screen_layers.go); hepsi hub.mu altinda.
 	fps, quality, maxWidth int // izleyicinin kendi ayari
 	pref                   int // prefAuto | layerHigh | layerLow
@@ -113,6 +118,10 @@ type screen2Hub struct {
 	curOK   bool // istemci imlec katmani pazarladi mi
 	clipOK  bool // istemci pano pazarladi mi
 	filesOK bool // istemci dosya aktarimi pazarladi mi
+
+	// agentFPSMax, ajanin fps tavani (screen2_fps60 yoksa 30, varsa 60); yayin
+	// yaratilirken atanir, sonra degismez. Kullanim: agentFPSLimit.
+	agentFPSMax int
 
 	// Katmanli mod: ajan FeatureScreen2Layers pazarladiysa true (yayin boyunca sabit).
 	layered   bool
@@ -168,6 +177,20 @@ func (h *screen2Hub) isClosed() bool {
 // ayrilinca birakir.
 func (r *screen2Registry) join(clientID string, agent screen2Agent, o tunnel.Screen2Options,
 	viewOnly, locked bool, release func()) (*screen2Viewer, error) {
+	return r.joinCapped(clientID, agent, o, viewOnly, locked, release, 0)
+}
+
+// joinCapped, join'in izleyici fps tavanini da veren hali. planFPS, kiracinin
+// plan degeridir (entitlements.ScreenStreamSpec.MaxFPS; 0 => bilinmiyor => 30).
+// Izleyicinin tavani min(planFPS, ajan yetenegi)'dir ve istemcinin query/ayar
+// istegiyle ASLA asilamaz.
+func (r *screen2Registry) joinCapped(clientID string, agent screen2Agent, o tunnel.Screen2Options,
+	viewOnly, locked bool, release func(), planFPS int) (*screen2Viewer, error) {
+	agentCap := agentFPSCap(agent)
+	vcap := viewerFPSCap(planFPS, agentCap)
+	if o.FPS > vcap {
+		o.FPS = vcap // istenen fps tavani asamaz (ajana da bu deger gider)
+	}
 	for {
 		r.mu.Lock()
 		if r.hubs == nil {
@@ -185,7 +208,7 @@ func (r *screen2Registry) join(clientID string, agent screen2Agent, o tunnel.Scr
 			h = &screen2Hub{
 				reg: r, clientID: clientID, agent: agent, sid: "scr_" + randomHex(6),
 				ready: make(chan struct{}), viewers: map[*screen2Viewer]struct{}{},
-				opts: o, done: make(chan struct{}),
+				opts: o, done: make(chan struct{}), agentFPSMax: agentCap,
 				raw: make(chan []byte, 128), errs: make(chan protocol.ScreenError, 1),
 				inp: make(chan protocol.ScreenInputStatus, 4),
 				aux: make(chan tunnel.ScreenAux, 64), ctx: ctx, stop: cancel,
@@ -216,7 +239,7 @@ func (r *screen2Registry) join(clientID string, agent screen2Agent, o tunnel.Scr
 				specs, act := computeSpecs([]specIn{{first, o.MaxWidth, o.Quality}})
 				o.Layers = specs
 				h.layered, h.lagent, h.wasActive = true, la, act
-				h.sentSpecs, h.sentFPS = specs, min(resolveFPS(o.FPS), agentFPSMax)
+				h.sentSpecs, h.sentFPS = specs, resolveFPS(o.FPS, vcap)
 			}
 			_, err := agent.OpenScreen2(h.ctx, h.sid, o, h.raw, h.errs)
 			h.openErr = err
@@ -250,6 +273,7 @@ func (r *screen2Registry) join(clientID string, agent screen2Agent, o tunnel.Scr
 			resync: !h.layered, viewOnly: viewOnly || locked, locked: locked, fileTok: randomHex(16),
 			wake: make(chan struct{}, 1), quit: make(chan struct{}),
 			fps: o.FPS, quality: o.Quality, maxWidth: o.MaxWidth, pref: prefFromQuality(o.Quality),
+			fpsCap: vcap,
 		}
 		if h.layered {
 			v.layer = layerHigh
@@ -289,7 +313,7 @@ func (r *screen2Registry) join(clientID string, agent screen2Agent, o tunnel.Scr
 		if inp != nil {
 			v.sendMsg(inp)
 		}
-		v.sendMsg(h.capsMsg())
+		v.sendMsg(h.capsMsg(vcap))
 		v.sendMsg(v.filesMsg())
 		if shapeMsg != nil {
 			v.sendMsg(shapeMsg)
@@ -334,10 +358,19 @@ func settingsMsg(o tunnel.Screen2Options) []byte {
 	return b
 }
 
-// capsMsg, yayinin imlec/pano yeteneklerini panele bildirir.
-func (h *screen2Hub) capsMsg() []byte {
-	b, _ := json.Marshal(map[string]any{"type": "caps", "cursor": h.curOK, "clipboard": h.clipOK, "files": h.filesOK, "video": h.vid.ok})
+// capsMsg, yayinin imlec/pano yeteneklerini ve izleyicinin etkin fps tavanini
+// (maxFPS: plan ve ajan yeteneginin asgarisi) panele bildirir.
+func (h *screen2Hub) capsMsg(maxFPS int) []byte {
+	b, _ := json.Marshal(map[string]any{"type": "caps", "cursor": h.curOK, "clipboard": h.clipOK, "files": h.filesOK, "video": h.vid.ok, "max_fps": maxFPS})
 	return b
+}
+
+// agentFPSLimit, ajanin fps tavani (0 => 30: elle kurulmus yayin).
+func (h *screen2Hub) agentFPSLimit() int {
+	if h.agentFPSMax <= 0 {
+		return protocol.Screen2FPSBase
+	}
+	return h.agentFPSMax
 }
 
 // putCursor, imlec konumunu birlestirmeli yuvaya koyar (eski bekleyen atilir).
@@ -636,6 +669,7 @@ func (v *screen2Viewer) settings(o tunnel.Screen2Options) {
 		return
 	}
 	if o.FPS > 0 {
+		o.FPS = min(o.FPS, v.fpsLimit()) // tavan asilmaz; ajana da kirpilmis deger gider
 		h.opts.FPS = o.FPS
 	}
 	if o.Quality > 0 {

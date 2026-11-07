@@ -15,7 +15,7 @@ func (m *Manager) desktopPath() (string, error) {
 	if base == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
-			return "", fmt.Errorf("ev dizini bulunamadi: %w", err)
+			return "", fmt.Errorf("home directory not found: %w", err)
 		}
 		base = filepath.Join(home, ".config")
 	}
@@ -32,7 +32,7 @@ func (m *Manager) enabled() (bool, error) {
 		return false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("autostart girdisi okunamadi: %w", err)
+		return false, fmt.Errorf("could not read autostart entry: %w", err)
 	}
 	return true, nil
 }
@@ -43,19 +43,19 @@ func (m *Manager) enable() error {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("autostart dizini olusturulamadi: %w", err)
+		return fmt.Errorf("could not create autostart directory: %w", err)
 	}
 
 	// X-GNOME-Autostart-enabled: GNOME'un girdiyi yok saymamasi icin.
 	entry := "[Desktop Entry]\n" +
 		"Type=Application\n" +
 		"Name=" + DisplayName + "\n" +
-		"Exec=" + m.ExecPath + "\n" +
+		"Exec=" + m.ExecPath + " --hidden\n" +
 		"Terminal=false\n" +
 		"X-GNOME-Autostart-enabled=true\n"
 
 	if err := os.WriteFile(path, []byte(entry), 0o644); err != nil {
-		return fmt.Errorf("autostart girdisi yazilamadi: %w", err)
+		return fmt.Errorf("could not write autostart entry: %w", err)
 	}
 	return nil
 }
@@ -66,7 +66,7 @@ func (m *Manager) disable() error {
 		return err
 	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("autostart girdisi silinemedi: %w", err)
+		return fmt.Errorf("could not remove autostart entry: %w", err)
 	}
 	return nil
 }

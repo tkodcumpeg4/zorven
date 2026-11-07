@@ -9,7 +9,7 @@ package updates
 //	{ "posts": [ {...}, {...} ] }
 //
 // Yazi alanlari: slug, kind (release|update|maintenance; bos = update), version,
-// title_tr, body_tr (zorunlu), title_en, body_en, title_ja, body_ja,
+// title_tr, body_tr (zorunlu), title_en, body_en, title_ja, body_ja, title_zh, body_zh,
 // maintenance_start / maintenance_end (RFC3339 veya null), published (bool, vars. false).
 
 import (
@@ -41,6 +41,8 @@ type ImportPost struct {
 	BodyEN           string     `json:"body_en"`
 	TitleJA          string     `json:"title_ja"`
 	BodyJA           string     `json:"body_ja"`
+	TitleZH          string     `json:"title_zh"`
+	BodyZH           string     `json:"body_zh"`
 	MaintenanceStart *time.Time `json:"maintenance_start"`
 	MaintenanceEnd   *time.Time `json:"maintenance_end"`
 	Published        bool       `json:"published"`
@@ -61,7 +63,7 @@ type ParsedItem struct {
 
 var importFields = map[string]bool{
 	"slug": true, "kind": true, "version": true, "title_tr": true, "body_tr": true,
-	"title_en": true, "body_en": true, "title_ja": true, "body_ja": true,
+	"title_en": true, "body_en": true, "title_ja": true, "body_ja": true, "title_zh": true, "body_zh": true,
 	"maintenance_start": true, "maintenance_end": true, "published": true,
 }
 
@@ -139,6 +141,7 @@ func ExportPost(p store.UpdatePost) ImportPost {
 	return ImportPost{
 		Slug: p.Slug, Kind: p.Kind, Version: p.Version,
 		TitleTR: p.TitleTR, BodyTR: p.BodyTR, TitleEN: p.TitleEN, BodyEN: p.BodyEN, TitleJA: p.TitleJA, BodyJA: p.BodyJA,
+		TitleZH: p.TitleZH, BodyZH: p.BodyZH,
 		MaintenanceStart: p.MaintenanceStart, MaintenanceEnd: p.MaintenanceEnd,
 		Published: p.PublishedAt != nil,
 	}

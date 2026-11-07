@@ -15,6 +15,8 @@ const (
 	ctxKeyAPIScopes
 	ctxKeyProject
 	ctxKeyProjectInvalid
+	ctxKeyAPIToken
+	ctxKeyClientPrincipal
 )
 
 // AuthUser, giris yapmis Better Auth kullanicisinin temel bilgileri.
@@ -82,4 +84,29 @@ func withPlatformAdmin(ctx context.Context) context.Context {
 func isPlatformAdmin(ctx context.Context) bool {
 	v, _ := ctx.Value(ctxKeyPlatformAdmin).(bool)
 	return v
+}
+
+// apiTokenInfo, istegi yapan API token'in denetim icin kimligi.
+type apiTokenInfo struct{ ID, Name string }
+
+func withAPIToken(ctx context.Context, id, name string) context.Context {
+	return context.WithValue(ctx, ctxKeyAPIToken, apiTokenInfo{ID: id, Name: name})
+}
+
+func apiTokenFromContext(ctx context.Context) (apiTokenInfo, bool) {
+	v, ok := ctx.Value(ctxKeyAPIToken).(apiTokenInfo)
+	return v, ok
+}
+
+// clientPrincipal, istegin bir istemci (ajan) token'i ile geldigini gosterir.
+// YALNIZCA ag oturumu ucu icin middleware tarafindan konur.
+type clientPrincipal struct{ ClientID, UserID, Name string }
+
+func withClientPrincipal(ctx context.Context, p clientPrincipal) context.Context {
+	return context.WithValue(ctx, ctxKeyClientPrincipal, p)
+}
+
+func clientPrincipalFromContext(ctx context.Context) (clientPrincipal, bool) {
+	v, ok := ctx.Value(ctxKeyClientPrincipal).(clientPrincipal)
+	return v, ok
 }

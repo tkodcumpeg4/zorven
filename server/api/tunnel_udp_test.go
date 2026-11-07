@@ -1,6 +1,7 @@
 package api
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/tkodcumpeg4/zorven/server/store"
@@ -30,5 +31,27 @@ func TestValidateTunnelUDP(t *testing.T) {
 	u := store.TunnelUDP{TunnelID: "t1", IdleTimeoutSec: 30, MaxPacketBytes: 1400, MaxPPS: 5000, MaxFlowPPS: 200, MaxFlows: 64}
 	if e := validateTunnelUDP(u); e != "" {
 		t.Fatalf("oyun sunucusu tipik ayari gecerli olmali: %s", e)
+	}
+}
+
+// PPS alanlarinda 0 "sinirsiz" degil sunucu varsayilani demektir; hata metni
+// bunu yanlis soylememeli.
+func TestValidateTunnelUDPPPSMessageZeroIsServerDefault(t *testing.T) {
+	for name, mut := range map[string]func(*store.TunnelUDP){
+		"tunel pps": func(u *store.TunnelUDP) { u.MaxPPS = -1 },
+		"flow pps":  func(u *store.TunnelUDP) { u.MaxFlowPPS = 1_000_001 },
+	} {
+		u := store.DefaultTunnelUDP("t1")
+		mut(&u)
+		msg := validateTunnelUDP(u)
+		if msg == "" {
+			t.Fatalf("%s: reddedilmeliydi", name)
+		}
+		if !strings.Contains(msg, "0 = sunucu varsayılanı") {
+			t.Errorf("%s: metin 0 = sunucu varsayilani demeli: %q", name, msg)
+		}
+		if strings.Contains(msg, "sınırsız") {
+			t.Errorf("%s: metin sinirsiz dememeli: %q", name, msg)
+		}
 	}
 }

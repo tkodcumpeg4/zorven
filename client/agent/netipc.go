@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -176,6 +177,45 @@ func (a *Agent) NetPaths() ([]localctl.PathInfo, error) {
 	return out, nil
 }
 
+// NetSharesIn: bu cihazin ERISEBILDIGI paylasimlar (netmap shares_in), ada gore
+// sirali. `zorven access <ad>` ile baglanilabilecek hedeflerdir; masaustu
+// arayuzu erisilebilir servis listesi icin kullanir. Zorven Net etkin degilse
+// localctl.ErrNoNet doner.
+func (a *Agent) NetSharesIn() ([]protocol.NetShareIn, error) {
+	_, n, err := a.netRT.get()
+	if err != nil {
+		return nil, err
+	}
+	in := n.State().SharesIn
+	out := make([]protocol.NetShareIn, 0, len(in))
+	for _, s := range in {
+		out = append(out, s)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		x, y := out[i], out[j]
+		if x.Name != y.Name {
+			return x.Name < y.Name
+		}
+		if x.OwnerName != y.OwnerName {
+			return x.OwnerName < y.OwnerName
+		}
+		return x.Port < y.Port
+	})
+	return out, nil
+}
+
+// NetWaitReady: Zorven Net dugumu kayit olup ilk netmap'i alana kadar bekler.
+// Dugum kaydi (netRT.set) netmap'ten ONCE yapildigi icin ShareList/NetSharesIn
+// ilk anlarda bos donebilir; "var mi" karari verecek cagiranlar once bunu bekler.
+// Zorven Net etkin degilse localctl.ErrNoNet doner.
+func (a *Agent) NetWaitReady(ctx context.Context) error {
+	_, n, err := a.netRT.get()
+	if err != nil {
+		return err
+	}
+	return n.WaitReady(ctx)
+}
+
 // pathSummary: izinli esler arasindaki cevrimici olanlarin yol ozeti.
 func pathSummary(allow []string, paths []wgnet.PathInfo) string {
 	by := map[string]wgnet.PathInfo{}
@@ -211,7 +251,10 @@ func (a *Agent) AccessOpen(ctx context.Context, target, local string) (string, e
 	if err != nil {
 		return "", err
 	}
-	h, _, err := net.SplitHostPort(local)
+	if strings.TrimSpace(local) == "" {
+		local = "127.0.0.1:"
+	}
+	h, lport, err := net.SplitHostPort(local)
 	if err != nil {
 		return "", fmt.Errorf("gecersiz yerel adres %q (host:port)", local)
 	}
@@ -222,9 +265,13 @@ func (a *Agent) AccessOpen(ctx context.Context, target, local string) (string, e
 		return "", fmt.Errorf("zorven net hazir degil: %w", err)
 	}
 	target = strings.TrimSpace(target)
-	proto, err := n.ShareProto(target)
+	sh, err := n.Resolve(target)
 	if err != nil {
 		return "", err
+	}
+	proto := sh.Proto
+	if lport == "" { // port verilmedi: paylasimin kendi portu
+		local = net.JoinHostPort(h, strconv.Itoa(sh.Port))
 	}
 	lctx, cancel := context.WithCancel(rctx)
 	dial := func(c context.Context) (net.Conn, error) { return n.DialShare(c, target) }

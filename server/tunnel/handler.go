@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/tkodcumpeg4/zorven/server/events"
 	"log/slog"
 	"net"
 	"net/http"
@@ -52,6 +53,10 @@ type Handler struct {
 	OnClientConnected    func(ctx context.Context, clientID string)
 	OnClientDisconnected func(ctx context.Context, clientID string)
 
+	// Events (opsiyonel): istemci cevrimici/cevrimdisi oldugunda panele SSE olayi
+	// (client.connected / client.disconnected) yayinlar; nil ise yayinlanmaz.
+	Events *events.Broker
+
 	// Net, Zorven Net kontrol duzlemi (nil ise wg_net pazarlanmaz).
 	Net *netctl.Manager
 }
@@ -83,15 +88,21 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Ayni istemci ikinci kez baglanamaz (api_contract.md §2: 409).
-	// Upgrade'den ONCE kontrol ediyoruz ki duz HTTP hatasi donebilelim.
-	if _, already := h.Hub.Get(client.ID); already {
-		http.Error(w, "bu istemci zaten bagli", http.StatusConflict)
+	// Ayni istemcinin yeni dogrulanmis baglantisi eskisini DEVRALIR (uyku/ag
+	// degisimi sonrasi yari olu soket yuzunden 409 kilitlenmesi olmasin). Yalniz
+	// devralmalar ping-pong yapiyorsa (iki canli istemci ayni anahtarla) 429.
+	if h.Hub.TakeoverBlocked(client.ID) {
+		h.Log.Warn("devralma ping-pong: ayni anahtar birden fazla istemcide", "client", client.ID)
+		w.Header().Set("Retry-After", "30")
+		http.Error(w, "bu cihaz anahtari ayni anda birden fazla istemcide kullaniliyor", http.StatusTooManyRequests)
 		return
 	}
 
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		// Tarayici kaynakli baglanti beklemiyoruz; istemci bir CLI.
+		// Tarayici kaynakli baglanti beklemiyoruz; istemci bir CLI/agent (Origin
+		// gondermez) ve kimlik Bearer anahtariyla dogrulanir, bu yuzden Origin
+		// denetimi uygulanmaz. (CSWSH riski yok: capraz sitede Authorization
+		// basligi eklenemez.)
 		InsecureSkipVerify: true,
 	})
 	if err != nil {
@@ -106,6 +117,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sessionID := "ses_" + randomHex(4)
 	sess := NewSession(sessionID, client.ID, client.Name, r.RemoteAddr, conn, h.Log)
 	sess.TenantID = client.TenantID
+	sess.UserID = client.UserID
+
+	sess.onDeviceUpdate = func(ctx context.Context, upd protocol.DeviceUpdate) {
+		if upd.Hostname == "" && len(upd.IPs) == 0 {
+			return
+		}
+		if err := h.Store.UpdateDeviceInfo(ctx, sess.ClientID, store.DeviceInfo{Hostname: upd.Hostname, IPs: upd.IPs}); err != nil {
+			h.Log.Warn("cihaz guncellemesi kaydedilemedi", "client", sess.ClientID, "hata", err)
+		}
+	}
 
 	ctx := r.Context()
 	if err := h.handshake(ctx, sess); err != nil {
@@ -114,16 +135,27 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.Hub.Register(sess); err != nil {
-		// Upgrade ile handshake arasinda yaris olabilir; ikinci baglantiyi kapat.
-		conn.Close(websocket.StatusPolicyViolation, "already connected")
+	old, err := h.Hub.Takeover(sess)
+	if err != nil {
+		conn.Close(websocket.StatusTryAgainLater, "takeover throttled")
 		return
+	}
+	if old != nil {
+		h.Log.Info("eski oturum yeni baglantiyla degistirildi", "client", client.ID, "eski", old.ID, "yeni", sess.ID)
+		old.Evict("replaced by newer connection")
 	}
 	if h.OnClientConnected != nil {
 		h.OnClientConnected(ctx, client.ID)
 	}
+	if h.Events != nil {
+		h.Events.PublishTenant(sess.TenantID, events.TypeClientConnected, map[string]string{"client_id": client.ID})
+	}
 	defer func() {
-		h.Hub.Unregister(sess)
+		if !h.Hub.Unregister(sess) {
+			// Devralindi: istemci hala bagli (yeni oturum); cevrimdisi olayi
+			// YAYILMAZ.
+			return
+		}
 		// Kopus aninda "en son gorulme"yi damgala: cihaz offline oldugunda
 		// panelde ne zamandir kayip oldugu gorunsun. Istegin ctx'i iptal olmus
 		// olabilecegi icin arka plan ctx kullaniliyor.
@@ -132,6 +164,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.Log.Warn("son gorulme damgalanamadi", "client", client.ID, "hata", err)
 		}
 		cancel()
+		if h.Events != nil {
+			h.Events.PublishTenant(sess.TenantID, events.TypeClientDisconnected, map[string]string{"client_id": client.ID})
+		}
 		if h.OnClientDisconnected != nil {
 			h.OnClientDisconnected(context.Background(), client.ID)
 		}
@@ -170,7 +205,12 @@ func (h *Handler) authenticate(w http.ResponseWriter, r *http.Request) (store.Cl
 		// yaparak iki yolun maliyetini esitliyoruz.
 		auth.VerifyDummy(secret)
 		if !errors.Is(err, store.ErrNotFound) {
+			// Veritabani hatasi "token gecersiz" DEGILDIR: 401 istemciyi kalici durdurur
+			// (FatalSessionError); 503 ile istemci geri cekilip yeniden dener.
 			h.Log.Error("istemci sorgulanamadi", "hata", err)
+			w.Header().Set("Retry-After", "5")
+			http.Error(w, "gecici hata, tekrar deneyin", http.StatusServiceUnavailable)
+			return store.Client{}, false
 		}
 		http.Error(w, "gecersiz token", http.StatusUnauthorized)
 		return store.Client{}, false
@@ -250,6 +290,10 @@ func (h *Handler) handshake(ctx context.Context, s *Session) error {
 			s.flowControl = true
 			enabled = append(enabled, protocol.FeatureFlowControl)
 		}
+		if f == protocol.FeatureHTTPTrailers {
+			s.httpTrailers = true
+			enabled = append(enabled, protocol.FeatureHTTPTrailers)
+		}
 		if f == protocol.FeatureScreenInputStatus {
 			s.screenInputStatus = true
 			enabled = append(enabled, protocol.FeatureScreenInputStatus)
@@ -278,6 +322,10 @@ func (h *Handler) handshake(ctx context.Context, s *Session) error {
 			s.screen2Video = true
 			enabled = append(enabled, protocol.FeatureScreen2Video)
 		}
+		if f == protocol.FeatureScreen2FPS60 {
+			s.screen2FPS60 = true
+			enabled = append(enabled, protocol.FeatureScreen2FPS60)
+		}
 		if f == protocol.FeatureScreenFiles {
 			s.screenFiles = true
 			enabled = append(enabled, protocol.FeatureScreenFiles)
@@ -286,6 +334,10 @@ func (h *Handler) handshake(ctx context.Context, s *Session) error {
 			s.SetUDPProbe(true)
 			enabled = append(enabled, protocol.FeatureUDPProbe)
 		}
+		if f == protocol.FeatureDeviceUpdate {
+			s.deviceUpdate = true
+			enabled = append(enabled, protocol.FeatureDeviceUpdate)
+		}
 		if f == protocol.FeatureScreenClipboard {
 			s.screenClipboard = true
 			enabled = append(enabled, protocol.FeatureScreenClipboard)
@@ -293,6 +345,7 @@ func (h *Handler) handshake(ctx context.Context, s *Session) error {
 	}
 
 	enabled = append(enabled, s.negotiateNet(h.Net, hello.Features)...)
+	s.features = append([]string(nil), enabled...)
 
 	tunnels, err := h.Store.ListTunnelsByClient(ctx, s.ClientID)
 	if err != nil {

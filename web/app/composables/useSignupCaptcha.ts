@@ -77,7 +77,7 @@ export function useSignupCaptcha() {
       widgetId = window.zorvenCaptcha!.render(el, {
         sitekey,
         theme: 'auto',
-        lang: locale.value === 'ja' || locale.value === 'en' || locale.value === 'tr' ? locale.value : 'auto',
+        lang: ['tr', 'en', 'ja', 'zh'].includes(locale.value) ? locale.value : 'auto',
         callback: (t: string) => { token.value = t },
         'expired-callback': () => { token.value = '' },
         'error-callback': () => { token.value = ''; status.value = 'error' },

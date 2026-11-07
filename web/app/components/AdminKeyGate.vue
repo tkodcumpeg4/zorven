@@ -49,8 +49,20 @@ watch([activeTab, captchaEl], async ([tab, el]) => {
     captcha.unmount()
   }
 })
-onMounted(() => { captcha.loadConfig() })
-onBeforeUnmount(() => captcha.unmount())
+// Şifre sıfırlama isteği CAPTCHA'sı (aynı platform ayarı; ayrı widget örneği).
+const forgotCaptcha = useSignupCaptcha()
+const forgotCaptchaEl = ref<HTMLElement | null>(null)
+const forgotOpen = ref(false)
+watch([forgotOpen, forgotCaptchaEl, activeTab], async ([open, el, tab]) => {
+  if (open && el && tab === 'signin') {
+    await nextTick()
+    await forgotCaptcha.mount(el)
+  } else {
+    forgotCaptcha.unmount()
+  }
+})
+onMounted(() => { captcha.loadConfig(); forgotCaptcha.loadConfig() })
+onBeforeUnmount(() => { captcha.unmount(); forgotCaptcha.unmount() })
 
 async function resendVerification() {
   resendBusy.value = true
@@ -75,12 +87,20 @@ const forgotSent = ref(false)
 async function handleForgot() {
   error.value = ''
   if (!email.value.trim()) { error.value = t('auth.errForgotEmailFirst'); return }
+  if (forgotCaptcha.enabled.value) {
+    // Platform CAPTCHA açık: önce widget gösterilir, çözülünce istek gider.
+    if (!forgotOpen.value) { forgotOpen.value = true; return }
+    if (!forgotCaptcha.token.value) { error.value = t('auth.captchaRequired'); return }
+  }
   loading.value = true
   try {
-    await requestPasswordReset(email.value.trim())
+    await requestPasswordReset(email.value.trim(), forgotCaptcha.token.value)
     forgotSent.value = true
+    forgotOpen.value = false
   } catch (err: any) {
     error.value = err.message || t('auth.errForgotFailed')
+    // Jeton tek kullanımlık.
+    if (forgotCaptcha.enabled.value) forgotCaptcha.reset()
   } finally {
     loading.value = false
   }
@@ -389,6 +409,12 @@ async function handleKeySubmit() {
         </button>
       </div>
 
+      <!-- Hesap silindikten sonra (e-posta baglantisi /?accountDeleted=1 adresine doner) -->
+      <p v-if="route.query.accountDeleted === '1'" role="status" class="mt-4 flex items-start gap-2 rounded-lg border border-accent/30 bg-accent/10 p-3 text-xs text-accent">
+        <Icon name="lucide:circle-check" class="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+        <span>{{ t('account.deleted.notice') }}</span>
+      </p>
+
       <!-- Error Alert -->
       <div v-if="error" class="mt-4 flex items-start gap-2 rounded-lg border border-danger/30 bg-danger/10 p-3 text-xs text-danger">
         <Icon name="lucide:alert-circle" class="size-4 shrink-0 mt-0.5" />
@@ -446,7 +472,12 @@ async function handleKeySubmit() {
           <span>{{ t('auth.forgotSent') }}</span>
         </div>
         <div v-else class="text-center">
-          <button type="button" class="cursor-pointer text-xs text-fg-muted hover:text-accent hover:underline" @click="handleForgot">
+          <div v-if="forgotOpen && forgotCaptcha.enabled.value" class="mb-2 min-h-[3.5rem] text-left">
+            <div ref="forgotCaptchaEl" />
+            <p v-if="forgotCaptcha.status.value === 'loading'" class="mt-1 text-[11px] text-fg-subtle">{{ t('auth.captchaLoading') }}</p>
+            <p v-else-if="forgotCaptcha.status.value === 'error'" class="mt-1 text-[11px] text-danger">{{ t('auth.captchaUnavailable') }}</p>
+          </div>
+          <button type="button" class="cursor-pointer text-xs text-fg-muted hover:text-accent hover:underline" :disabled="loading || (forgotOpen && forgotCaptcha.enabled.value && !forgotCaptcha.token.value)" @click="handleForgot">
             {{ t('auth.forgotPassword') }}
           </button>
         </div>

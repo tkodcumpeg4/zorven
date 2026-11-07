@@ -2,6 +2,7 @@ package bandwidth
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -19,7 +20,9 @@ type LocalUsageRecorder struct {
 	deltasMu sync.Mutex
 	// deltas: donem ("2006-01") -> tenantID -> [bytesIn, bytesOut]. Donem
 	// anahtari, ay sonunda biriken trafigin yeni aya yazilmasini onler.
-	deltas map[string]map[string][2]int64
+	deltas       map[string]map[string][2]int64
+	logMu        sync.Mutex
+	lastFlushLog time.Time
 
 	stopChan chan struct{}
 	once     sync.Once
@@ -172,11 +175,46 @@ func (r *LocalUsageRecorder) Flush(ctx context.Context) error {
 
 	var firstErr error
 	for period, byTenant := range batchCopy {
-		if err := r.st.FlushBandwidthDeltas(ctx, period, byTenant); err != nil && firstErr == nil {
-			firstErr = err
+		if err := r.st.FlushBandwidthDeltas(ctx, period, byTenant); err != nil {
+			// Yazilamayan farklar kaybolmasin (kota/fatura dogrulugu): bellek
+			// sayaclarina geri EKLE (yeni gelen artislarin uzerine yazmadan).
+			r.restoreDeltas(period, byTenant)
+			r.logFlushFailure(err)
+			if firstErr == nil {
+				firstErr = err
+			}
 		}
 	}
 	return firstErr
+}
+
+// restoreDeltas, basarisiz bir flush'in farklarini canli tampona toplar.
+func (r *LocalUsageRecorder) restoreDeltas(period string, byTenant map[string][2]int64) {
+	r.deltasMu.Lock()
+	defer r.deltasMu.Unlock()
+	dst := r.deltas[period]
+	if dst == nil {
+		dst = make(map[string][2]int64, len(byTenant))
+		r.deltas[period] = dst
+	}
+	for tenantID, d := range byTenant {
+		cur := dst[tenantID]
+		cur[0] += d[0]
+		cur[1] += d[1]
+		dst[tenantID] = cur
+	}
+}
+
+// logFlushFailure, tekrarlayan flush hatalarini dakikada en fazla bir kez loglar.
+func (r *LocalUsageRecorder) logFlushFailure(err error) {
+	r.logMu.Lock()
+	defer r.logMu.Unlock()
+	now := r.now()
+	if !r.lastFlushLog.IsZero() && now.Sub(r.lastFlushLog) < time.Minute {
+		return
+	}
+	r.lastFlushLog = now
+	slog.Warn("bandwidth: trafik farklari veritabanina yazilamadi; bellekte tutulup tekrar denenecek", "hata", err)
 }
 
 func (r *LocalUsageRecorder) flushLoop() {

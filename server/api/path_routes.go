@@ -3,8 +3,6 @@ package api
 import (
 	"net/http"
 	"strings"
-
-	"github.com/tkodcumpeg4/zorven/server/store"
 )
 
 // FAZ 6.5 — yol tabanlı yönlendirme uçları (hostname bazlı).
@@ -32,10 +30,11 @@ func (s *Server) listPathRoutes(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	if routes == nil {
-		routes = []store.PathRoute{}
+	pg, okPg := pageOf(w, r)
+	if !okPg {
+		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"fqdn": h.FQDN, "routes": routes})
+	writeJSON(w, http.StatusOK, map[string]any{"fqdn": h.FQDN, "routes": slicePage(w, pg, routes)})
 }
 
 func (s *Server) addPathRoute(w http.ResponseWriter, r *http.Request) {

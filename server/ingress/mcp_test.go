@@ -39,7 +39,7 @@ type agentResp struct {
 }
 
 type fakeAgent struct {
-	t       *testing.T
+	t       testing.TB
 	agent   *websocket.Conn
 	mu      sync.Mutex
 	reqs    []agentReq
@@ -53,7 +53,7 @@ func (a *fakeAgent) requests() []agentReq {
 	return append([]agentReq(nil), a.reqs...)
 }
 
-func newFakeAgent(t *testing.T, hub *tunnel.Hub, clientID string, handler func(agentReq) agentResp) *fakeAgent {
+func newFakeAgent(t testing.TB, hub *tunnel.Hub, clientID string, handler func(agentReq) agentResp) *fakeAgent {
 	t.Helper()
 	ready := make(chan *tunnel.Session, 1)
 	ctx, cancel := context.WithCancel(context.Background())

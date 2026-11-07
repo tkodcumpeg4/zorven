@@ -15,13 +15,13 @@ import (
 var _ store.UpdatesStore = (*Store)(nil)
 
 const updatePostCols = `id, slug, kind, version, title_tr, body_tr, title_en, body_en, title_ja, body_ja,
-	maintenance_start, maintenance_end, published_at, created_by, created_at, updated_at, emailed_at, email_stats`
+	title_zh, body_zh, maintenance_start, maintenance_end, published_at, created_by, created_at, updated_at, emailed_at, email_stats`
 
 func scanUpdatePost(row pgx.Row) (store.UpdatePost, error) {
 	var p store.UpdatePost
 	var stats []byte
 	err := row.Scan(&p.ID, &p.Slug, &p.Kind, &p.Version, &p.TitleTR, &p.BodyTR, &p.TitleEN, &p.BodyEN,
-		&p.TitleJA, &p.BodyJA, &p.MaintenanceStart, &p.MaintenanceEnd, &p.PublishedAt, &p.CreatedBy,
+		&p.TitleJA, &p.BodyJA, &p.TitleZH, &p.BodyZH, &p.MaintenanceStart, &p.MaintenanceEnd, &p.PublishedAt, &p.CreatedBy,
 		&p.CreatedAt, &p.UpdatedAt, &p.EmailedAt, &stats)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return p, store.ErrNotFound
@@ -44,7 +44,7 @@ func mapUpdateErr(err error) error {
 }
 
 func (s *Store) ListUpdatePosts(ctx context.Context, onlyPublished bool, limit, offset int) ([]store.UpdatePost, int, error) {
-	if limit <= 0 || limit > 200 {
+	if limit <= 0 || limit > 500 {
 		limit = 50
 	}
 	if offset < 0 {
@@ -92,11 +92,11 @@ func (s *Store) CreateUpdatePost(ctx context.Context, p store.UpdatePost) (store
 	p.ID = newID("upd")
 	row := s.pool.QueryRow(ctx,
 		`INSERT INTO updates_posts (id, slug, kind, version, title_tr, body_tr, title_en, body_en, title_ja, body_ja,
-			maintenance_start, maintenance_end, created_by)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+			maintenance_start, maintenance_end, created_by, title_zh, body_zh)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
 		 RETURNING `+updatePostCols,
 		p.ID, p.Slug, p.Kind, p.Version, p.TitleTR, p.BodyTR, p.TitleEN, p.BodyEN, p.TitleJA, p.BodyJA,
-		p.MaintenanceStart, p.MaintenanceEnd, p.CreatedBy)
+		p.MaintenanceStart, p.MaintenanceEnd, p.CreatedBy, p.TitleZH, p.BodyZH)
 	out, err := scanUpdatePost(row)
 	if err != nil {
 		return out, mapUpdateErr(err)
@@ -107,10 +107,10 @@ func (s *Store) CreateUpdatePost(ctx context.Context, p store.UpdatePost) (store
 func (s *Store) UpdateUpdatePost(ctx context.Context, p store.UpdatePost) (store.UpdatePost, error) {
 	row := s.pool.QueryRow(ctx,
 		`UPDATE updates_posts SET slug=$2, kind=$3, version=$4, title_tr=$5, body_tr=$6, title_en=$7, body_en=$8,
-			title_ja=$9, body_ja=$10, maintenance_start=$11, maintenance_end=$12, updated_at=now()
+			title_ja=$9, body_ja=$10, maintenance_start=$11, maintenance_end=$12, title_zh=$13, body_zh=$14, updated_at=now()
 		 WHERE id=$1 RETURNING `+updatePostCols,
 		p.ID, p.Slug, p.Kind, p.Version, p.TitleTR, p.BodyTR, p.TitleEN, p.BodyEN, p.TitleJA, p.BodyJA,
-		p.MaintenanceStart, p.MaintenanceEnd)
+		p.MaintenanceStart, p.MaintenanceEnd, p.TitleZH, p.BodyZH)
 	out, err := scanUpdatePost(row)
 	if err != nil {
 		return out, mapUpdateErr(err)

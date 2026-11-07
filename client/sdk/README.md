@@ -25,7 +25,7 @@ sess.Wait()                            // block until the tunnel closes
 | `Target` | **required** — `"8080"`, `"localhost:8080"` or `"http://localhost:8080"` |
 | `ServerAddr` | default `"zorven.app:443"` |
 | `Insecure` | `ws://` for local dev |
-| `NoTerminal` / `NoScreen` | disable remote shell / screen (recommended for embedded use) |
+| `EnableTerminal` / `EnableScreen` | opt in to remote shell / screen sharing (both OFF by default; `NoTerminal` / `NoScreen` are deprecated force-off flags) |
 | `ConnectTimeout` | default 30s |
 
 `Session`: `URL()`, `URLs()`, `ClientID()`, `Wait() error`, `Close() error`.

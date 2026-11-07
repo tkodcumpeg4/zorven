@@ -4,6 +4,7 @@ import type { AgentStats, BrowserPerf } from '~/lib/screenPerf'
 import { STAGE_KEYS, effectiveQuality, findBottleneck, fmtMs, layerTargetFps } from '~/lib/screenPerf'
 import type { VideoInfo, VideoPref } from '~/lib/screenVideo'
 import { loadVideoPref, saveVideoPref } from '~/lib/screenVideo'
+import { clampFps, effectiveFpsLimit, fpsOptions } from '~/lib/screenFps'
 import { FileTransferError, MAX_FILE_BYTES } from '~/composables/useScreenFiles'
 import type { RemoteFile } from '~/composables/useScreenFiles'
 
@@ -344,7 +345,28 @@ function sendShortcut(id: string) {
   sendInput(handle.ws, { kind: 'keyup', key: sc.combo.key, code: sc.combo.code, repeat: false, ...m })
 }
 
+// Uzak makinede goruntu/girdi kisitlamasi (guvenli masaustu, yakalama yeniden
+// deneme, pano siniri). Girdi durumu rozetinden AYRI tutulur.
+const degraded = ref('')
+let degradedTimer: ReturnType<typeof setTimeout> | undefined
+const DEGRADED_KEYS: Record<string, string> = {
+  secure_desktop: 'screen.degradedSecureDesktop',
+  capture_retry: 'screen.degradedCaptureRetry',
+  clipboard_too_large: 'screen.degradedClipboardTooLarge',
+}
+const degradedText = computed(() => (degraded.value && DEGRADED_KEYS[degraded.value]) ? t(DEGRADED_KEYS[degraded.value]!) : '')
+function onDegraded(detail: string) {
+  clearTimeout(degradedTimer)
+  degraded.value = detail
+  // Pano uyarisi bir olaydir (kalici durum degil): kendiliginden kapanir.
+  if (detail === 'clipboard_too_large') degradedTimer = setTimeout(() => { degraded.value = '' }, 8000)
+}
+
 function onInputStatusMsg(s: ScreenInputStatus) {
+  if (s.state === 'degraded') {
+    onDegraded(s.detail || '')
+    return
+  }
   inputStatus.value = s
   if (sasPending && s.state !== 'ok') {
     sasPending = false
@@ -444,8 +466,15 @@ const nativeH = ref(0)
 const frameW = ref(0) // su an gelen karenin boyutu
 const frameH = ref(0)
 const selectedWidth = ref(0) // 0 => tam cozunurluk
-const selectedFps = ref(30) // hedef kare hizi (sunucu 30'da sinirlar; ajan agda otomatik dusurur)
-const FPS_OPTIONS = [5, 10, 15, 20, 30]
+const selectedFps = ref(30) // hedef kare hizi (varsayilan 30; 60 yalniz acikca secilir, ajan agda otomatik dusurur)
+// Kare hizi tavani: biletteki plan degeri (Team/Enterprise 60, digerleri 30) ile WS'teki
+// caps.max_fps'in (plan + ajan yetenegi; eski ajanda 30) asgarisi. Sunucu zaten zorlar;
+// 45/60 yalniz tavan izin veriyorsa listelenir.
+const planFps = ref(30)
+const capsFps = ref<number | undefined>(undefined)
+const fpsLimit = computed(() => effectiveFpsLimit(planFps.value, capsFps.value))
+const fpsList = computed(() => fpsOptions(fpsLimit.value))
+watch(fpsLimit, (lim) => { selectedFps.value = clampFps(selectedFps.value, lim) })
 
 // Yaygin en-boy oranlari icin standart yukseklik merdivenleri.
 const RATIO_LADDERS = [
@@ -598,6 +627,7 @@ function onPointerDown(e: PointerEvent) {
   // Pointer capture: fare sahne DISINA ciksa da olaylar gelmeye devam eder.
   // Olmadan surukleme (pencere tasima, metin secme) yarida kopuyordu.
   try { (e.currentTarget as Element).setPointerCapture(e.pointerId) } catch { /* destegi yoksa yok say */ }
+  focusIme()
   lastPoint = p
   // Bekleyen hareketi once bosalt: tiklama dogru konumda olmali.
   flushMove()
@@ -636,15 +666,31 @@ function onWheel(e: WheelEvent) {
   })
 }
 
+// Basili tuslar (code -> key): odak kaybinda hepsi birakilir (yalniz modifier degil).
+const heldKeys = new Map<string, string>()
+// IME bilesimi sirasinda yutulan tuslar: ayni tusun keyup'i da yutulur.
+const swallowedCodes = new Set<string>()
+let composing = false
+
 function onKey(kind: string, e: KeyboardEvent) {
   if (!control.value || !handle) return
   // Sayfanin kendi form elemanlarinda (cozunurluk secimi) yazarken tuslari
-  // uzak makineye gondermeyelim.
+  // uzak makineye gondermeyelim. Istisna: uzak girdi icin gizli IME kutusu.
   const el = e.target as HTMLElement | null
-  if (el && /^(INPUT|SELECT|TEXTAREA)$/.test(el.tagName)) return
+  if (el && /^(INPUT|SELECT|TEXTAREA)$/.test(el.tagName) && !el.hasAttribute('data-remote-ime')) return
+
+  // IME bilesimi (Cince/Japonca/Korece, emoji paleti): tuslar bilesime aittir,
+  // uzak makineye tek tek GITMEZ; sonuc compositionend'de "text" olarak gider.
+  if (e.isComposing || composing || e.key === 'Process' || e.keyCode === 229) {
+    if (kind === 'keydown') swallowedCodes.add(e.code)
+    return
+  }
+  if (kind === 'keyup' && swallowedCodes.delete(e.code)) return
 
   // Tarayici kisayollarini (F5, Ctrl+W...) uzak makineye gecirmek icin engelle.
   e.preventDefault()
+  if (kind === 'keydown') heldKeys.set(e.code, e.key)
+  else heldKeys.delete(e.code)
   sendInput(handle.ws, {
     kind,
     key: e.key,
@@ -679,9 +725,48 @@ function onKeyUp(e: KeyboardEvent) {
  */
 function releaseModifiers() {
   if (!handle) return
+  // Basili HER tusu birak (yalniz modifier degil): odak degisince keyup gelmez.
+  for (const [code, key] of heldKeys) {
+    sendInput(handle.ws, { kind: 'keyup', key, code, ctrl: false, shift: false, alt: false, meta: false })
+  }
+  heldKeys.clear()
+  swallowedCodes.clear()
   for (const [key, code] of [['Control', 'ControlLeft'], ['Shift', 'ShiftLeft'], ['Alt', 'AltLeft'], ['Meta', 'MetaLeft']] as const) {
     sendInput(handle.ws, { kind: 'keyup', key, code, ctrl: false, shift: false, alt: false, meta: false })
   }
+}
+
+/**
+ * Gizli IME kutusu: bilesim (compositionend) ve paletten gelen metin
+ * (emoji, giris yontemi) burada yakalanip "text" olarak uzak makineye gonderilir.
+ * Normal yazim tus olaylariyla (keydown/keyup) gider; bu kutu yalniz IME icin.
+ */
+const imeInput = ref<HTMLTextAreaElement | null>(null)
+function sendText(text: string) {
+  if (!text || !handle || !control.value) return
+  // Istemci en fazla 4096 bayt kabul eder; uzun metni parcala.
+  const chunk = 1024
+  const units = Array.from(text)
+  for (let i = 0; i < units.length; i += chunk) {
+    sendInput(handle.ws, { kind: 'text', key: units.slice(i, i + chunk).join('') })
+  }
+}
+function onCompositionStart() { composing = true }
+function onCompositionEnd(e: CompositionEvent) {
+  composing = false
+  sendText(e.data)
+  if (imeInput.value) imeInput.value.value = ''
+}
+function onImeInput(e: Event) {
+  const ev = e as InputEvent
+  // Bilesim sirasindaki input'lar compositionend'de tek seferde gonderilir.
+  if (ev.isComposing || composing) return
+  // Bilesim disi ekleme (emoji paleti, sesli yazim): metni gonder.
+  if (ev.data) sendText(ev.data)
+  if (imeInput.value) imeInput.value.value = ''
+}
+function focusIme() {
+  if (control.value) imeInput.value?.focus({ preventScroll: true })
 }
 
 /**
@@ -701,6 +786,7 @@ async function open(maxWidth: number) {
   viewerState.value = null
   viewers.value = null
   caps.value = { cursor: false, clipboard: false, files: false }
+  capsFps.value = undefined // yeni oturum: ajan tavani WS'ten yeniden gelir
   filesState.value = { enabled: false, controller: false, token: '' }
   cursorPos.value = null
   cursorShape.value = null
@@ -749,7 +835,11 @@ async function open(maxWidth: number) {
       videoMode: () => videoMode.value,
       onVideoInfo: (i) => { videoInfo.value = i },
       onInputStatus: onInputStatusMsg,
-      onCaps: (c) => { caps.value = c },
+      onCaps: (c) => {
+        caps.value = { cursor: c.cursor, clipboard: c.clipboard, files: c.files }
+        capsFps.value = c.maxFps
+      },
+      onPlanLimits: (l) => { planFps.value = l.maxFps },
       onFiles: (f) => { filesState.value = f },
       onCursor: (c) => { cursorPos.value = c; schedulePlaceCursor() },
       onCursorShape: (s) => {
@@ -926,10 +1016,10 @@ onUnmounted(() => {
           <select
             v-model.number="selectedFps"
             class="cursor-pointer rounded border border-line bg-bg px-2 py-1.5 font-mono text-[11px] text-fg-muted focus:border-accent"
-            :title="t('screen.fpsHint')"
+            :title="fpsLimit > 30 ? t('screen.fpsHintHigh') : t('screen.fpsHint')"
             @change="onResolutionChange"
           >
-            <option v-for="f in FPS_OPTIONS" :key="f" :value="f">{{ f }} FPS</option>
+            <option v-for="f in fpsList" :key="f" :value="f">{{ f }} FPS</option>
           </select>
         </label>
 
@@ -1149,6 +1239,15 @@ onUnmounted(() => {
         <p class="text-fg-subtle">{{ t('screen.mEncode') }}</p>
         <p class="text-fg">{{ stats.encodeMs ? stats.encodeMs + ' ms' : '—' }}</p>
       </div>
+    </div>
+
+    <div
+      v-if="degradedText"
+      class="flex items-center gap-2 rounded-lg border border-warn/30 bg-warn/10 px-4 py-2 text-xs text-warn"
+      role="status"
+    >
+      <Icon name="lucide:shield-alert" class="size-3.5 shrink-0" aria-hidden="true" />
+      <span>{{ degradedText }}</span>
     </div>
 
     <div
@@ -1378,6 +1477,8 @@ onUnmounted(() => {
       @pointerdown="onPointerDown"
       @pointerup="onPointerUp"
       @pointercancel="onPointerUp"
+      @mouseup.prevent
+      @auxclick.prevent
       @contextmenu.prevent
       @wheel="onWheel"
       @dragenter="onDragOver"
@@ -1388,6 +1489,22 @@ onUnmounted(() => {
       <img ref="img" hidden :alt="t('screen.remoteScreenAlt')" class="max-h-[80vh] max-w-full object-contain" draggable="false">
       <video ref="video" hidden muted playsinline class="max-h-[80vh] max-w-full object-contain" />
       <canvas ref="canvas" hidden class="max-h-[80vh] max-w-full object-contain" />
+
+      <!-- Gizli IME kutusu: bilesim/emoji metni "text" olarak gider; normal yazim tus olaylariyla -->
+      <textarea
+        v-if="control"
+        ref="imeInput"
+        data-remote-ime
+        class="pointer-events-none absolute left-0 top-0 size-px resize-none opacity-0"
+        tabindex="-1"
+        autocomplete="off"
+        autocapitalize="off"
+        spellcheck="false"
+        :aria-label="t('screen.imeHint')"
+        @compositionstart="onCompositionStart"
+        @compositionend="onCompositionEnd"
+        @input="onImeInput"
+      />
 
       <!-- Uzak imlec katmani: kareler imleci icermez; konum/bicim ayri gelir -->
       <div

@@ -147,8 +147,16 @@ const interstitialHTML = `<!doctype html>
     background: #22C55E; color: #06240F;
   }
   button:hover { opacity: 0.92; }
-  a.report { color: #9A9A9A; font-size: 12px; text-decoration: none; align-self: center; }
-  a.report:hover { color: #C7C7C7; text-decoration: underline; }
+  button.report { background: none; border: 0; padding: 0; cursor: pointer; color: #9A9A9A; font: inherit; font-size: 12px; align-self: center; }
+  button.report:hover { color: #C7C7C7; text-decoration: underline; }
+  .repform { margin-top: 16px; display: flex; flex-direction: column; gap: 8px; text-align: left; }
+  .repform[hidden] { display: none; }
+  .repform label { font-size: 12px; color: #A3A3A3; }
+  .repform select, .repform textarea { background: #0E0E0E; color: #E5E5E5; border: 1px solid #333; border-radius: 8px; padding: 8px 10px; font: inherit; font-size: 13px; }
+  .repform .hp { position: absolute; left: -9999px; width: 1px; height: 1px; opacity: 0; }
+  .repnote { font-size: 11px; color: #7A7A7A; margin: 2px 0; }
+  .repsend { align-self: flex-start; background: #262626; color: #E5E5E5; border: 1px solid #3F3F46; border-radius: 8px; padding: 8px 14px; cursor: pointer; font: inherit; font-size: 13px; }
+  .repsend:hover { background: #303030; }
   .foot { margin-top: 18px; font-size: 11px; color: #6B6B6B; }
 </style>
 </head>
@@ -167,11 +175,32 @@ const interstitialHTML = `<!doctype html>
     </div>
     <div class="actions">
       <button id="go" type="button">Anladım, devam et</button>
-      <a class="report" href="mailto:abuse@{{PLATFORM}}?subject=Kotuye%20kullanim%20bildirimi:%20{{HOST}}">Bu siteyi bildir</a>
+      <button class="report" id="rep" type="button" aria-expanded="false" aria-controls="repform">Bu siteyi bildir</button>
     </div>
+    <form id="repform" class="repform" method="post" action="/.zorven/report" hidden>
+      <label for="repcat">Neden bildiriyorsunuz?</label>
+      <select id="repcat" name="category">
+        <option value="phishing">Kimlik avı (phishing)</option>
+        <option value="malware">Kötü amaçlı yazılım</option>
+        <option value="scam">Dolandırıcılık</option>
+        <option value="illegal">Yasa dışı içerik</option>
+        <option value="other">Diğer</option>
+      </select>
+      <label for="repdetail">Ayrıntı (isteğe bağlı)</label>
+      <textarea id="repdetail" name="detail" maxlength="1000" rows="3" placeholder="Ne gördünüz?"></textarea>
+      <input class="hp" type="text" name="website" tabindex="-1" autocomplete="off" aria-hidden="true">
+      <p class="repnote">Kötüye kullanımı önlemek için bildirimle birlikte IP adresiniz ve tarayıcı bilgileriniz kaydedilir.</p>
+      <button type="submit" class="repsend">Bildirimi gönder</button>
+    </form>
     <div class="foot">Bu uyarı ücretsiz Zorven bağlantılarında bir kez gösterilir.</div>
   </div>
   <script>
+    document.getElementById('rep').addEventListener('click', function () {
+      var f = document.getElementById('repform');
+      f.hidden = !f.hidden;
+      this.setAttribute('aria-expanded', f.hidden ? 'false' : 'true');
+      if (!f.hidden) document.getElementById('repcat').focus();
+    });
     document.getElementById('go').addEventListener('click', function () {
       document.cookie = '` + interstitialCookie + `=1; path=/; max-age=86400; samesite=lax';
       location.reload();

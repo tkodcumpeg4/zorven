@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -316,7 +317,30 @@ func (s *Server) grants(w http.ResponseWriter, r *http.Request) {
 				Resource: g.Resource, CreatedAt: g.CreatedAt, LastUsedAt: g.LastUsedAt,
 				Full: HasFull(sc), StepUpAt: g.StepUpAt})
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"grants": out})
+		// Sayfalama sozlesmesi: ?limit (1..500, vars. 500) &offset; toplam X-Total-Count.
+		limit, offset := 500, 0
+		if v := r.URL.Query().Get("limit"); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 1 {
+				oauthErr(w, http.StatusBadRequest, "invalid_request", "limit 1..500 olmali")
+				return
+			}
+			limit = min(n, 500)
+		}
+		if v := r.URL.Query().Get("offset"); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 0 {
+				oauthErr(w, http.StatusBadRequest, "invalid_request", "offset >= 0 olmali")
+				return
+			}
+			offset = n
+		}
+		total := len(out)
+		lo := min(offset, total)
+		hi := min(lo+limit, total)
+		w.Header().Set("X-Total-Count", strconv.Itoa(total))
+		w.Header().Set("X-Has-More", strconv.FormatBool(hi < total))
+		writeJSON(w, http.StatusOK, map[string]any{"grants": out[lo:hi]})
 		return
 	}
 

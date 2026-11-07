@@ -68,7 +68,7 @@ func realPostureEnv(version string, isService bool) postureEnv {
 func runPostureCmd(ctx context.Context, name string, args ...string) (string, error) {
 	cctx, cancel := context.WithTimeout(ctx, postureCmdTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(cctx, name, args...)
+	cmd := hideConsole(exec.CommandContext(cctx, name, args...))
 	cmd.Env = append(os.Environ(), "LC_ALL=C", "LANG=C")
 	var buf limitedBuffer
 	cmd.Stdout, cmd.Stderr = &buf, &buf

@@ -14,7 +14,7 @@ var errClipboardTooLarge = errors.New("pano metni gecersiz veya 64 KiB'i asiyor"
 // helloFeatures, Hello'da ilan edilen yetenekler. Imlec ve pano yalniz platform
 // destekliyorsa; pano ayrica --no-clipboard ile ilan edilmez.
 func (a *Agent) helloFeatures() []string {
-	f := []string{protocol.FeatureFlowControl, protocol.FeatureScreenInputStatus, protocol.FeatureScreen2, protocol.FeatureScreen2Layers, protocol.FeatureScreen2Stats, protocol.FeatureScreen2Feedback}
+	f := []string{protocol.FeatureFlowControl, protocol.FeatureScreenInputStatus, protocol.FeatureScreen2, protocol.FeatureScreen2Layers, protocol.FeatureScreen2Stats, protocol.FeatureScreen2Feedback, protocol.FeatureScreen2FPS60}
 	if videoEncoderAvailable() {
 		f = append(f, protocol.FeatureScreen2Video)
 	}
@@ -27,7 +27,10 @@ func (a *Agent) helloFeatures() []string {
 	if !a.NoFileTransfer {
 		f = append(f, protocol.FeatureScreenFiles)
 	}
-	f = append(f, protocol.FeatureUDPProbe)
+	f = append(f, protocol.FeatureUDPProbe, protocol.FeatureHTTPTrailers)
+	if a.apps != nil && a.apps.Available() {
+		f = append(f, protocol.FeatureDeploy)
+	}
 	if !a.NoPosture {
 		f = append(f, protocol.FeaturePosture, protocol.FeatureDeviceCert)
 	}
@@ -72,6 +75,11 @@ func (sm *screenManager) startAux(ctx context.Context, ss *screenSession, s *scr
 			w := newClipboardWatcher(be, func(text string) {
 				_ = sm.cs.sendControl(ctx, protocol.ScreenClipboard{Type: protocol.TypeScreenClipboard, SessionID: ss.id, Text: text}, protocol.TypeScreenClipboard)
 			})
+			if sm.cs.screenInputStatus {
+				w.notice = func(detail string) {
+					sm.sendInputStatus(ctx, ss.id, inputResult{State: protocol.InputStateDegraded, Detail: detail})
+				}
+			}
 			ss.boundsMu.Lock()
 			ss.clip = w
 			ss.boundsMu.Unlock()

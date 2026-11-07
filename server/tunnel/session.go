@@ -35,10 +35,13 @@ const (
 
 // Session, bagli tek bir istemciyi temsil eder.
 type Session struct {
-	ID          string
-	ClientID    string
-	ClientName  string
-	TenantID    string
+	ID         string
+	ClientID   string
+	ClientName string
+	TenantID   string
+	// UserID: istemcinin sahibi kullanici (varsa); ag paylasimlarinda cihaz, sahibine
+	// acilan paylasimlari da gorur.
+	UserID      string
 	Version     string
 	Platform    string
 	RemoteAddr  string
@@ -77,6 +80,10 @@ type Session struct {
 	// window_update GONDERILMEZ; eski istemciler kirilmaz.
 	flowControl bool
 
+	// httpTrailers, ajan http_trailers (yanit trailer'i / gRPC) yetenegini
+	// pazarladiysa true (el sikismada yazilir, sonra yalniz okunur).
+	httpTrailers bool
+
 	// screenInputStatus, istemci screen_input_status gonderebiliyorsa true
 	// (el sikismada yazilir, sonra yalniz okunur).
 	screenInputStatus bool
@@ -98,10 +105,20 @@ type Session struct {
 	screen2Feedback bool
 	// screen2Video, istemci H.264 video modunu (FrameVideo) pazarladiysa true.
 	screen2Video bool
+	// screen2FPS60, istemci 30 fps ustu yakalamayi (60'a kadar) pazarladiysa true.
+	screen2FPS60 bool
 	// screenFiles, istemci ekran oturumu dosya aktarimini pazarladiysa true.
 	screenFiles bool
 
-	sendHook func(ctx context.Context, v any, t protocol.MessageType) error // testler
+	// features, el sikismada pazarlanan (hello_ack ile yankilanan) yetenekler.
+	features []string
+
+	// deviceUpdate: istemci device_update'i ilan etti ve sunucu onayladi;
+	// onDeviceUpdate cihaz kaydini gunceller (Handler kurar). lastDevUpd, hiz siniri.
+	deviceUpdate   bool
+	onDeviceUpdate func(ctx context.Context, upd protocol.DeviceUpdate)
+	lastDevUpd     time.Time
+	sendHook       func(ctx context.Context, v any, t protocol.MessageType) error // testler
 	// Dosya aktarimlari (files.go); fileMu altinda, tembel olusturulur.
 	fileMu   sync.Mutex
 	files    map[uint64]*srvXfer
@@ -155,6 +172,13 @@ type Session struct {
 	// netALog: wg_alog (Z5 erisim gunlugu) pazarlandi.
 	netALog bool
 }
+
+// HTTPTrailers, ajanin yanit trailer'larini (gRPC) tasiyabildigini soyler
+// (FeatureHTTPTrailers pazarlandi). Eski ajanlarda false.
+func (s *Session) HTTPTrailers() bool { return s.httpTrailers }
+
+// Features, el sikismada pazarlanan yeteneklerin kopyasi.
+func (s *Session) Features() []string { return append([]string{}, s.features...) }
 
 func NewSession(id, clientID, clientName, remoteAddr string, conn *websocket.Conn, log *slog.Logger) *Session {
 	now := time.Now().UTC()
@@ -369,6 +393,26 @@ func (s *Session) handleControl(ctx context.Context, data []byte) error {
 	case protocol.TypePostureReport, protocol.TypeDeviceCertRequest:
 		return nil // acik surumde durus/cihaz sertifikasi pazarlanmaz: yok say
 
+	case protocol.TypeDeviceUpdate:
+		// Yalniz pazarlandiysa; hiz siniri (en fazla 5 sn'de bir) yazma yukunu sinirlar.
+		if !s.deviceUpdate || s.onDeviceUpdate == nil {
+			return nil
+		}
+		var m protocol.DeviceUpdate
+		if err := json.Unmarshal(data, &m); err != nil {
+			return err
+		}
+		s.mu.Lock()
+		tooSoon := time.Since(s.lastDevUpd) < 5*time.Second
+		if !tooSoon {
+			s.lastDevUpd = time.Now()
+		}
+		s.mu.Unlock()
+		if tooSoon {
+			return nil
+		}
+		s.onDeviceUpdate(ctx, sanitizeDeviceUpdate(m))
+
 	case protocol.TypeUDPAgentStats:
 		var m protocol.UDPAgentStats
 		if err := json.Unmarshal(data, &m); err != nil {
@@ -430,6 +474,19 @@ func (s *Session) handleControl(ctx context.Context, data []byte) error {
 		e.deliverHead(ResponseHead{Status: msg.Status, Headers: msg.Headers, HasBody: msg.HasBody})
 		if !msg.HasBody {
 			e.closeBody(nil)
+		}
+
+	case protocol.TypeHTTPTrailers:
+		var msg protocol.HTTPTrailers
+		if err := json.Unmarshal(data, &msg); err != nil {
+			return err
+		}
+		// Yalniz yetenek pazarlandiysa kabul edilir (pazarlanmadiysa yok sayilir).
+		if !s.httpTrailers {
+			return nil
+		}
+		if e, ok := s.lookupExchange(msg.ReqID); ok {
+			e.setTrailers(msg.Trailers)
 		}
 
 	case protocol.TypeTerminalOutput:
@@ -591,6 +648,18 @@ func (s *Session) touch() {
 	s.mu.Unlock()
 }
 
+// Evict, oturumu hemen sonlandirir (yerine yeni baglanti gecti). Kapanis
+// el sikismasini beklemez: yari olu soket cevap vermeyebilir.
+func (s *Session) Evict(reason string) {
+	go func() {
+		// Canli bir cift kopya varsa nedenini bilsin (kisa sureli, bloklamaz).
+		ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+		_ = s.Send(ctx, protocol.Bye{Type: protocol.TypeBye, Reason: reason, Code: protocol.ByeCodeReplaced}, protocol.TypeBye)
+		cancel()
+		s.conn.CloseNow()
+	}()
+}
+
 // Close, oturumu kapatir.
 func (s *Session) Close(reason string) error {
 	return s.conn.Close(websocket.StatusNormalClosure, reason)
@@ -659,9 +728,24 @@ var ErrBodyTooLarge = errors.New("govde sinir asimi")
 
 // StreamRequestBody, istek govdesini parca parca binary cerceve olarak istemciye aktarir.
 func (s *Session) StreamRequestBody(ctx context.Context, reqID uint64, body io.ReadCloser) error {
+	return s.streamRequestBody(ctx, reqID, body, protocol.MaxBodyBytes)
+}
+
+// StreamRequestBodyUnbounded, toplam boyut tavani OLMADAN govde aktarir. Yalniz
+// uzun omurlu istek akislari (gRPC client-streaming/bidi) icindir: akis
+// sonsuz surebilir, kotayi bant genisligi olcumu/siniri korur.
+func (s *Session) StreamRequestBodyUnbounded(ctx context.Context, reqID uint64, body io.ReadCloser) error {
+	return s.streamRequestBody(ctx, reqID, body, 0)
+}
+
+// streamRequestBody: max <= 0 ise tavan yok.
+func (s *Session) streamRequestBody(ctx context.Context, reqID uint64, body io.ReadCloser, max int64) error {
 	defer body.Close()
 
-	limited := io.LimitReader(body, protocol.MaxBodyBytes+1)
+	var limited io.Reader = body
+	if max > 0 {
+		limited = io.LimitReader(body, max+1)
+	}
 	buf := make([]byte, protocol.BodyChunkSize)
 	var seq uint32
 	var total int64
@@ -670,7 +754,7 @@ func (s *Session) StreamRequestBody(ctx context.Context, reqID uint64, body io.R
 		n, readErr := limited.Read(buf)
 		if n > 0 {
 			total += int64(n)
-			if total > protocol.MaxBodyBytes {
+			if max > 0 && total > max {
 				return ErrBodyTooLarge
 			}
 			frame := protocol.BodyFrame{
@@ -769,7 +853,7 @@ func (s *Session) OpenScreen(ctx context.Context, sessionID string, fps, quality
 	return s.Send(ctx, protocol.ScreenOpen{
 		Type:      protocol.TypeScreenOpen,
 		SessionID: sessionID,
-		FPS:       fps,
+		FPS:       s.ClampFPS(fps),
 		Quality:   quality,
 		MaxWidth:  maxWidth,
 		Mode:      mode,

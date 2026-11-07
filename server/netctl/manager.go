@@ -229,8 +229,8 @@ type Identity struct {
 	Kind       string
 	ClientID   string // device
 	ClientName string // device adi (DNS adi turetmek icin)
-	UserID     string // session
-	Role       string // session
+	UserID     string // session; device: istemcinin sahibi kullanici (varsa)
+	Role       string // session (device icin kayitta dizinden cozulur)
 	// Punch: tasiyici bu baglantida dogrudan yolu (wg_punch) pazarladi.
 	Punch bool
 	// Tun: tasiyici bu baglantida Mod B'yi (wg_tun) pazarladi.
@@ -405,6 +405,13 @@ func (c *NodeConn) register(ctx context.Context, reg protocol.NetRegister) error
 		}
 		n.rec.LastSeen = now
 		n.sub = Subject{Kind: KindDevice, ClientID: c.id.ClientID}
+		// Cihaz, sahibi kullanicinin kimligini de tasir: sahibine (veya rolune) acilan
+		// paylasimlari cihaz uzerindeki ajan da kullanabilir. Sahip uye degilse yalniz cihaz.
+		if c.id.UserID != "" && m.dir != nil {
+			if role, err := m.dir.UserRole(ctx, t.id, c.id.UserID); err == nil && role != "" {
+				n.sub.UserID, n.sub.Role = c.id.UserID, role
+			}
+		}
 		if err := m.st.PutNode(ctx, n.rec); err != nil {
 			return err
 		}
@@ -418,7 +425,7 @@ func (c *NodeConn) register(ctx context.Context, reg protocol.NetRegister) error
 			ID: "nod_" + randHex(8), TenantID: t.id, Kind: KindSession,
 			Name: uniqueName(t, base+"-"+randHex(2)), IP: ip, WGPub: pub, CreatedAt: now, LastSeen: now,
 		}}
-		n.sub = Subject{Kind: KindSession, UserID: c.id.UserID, Role: c.id.Role}
+		n.sub = Subject{Kind: KindSession, UserID: c.id.UserID, Role: c.id.Role, ClientID: c.id.ClientID}
 		n.expires = now.Add(SessionNodeTTL)
 		t.nodes[n.rec.ID] = n
 		t.byIP[ip] = n
@@ -1112,6 +1119,17 @@ func (m *Manager) Sweep(ctx context.Context, checkRoles bool) {
 			}
 		}
 		for _, n := range t.nodes {
+			if n.rec.Kind == KindDevice && n.sub.UserID != "" && checkRoles && m.dir != nil {
+				if role, err := m.dir.UserRole(ctx, t.id, n.sub.UserID); err == nil {
+					if role == "" {
+						n.sub.UserID, n.sub.Role = "", ""
+						changed = true
+					} else if role != n.sub.Role {
+						n.sub.Role = role
+						changed = true
+					}
+				}
+			}
 			if n.rec.Kind != KindSession {
 				continue
 			}

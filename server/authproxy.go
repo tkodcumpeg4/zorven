@@ -189,14 +189,24 @@ func authCacheStateFor(r *http.Request, cache sessionCache) *authCacheState {
 	case r.Method == http.MethodPost && strings.HasSuffix(path, "/reset-password"):
 		st.flushAll = true
 	case r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions:
-		// Okuma istekleri onbellegi etkilemez; tek istisna e-posta degisim
-		// onayi (GET /verify-email): e-posta degisir.
-		// Link baska tarayicida (oturum cerezsiz) acilabilir; o durumda kullanici
-		// bilinmez, basarili yanitta onbellek tumden temizlenir.
-		if !strings.HasSuffix(path, "/verify-email") {
+		// Okuma istekleri onbellegi etkilemez; istisnalar:
+		//   - e-posta degisim onayi (GET /verify-email): e-posta degisir.
+		//     Link baska tarayicida (oturum cerezsiz) acilabilir; o durumda kullanici
+		//     bilinmez, basarili yanitta onbellek tumden temizlenir.
+		//   - hesap silme onayi (GET /delete-user/callback): kullanici bu istekte
+		//     silinir. Kullanici istekten ONCE cerezdeki token'dan cozulur (silindikten
+		//     sonra DB'de oturum kalmaz); silinen hesabin oturumu 30 sn gecerli kalmasin.
+		//     Oturum cerezi yoksa Better Auth istegi zaten reddeder.
+		switch {
+		case strings.HasSuffix(path, "/verify-email"):
+			st.flushAll = true
+		case strings.HasSuffix(path, "/delete-user/callback"):
+			if tok == "" {
+				return nil
+			}
+		default:
 			return nil
 		}
-		st.flushAll = true
 	default:
 		if tok == "" {
 			return nil

@@ -19,19 +19,14 @@ function errMsg(e: any, fallback: string): string {
   return (typeof err === 'string' ? err : err?.message) || e?.message || fallback
 }
 
-const loading = ref(true)
-const sites = ref<CaptchaSite[]>([])
+const pager = usePagedList<CaptchaSite>(p => api.pageCaptchaSites(p), { immediate: false })
+const loading = pager.loading
+const sites = pager.items
 const expanded = ref<string | null>(null)
 
 async function load() {
-  loading.value = true
-  try {
-    sites.value = (await api.listCaptchaSites()).sites ?? []
-  } catch (e: any) {
-    toast.error(errMsg(e, t('captcha.loadError')))
-  } finally {
-    loading.value = false
-  }
+  await pager.reload()
+  if (pager.error.value) toast.error(errMsg(pager.error.value, t('captcha.loadError')))
 }
 onMounted(load)
 
@@ -315,6 +310,7 @@ const diffOptions = computed(() => (DIFFS.includes(form.difficulty) ? DIFFS : [.
         </div>
       </div>
     </div>
+    <ListPager :list="pager" />
 
     <p class="mt-4 text-xs text-fg-muted">{{ t('captcha.privacyNote') }}</p>
 

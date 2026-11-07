@@ -32,11 +32,19 @@ func TestCompatHopByHopHeadersDropped(t *testing.T) {
 	}
 }
 
-// MATRIS: gRPC desteklenmiyor — cunku trailer basliklari dusuruluyor.
-// Bu test, "trailer destegi eklendi ama belge guncellenmedi" durumunu yakalar.
-func TestCompatTrailersNotForwarded(t *testing.T) {
+// MATRIS: gRPC ve HTTP trailer DESTEKLENIR (Akis G1). "Trailer" BASLIGI hala
+// hop-by-hop (baslik olarak iletilmez); trailer'lar ayri http_trailers mesajiyla
+// tasinir ve ziyaretciye http.TrailerPrefix ile yazilir. Yetenek pazarlanmadan
+// (eski ajan) gRPC trailers-only UNAVAILABLE ile reddedilir.
+func TestCompatGRPCAndTrailersSupported(t *testing.T) {
 	if !hopByHop["trailer"] {
-		t.Fatal("trailer artik iletiliyor: gRPC satiri ve matris guncellenmeli")
+		t.Fatal("Trailer basligi hop-by-hop kalmali (trailer'lar mesajla tasinir)")
+	}
+	if protocol.FeatureHTTPTrailers != "http_trailers" || protocol.TypeHTTPTrailers != "http_trailers" {
+		t.Fatal("http_trailers protokol adlari degisti: belge ve istemci birlikte guncellenmeli")
+	}
+	if !isGRPCContentType("application/grpc+proto") || isGRPCContentType("application/grpc-web") {
+		t.Fatal("gRPC tespiti: grpc evet, grpc-web hayir")
 	}
 }
 
@@ -127,7 +135,7 @@ func TestCompatDocumentExists(t *testing.T) {
 		t.Fatalf("uyumluluk belgesi okunamadi: %v", err)
 	}
 	doc := string(b)
-	for _, must := range []string{"Protokol Uyumluluk Matrisi", "gRPC", "HTTP/3", "SSE", "WebSocket"} {
+	for _, must := range []string{"Protokol Uyumluluk Matrisi", "gRPC", "HTTP/3", "SSE", "WebSocket", "http_trailers", "origin-protocol"} {
 		if !strings.Contains(doc, must) {
 			t.Errorf("belgede %q gecmiyor", must)
 		}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/http"
 	"sync"
 	"sync/atomic"
 
@@ -81,6 +82,10 @@ type Exchange struct {
 	// kucuk cerceveler (chunked/SSE) cerceve-sayisi tavanini pencereden cok
 	// once doldurup buyuk yanitlari keserdi (FAZ 8 bug'i).
 	queued atomic.Int64
+
+	// trailers: ajanin yolladigi yanit trailer'lari (http_trailers; gRPC).
+	trailerMu sync.Mutex
+	trailers  http.Header
 }
 
 // exchangeBufferMinFrame, kanal kapasitesini (cerceve sayisi) hesaplarken
@@ -135,6 +140,29 @@ func (e *Exchange) Read(p []byte) (int, error) {
 		e.onDrain(n)
 	}
 	return n, nil
+}
+
+// setTrailers, ajanin yolladigi yanit trailer'larini saklar (oturum okuma
+// dongusu cagirir; EOF cercevesinden ONCE gelir).
+func (e *Exchange) setTrailers(t map[string][]string) {
+	if len(t) == 0 {
+		return
+	}
+	h := make(http.Header, len(t))
+	for k, v := range t {
+		h[k] = append([]string(nil), v...)
+	}
+	e.trailerMu.Lock()
+	e.trailers = h
+	e.trailerMu.Unlock()
+}
+
+// Trailers, yanit trailer'larini doner. Govde okuma EOF'a ulastiktan SONRA
+// cagrilmalidir; trailer yoksa nil.
+func (e *Exchange) Trailers() http.Header {
+	e.trailerMu.Lock()
+	defer e.trailerMu.Unlock()
+	return e.trailers
 }
 
 // deliverHead, yanit basligini bekleyen tarafa iletir.

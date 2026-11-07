@@ -10,19 +10,17 @@ import { APIError } from "better-auth/api"
 export type Env = Record<string, string | undefined>
 export type FetchFn = (url: string, init?: any) => Promise<Response>
 
-type Lang = "tr" | "en" | "ja"
+type Lang = "tr" | "en"
 
 const MESSAGES: Record<string, Record<Lang, string>> = {
   captcha_failed: {
     tr: "İnsan doğrulaması başarısız oldu. Lütfen tekrar deneyin.",
     en: "Human verification failed. Please try again.",
-    ja: "人間確認に失敗しました。もう一度お試しください。",
   },
 }
 
 export function pickLang(acceptLanguage: string | null | undefined): Lang {
   const first = (acceptLanguage || "").split(",")[0]?.trim().toLowerCase() || ""
-  if (first.startsWith("ja")) return "ja"
   if (first.startsWith("en")) return "en"
   return "tr"
 }
@@ -57,29 +55,43 @@ async function postJSON(f: FetchFn, url: string, body: unknown): Promise<any> {
 }
 
 /**
+ * Platform CAPTCHA jetonunu (X-Zorven-Captcha) siteverify ile dogrular. Gizli
+ * anahtar tanimli degilse atlanir. Hata -> APIError (400, captcha_failed).
+ * Kayit ve sifre sifirlama istegi ortak kullanir.
+ */
+export async function verifyCaptcha(ctx: any, env: Env, f: FetchFn): Promise<void> {
+  const secret = (env.ZORVEN_CAPTCHA_PLATFORM_SECRET || "").trim()
+  if (!secret) return
+  const lang = pickLang(header(ctx, "accept-language"))
+  const token = (header(ctx, "x-zorven-captcha") || "").trim()
+  if (!token) fail("captcha_failed", lang)
+  let ok = false
+  try {
+    const r = await postJSON(f, `${apiBase(env)}/api/v1/captcha/siteverify`, {
+      secret,
+      response: token,
+      remoteip: clientIp(ctx) || undefined,
+    })
+    ok = r?.success === true
+  } catch (err) {
+    // Dogrulama hizmetine ulasilamadi: kapali tut (bot riski > gecici kesinti).
+    console.error("[captcha] siteverify basarisiz:", err)
+  }
+  if (!ok) fail("captcha_failed", lang)
+}
+
+/** Better Auth sifre sifirlama istegi yollari (1.7.x: /request-password-reset; eski ad da kapsanir). */
+export const PASSWORD_RESET_REQUEST_PATHS = ["/request-password-reset", "/forget-password"]
+
+/** Sifre sifirlama ISTEGI oncesi kontrol (yalniz CAPTCHA; e-posta gonderimini kotuye kullanimdan korur). */
+export async function checkPasswordResetRequest(ctx: any, env: Env, f: FetchFn): Promise<void> {
+  await verifyCaptcha(ctx, env, f)
+}
+
+/**
  * /sign-up/email oncesi kontrol. Hata -> APIError (400, code captcha_failed).
  * Sosyal giris bu yoldan gecmez (saglayici dogrular).
  */
 export async function checkSignup(ctx: any, env: Env, f: FetchFn): Promise<void> {
-  const lang = pickLang(header(ctx, "accept-language"))
-  const base = apiBase(env)
-
-  const secret = (env.ZORVEN_CAPTCHA_PLATFORM_SECRET || "").trim()
-  if (secret) {
-    const token = (header(ctx, "x-zorven-captcha") || "").trim()
-    if (!token) fail("captcha_failed", lang)
-    let ok = false
-    try {
-      const r = await postJSON(f, `${base}/api/v1/captcha/siteverify`, {
-        secret,
-        response: token,
-        remoteip: clientIp(ctx) || undefined,
-      })
-      ok = r?.success === true
-    } catch (err) {
-      // Dogrulama hizmetine ulasilamadi: kapali tut (bot kaydi riski > gecici kesinti).
-      console.error("[captcha] siteverify basarisiz:", err)
-    }
-    if (!ok) fail("captcha_failed", lang)
-  }
+  await verifyCaptcha(ctx, env, f)
 }

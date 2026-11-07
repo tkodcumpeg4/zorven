@@ -1,7 +1,11 @@
 <script setup lang="ts">
 // ACIK SURUM override (scripts/oss/overrides): yalniz TR + EN.
 // Dil secici acilir menu: klavye (Enter/Bosluk/oklar/Esc/Home/End) ve disari tiklama destekli.
+import { persistLangCookie } from '~/plugins/i18n'
+
 const { locale } = useI18n()
+const { user } = useAuth()
+const api = useApi()
 
 const LANGS = [
   { code: 'tr', short: 'TR', name: 'Türkçe' },
@@ -19,6 +23,10 @@ const current = computed(() => LANGS.find(l => l.code === locale.value) ?? LANGS
 function setLang(next: string) {
   locale.value = next as any
   try { localStorage.setItem('zorven_lang', next) } catch { /* erisim yok */ }
+  // Sunucu da bilsin: islem e-postalari (dogrulama, sifirlama, 2FA kodu) panel dilinde gider.
+  persistLangCookie(next)
+  // Oturum varsa duyuru e-postasi dili de panel diline uyar (tercih satiri yoksa sunucuda etkisiz).
+  if (user.value) api.setAnnouncementLang(next).catch(() => { /* sessiz: dil tercihi kritik degil */ })
 }
 
 function focusItem(i: number) {

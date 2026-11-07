@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tkodcumpeg4/zorven/client/i18n"
 	"github.com/tkodcumpeg4/zorven/shared/protocol"
 	"golang.org/x/image/draw"
 )
@@ -51,7 +52,10 @@ type screenSession struct {
 	// SendInput syscall'i demektir; bu sure boyunca ayni istemcinin TUM tunel
 	// trafigi (HTTP govde kareleri, terminal) bekliyordu. Artik olaylar
 	// kuyruga birakilir ve ayri bir goroutine uygular.
-	input chan protocol.ScreenInput
+	input *inputQueue
+
+	// tracker, basili tus/dugmeleri izler (yalniz applyLoop); oturum bitince birakilir.
+	tracker inputTracker
 
 	// inputLog, oturum basina yalnizca ILK girdi olayinda log atmak icin.
 	// FAZ 7 tanilama: "girdi alinmiyor" raporunda, girdinin sunucudan agent'a
@@ -82,15 +86,8 @@ func (ss *screenSession) getS2() *screen2Session {
 	return ss.s2
 }
 
-// screenInputQueue, oturum basina bekleyen girdi olayi siniri.
-//
-// Kucuk bilincli: kuyruk buyurse kullanici fareyi biraktiktan sonra bile
-// imlec hareket etmeye devam eder (gecikmis olaylar). Dolunca mousemove
-// DUSURULUR ama tus/dugme olaylari ASLA — bir mouseup'i dusurmek fareyi
-// uzak makinede basili birakirdi.
-const screenInputQueue = 64
-
 func newScreenManager(cs *clientSession) *screenManager {
+	ensureDPIAware()
 	return &screenManager{cs: cs, sessions: make(map[string]*screenSession)}
 }
 
@@ -112,17 +109,46 @@ const (
 	defaultMaxWidth = 1600
 )
 
+// legacyFPS, eski (mjpeg/ffmpeg H.264) yolda istenen fps'i cozer. 30 ustu fps
+// yalniz sunucu screen2_fps60'i onayladiysa (high) kabul edilir ve yalniz donanim
+// H.264'te (ffmpeg, 60'a kadar) kullanilir; JPEG kare dongusu (capture) 30'da
+// kalir. Gecersiz/asiri deger varsayilana (defaultFPS) doner.
+func legacyFPS(req int, high bool) int {
+	limit := screen2MaxFPS
+	if high {
+		limit = screen2HighFPS
+	}
+	if req <= 0 || req > limit {
+		return defaultFPS
+	}
+	return req
+}
+
+// screen2ParamsFor, screen_open mesajindan screen2 oturum parametrelerini kurar:
+// katmanlar yalniz screen2_layers pazarlandiysa, 30 ustu fps tavani yalniz
+// screen2_fps60 pazarlandiysa gecerlidir (pazarlanmayan yetenek oturuma sizmaz).
+func (sm *screenManager) screen2ParamsFor(msg protocol.ScreenOpen, display int) screen2Params {
+	p := screen2Params{FPS: msg.FPS, Quality: msg.Quality, MaxWidth: msg.MaxWidth, Display: display,
+		HighFPS: sm.cs.screen2FPS60}
+	if sm.cs.screen2Layers {
+		p.Layers = msg.Layers // bos => eski (katmansiz) davranis
+	}
+	return p
+}
+
 // open, ekran yakalamayi baslatir ve kareleri sunucuya akitir.
 func (sm *screenManager) open(parent context.Context, msg protocol.ScreenOpen) {
+	if err := platSessionBlocker(); err != nil {
+		// Ornegin saf Wayland: siyah kare yerine acik, yerellestirilmis hata.
+		sm.sendError(parent, msg.SessionID, err.Error())
+		return
+	}
 	useScreen2 := msg.Mode == protocol.ScreenModeScreen2 && sm.cs.screen2
 	if useScreen2 && platNumDisplays() == 0 {
 		sm.sendError(parent, msg.SessionID, screenUnsupportedErr().Error())
 		return
 	}
-	fps := msg.FPS
-	if fps <= 0 || fps > 30 {
-		fps = defaultFPS
-	}
+	fps := legacyFPS(msg.FPS, sm.cs.screen2FPS60)
 	quality := msg.Quality
 	if quality <= 0 || quality > 100 {
 		quality = defaultQuality
@@ -147,14 +173,21 @@ func (sm *screenManager) open(parent context.Context, msg protocol.ScreenOpen) {
 		id:       msg.SessionID,
 		cancel:   cancel,
 		bounds:   displayRect{x: b.Min.X, y: b.Min.Y, w: b.Dx(), h: b.Dy()},
-		input:    make(chan protocol.ScreenInput, screenInputQueue),
+		input:    newInputQueue(screenInputQueue, screenInputHardCap),
 		streamID: msg.StreamID,
 	}
 
+	// Ayni SessionID yeniden acildiysa ESKI oturumu once iptal et: aksi halde
+	// iki yakalama dongusu ayni kimlikle calisir ve eskisinin finish()'i yeni
+	// oturumun kaydini silerdi.
 	sm.mu.Lock()
+	old := sm.sessions[msg.SessionID]
 	sm.sessions[msg.SessionID] = ss
 	cb := sm.onChanged
 	sm.mu.Unlock()
+	if old != nil {
+		old.cancel()
+	}
 	if cb != nil {
 		cb()
 	}
@@ -164,11 +197,7 @@ func (sm *screenManager) open(parent context.Context, msg protocol.ScreenOpen) {
 
 	// screen2: karo tabanli ikili mod (yalniz FeatureScreen2 pazarlandiysa).
 	if useScreen2 {
-		p := screen2Params{FPS: msg.FPS, Quality: msg.Quality, MaxWidth: msg.MaxWidth, Display: display}
-		if sm.cs.screen2Layers {
-			p.Layers = msg.Layers // bos => eski (katmansiz) davranis
-		}
-		go sm.runScreen2(ctx, ss, p)
+		go sm.runScreen2(ctx, ss, sm.screen2ParamsFor(msg, display))
 		return
 	}
 
@@ -184,7 +213,7 @@ func (sm *screenManager) open(parent context.Context, msg protocol.ScreenOpen) {
 		}
 	}
 
-	go sm.capture(ctx, ss, display, fps, quality, maxWidth)
+	go sm.capture(ctx, ss, display, min(fps, screen2MaxFPS), quality, maxWidth)
 }
 
 func (sm *screenManager) capture(ctx context.Context, ss *screenSession, display, fps, quality, maxWidth int) {
@@ -200,6 +229,8 @@ func (sm *screenManager) capture(ctx context.Context, ss *screenSession, display
 
 	var seq uint64
 	buf := new(bytes.Buffer)
+	var retry captureRetry
+	degVis := false
 
 	for {
 		select {
@@ -209,15 +240,42 @@ func (sm *screenManager) capture(ctx context.Context, ss *screenSession, display
 		}
 
 		capStart := time.Now()
+		if n := platNumDisplays(); n > 0 && (display < 0 || display >= n) {
+			display = 0 // monitor kayboldu: birinciye dus
+		}
 		bounds := platBounds(display)
 		img, err := platCapture(display)
 		if err != nil {
 			// Masaustu degismis veya kilitlenmis olabilir; tekrar baglanmayi dene
 			attachToInputDesktop()
 			img, err = platCapture(display)
-			if err != nil {
-				sm.sendError(ctx, ss.id, "ekran yakalanamadi: "+err.Error())
+		}
+		if err != nil {
+			// Gecici hata: oturumu sonlandirmak yerine ussel geri cekilmeyle
+			// yeniden dene (son kare izleyicide kalir).
+			wait, giveUp := retry.Fail(time.Now())
+			sm.cs.log.Warn("ekran yakalanamadi, yeniden denenecek", "session", ss.id, "hata", err, "bekleme", wait)
+			if giveUp {
+				sm.sendError(ctx, ss.id, i18n.T("scr.err.capture_gave_up", err.Error()))
 				return
+			}
+			if !degVis {
+				degVis = true
+				if sm.cs.screenInputStatus {
+					sm.sendInputStatus(ctx, ss.id, inputResult{State: protocol.InputStateDegraded, Detail: protocol.DegradedCaptureRetry})
+				}
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(wait):
+			}
+			continue
+		}
+		if retry.Succeed() && degVis {
+			degVis = false
+			if sm.cs.screenInputStatus {
+				sm.sendInputStatus(ctx, ss.id, inputResult{State: protocol.InputStateDegraded})
 			}
 		}
 		captureMS := int(time.Since(capStart).Milliseconds())
@@ -227,7 +285,7 @@ func (sm *screenManager) capture(ctx context.Context, ss *screenSession, display
 
 		buf.Reset()
 		if err := jpeg.Encode(buf, out, &jpeg.Options{Quality: quality}); err != nil {
-			sm.sendError(ctx, ss.id, "kare kodlanamadi: "+err.Error())
+			sm.sendError(ctx, ss.id, i18n.T("scr.err.encode", err.Error()))
 			return
 		}
 		frame := make([]byte, buf.Len())
@@ -292,25 +350,12 @@ func (sm *screenManager) input(msg protocol.ScreenInput) {
 			"session", msg.SessionID, "kind", msg.Kind, "os", runtime.GOOS)
 	})
 
-	select {
-	case ss.input <- msg:
-	default:
-		// Kuyruk dolu. mousemove atilabilir (bir sonraki zaten daha guncel
-		// konumu tasir), ama dugme/tus olaylari ATILAMAZ: dusurulen bir
-		// mouseup fareyi uzak makinede basili birakir, dusurulen bir keyup
-		// tusu takili birakir.
-		if msg.Kind == "mousemove" {
-			return
-		}
-		// Kritik olay: en eski bekleyeni at, yer ac, tekrar dene.
-		select {
-		case <-ss.input:
-		default:
-		}
-		select {
-		case ss.input <- msg:
-		default:
-		}
+	// Politika inputQueue'da: yalniz mousemove dusurulur/birlestirilir,
+	// tus/dugme/tekerlek/metin olaylari ASLA (bir keyup/mouseup'in kaybi
+	// uzak makinede takili tus/dugme demektir).
+	ss.input.Push(msg)
+	if s2 := ss.getS2(); s2 != nil {
+		s2.Poke() // kullanici etkilesiyor: bosta yavaslamayi hemen bitir
 	}
 }
 
@@ -324,47 +369,76 @@ func (sm *screenManager) applyLoop(ctx context.Context, ss *screenSession) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	attachToInputDesktop()
+	var guard desktopGuard
+	guard.Due(time.Now())
+
+	// Oturum bitince (iptal, baglanti kopmasi, hata) basili kalan her tusu ve
+	// fare dugmesini birak: takili tus/dugme kullanicinin makinesini kilitler.
+	defer sm.releaseHeld(ss)
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case msg := <-ss.input:
-			for _, ev := range coalesce(ss.input, msg) {
+		case <-ss.input.sig:
+		}
+		for {
+			msg, ok := ss.input.Pop()
+			if !ok {
+				break
+			}
+			for _, ev := range coalesceQ(ss.input, msg) {
+				now := time.Now()
+				if guard.Due(now) {
+					// Girdi masaustu degismis olabilir (UAC/kilit/oturum degisimi).
+					attachToInputDesktop()
+				}
 				res := applyInput(ev, ss.getBounds())
-				if sm.cs.screenInputStatus && ss.statusGate.Should(res, time.Now()) {
+				ss.tracker.Observe(ev)
+				if sm.cs.screenInputStatus && ss.statusGate.Should(res, now) {
 					sm.sendInputStatus(ctx, ss.id, res)
 				}
+			}
+			if ctx.Err() != nil {
+				return
 			}
 		}
 	}
 }
 
-// coalesce, kuyrukta bekleyen ardisik mousemove'lari tek bir olaya indirger ve
-// uygulanacak olaylari SIRAYLA doner.
+// releaseHeld, izlenen basili tus/dugmeleri birakir.
+func (sm *screenManager) releaseHeld(ss *screenSession) {
+	evs := ss.tracker.ReleaseAll()
+	if len(evs) == 0 {
+		return
+	}
+	rect := ss.getBounds()
+	for _, ev := range evs {
+		applyInput(ev, rect)
+	}
+	sm.cs.log.Info("ekran oturumu bitti: basili kalan girdi birakildi", "session", ss.id, "adet", len(evs))
+}
+
+// coalesceQ, siradaki ardisik mousemove'lari tek bir olaya indirger ve
+// uygulanacak olaylari SIRAYLA doner (en fazla iki olay: birlestirilmis son
+// mousemove + onu takip eden mousemove olmayan olay).
 //
-// Neden: ara konumlari uygulamak anlamsizdir — imlec zaten en yeni konuma
-// gidecek — ama son konum ATILAMAZ, cunku wheel olayi koordinat TASIMAZ ve
-// imlecin o an dogru yerde olmasina guvenir.
-//
-// Donen dilim en fazla iki olay icerir: (birlestirilmis son mousemove) ve
-// (onu takip eden mousemove olmayan olay).
-func coalesce(q chan protocol.ScreenInput, first protocol.ScreenInput) []protocol.ScreenInput {
+// Ara konumlari uygulamak anlamsizdir ama son konum ATILAMAZ: wheel koordinat
+// tasimaz ve imlecin o an dogru yerde olmasina guvenir.
+func coalesceQ(q *inputQueue, first protocol.ScreenInput) []protocol.ScreenInput {
 	if first.Kind != "mousemove" {
 		return []protocol.ScreenInput{first}
 	}
 	last := first
 	for {
-		select {
-		case next := <-q:
-			if next.Kind != "mousemove" {
-				// Once son konumu uygula, sonra bu olayi: sira korunur.
-				return []protocol.ScreenInput{last, next}
-			}
-			last = next
-		default:
+		next, ok := q.Pop()
+		if !ok {
 			return []protocol.ScreenInput{last}
 		}
+		if next.Kind != "mousemove" {
+			return []protocol.ScreenInput{last, next}
+		}
+		last = next
 	}
 }
 
@@ -384,11 +458,16 @@ func (sm *screenManager) closeSession(sessionID string) {
 
 func (sm *screenManager) finish(ss *screenSession) {
 	sm.mu.Lock()
-	delete(sm.sessions, ss.id)
+	// Yalniz kayit HALA bu oturumu gosteriyorsa sil: ayni kimlikle yeniden
+	// acilmis daha yeni oturumun kaydi bozulmasin.
+	removed := sm.sessions[ss.id] == ss
+	if removed {
+		delete(sm.sessions, ss.id)
+	}
 	cb := sm.onChanged
 	sm.mu.Unlock()
 	ss.once.Do(func() { ss.cancel() })
-	if cb != nil {
+	if removed && cb != nil {
 		cb()
 	}
 }

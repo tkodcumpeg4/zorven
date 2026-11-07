@@ -48,10 +48,7 @@ func TestDoorPageAddsOtherFamilyProbe(t *testing.T) {
 	h.Door = svc
 
 	cookie := loginCookie(t, h)
-	r := doorReq("GET", "/")
-	r.AddCookie(cookie)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, r)
+	w := doorOpenFlow(h, func(r *http.Request) { r.AddCookie(cookie) })
 	body := w.Body.String()
 	csp := w.Header().Get("Content-Security-Policy")
 	if w.Code != http.StatusOK || !strings.Contains(body, "https://door6.example.com/_door/v1/addr?t=") ||
@@ -64,10 +61,7 @@ func TestDoorPageAddsOtherFamilyProbe(t *testing.T) {
 	}
 	// Yan kanal kapaliyken (anahtar yok) betik/baglanti izni olmaz.
 	svc.TokenKey = nil
-	r = doorReq("GET", "/")
-	r.AddCookie(cookie)
-	w = httptest.NewRecorder()
-	h.ServeHTTP(w, r)
+	w = doorOpenFlow(h, func(r *http.Request) { r.AddCookie(cookie) })
 	if strings.Contains(w.Body.String(), "<script") || strings.Contains(w.Header().Get("Content-Security-Policy"), "connect-src") {
 		t.Fatal("yan kanal kapaliyken betik/connect-src olmamali")
 	}

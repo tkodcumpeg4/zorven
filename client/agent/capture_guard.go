@@ -52,6 +52,7 @@ type dxgiGuard struct {
 	mu     sync.Mutex
 	active bool
 	frames int
+	refs   int // Begin'ini cagirmis acik yakalayici sayisi
 }
 
 func newDXGIGuard(dir, version string, pid int, now func() time.Time, alive func(int) bool) *dxgiGuard {
@@ -109,6 +110,7 @@ func (g *dxgiGuard) Check() (allowed bool, reason string) {
 func (g *dxgiGuard) Begin() error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.refs++
 	if g.active {
 		return nil
 	}
@@ -139,11 +141,16 @@ func (g *dxgiGuard) FrameOK() {
 	}
 }
 
-// Clear, temiz kapanista sentinel'i siler.
+// Clear, bir yakalayicinin temiz kapanisini bildirir; sentinel yalniz SON
+// acik DXGI yakalayicisi kapaninca silinir (diger oturumlar hala calisiyor
+// olabilir ve sentinel onlarin korumasidir).
 func (g *dxgiGuard) Clear() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.active {
+	if g.refs > 0 {
+		g.refs--
+	}
+	if g.refs == 0 && g.active {
 		_ = os.Remove(g.sentinelPath(g.pid))
 		g.active = false
 	}

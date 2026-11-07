@@ -7,12 +7,20 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // Config, kullanicinin yerel istemci ayarlari.
 type Config struct {
 	ServerAddr string `json:"server_addr"`
-	Token      string `json:"token"`
+	// Servers (istege bagli): ek sunucu adresleri (host:port). Ajan ServerAddr
+	// ile birlikte aday olarak kullanir, ilk baglantida sunucunun bildirdigi
+	// dugum listesiyle birlestirir. ServerPinned ise kullanilmaz.
+	Servers []string `json:"servers,omitempty"`
+	// ServerPinned: kullanici sunucuyu acikca sabitledi (`zorven config set
+	// server`, set-server). Sabitken dugum listesi/yuk devri kullanilmaz.
+	ServerPinned bool   `json:"server_pinned,omitempty"`
+	Token        string `json:"token"`
 	// LocalURL, `zorven` komutu hedef verilmeden calistirildiginda KULLANILMAZ.
 	// Varsayilan BOS'tur: kullanici acikca bir hedef vermedikce hicbir yerel
 	// port icin tunel acilmaz. Alan yalnizca eski config dosyalariyla
@@ -24,8 +32,32 @@ type Config struct {
 	// service install --enable-*). Varsayilan KAPALI. Sunucudan degistirilemez.
 	EnableTerminal bool `json:"enable_terminal,omitempty"`
 	EnableScreen   bool `json:"enable_screen,omitempty"`
-	// Language: CLI dili (tr/en/ja). Bossa ortamdan/isletim sisteminden secilir.
+	// EnableDeploy: Zorven Apps (Docker ile uygulama calistirma) yerel izin tavani.
+	// Varsayilan KAPALI; acik olsa bile Docker erisilebilir degilse ilan edilmez.
+	EnableDeploy bool `json:"enable_deploy,omitempty"`
+	// Operators: yalniz Windows servisi icin; masaustu uygulamasinin servis kontrol
+	// kanalini tam yetkiyle kullanabilen etkilesimli kullanici SID'leri (kurulumu
+	// baslatan kullanici). Yalniz yonetici yazabilen sistem dosyasinda tutulur;
+	// kurulum/onarimda eklenir, silinmez.
+	Operators []string `json:"operators,omitempty"`
+	// Language: CLI dili (tr/en/ja/zh). Bossa ortamdan/isletim sisteminden secilir.
 	Language string `json:"language,omitempty"`
+}
+
+// AddOperator, SID'i (buyuk/kucuk harf duyarsiz tekil) Operators listesine ekler;
+// eklendiyse true doner. Bos SID eklenmez. Listeden silme yoktur.
+func (c *Config) AddOperator(sid string) bool {
+	sid = strings.TrimSpace(sid)
+	if sid == "" {
+		return false
+	}
+	for _, o := range c.Operators {
+		if strings.EqualFold(o, sid) {
+			return false
+		}
+	}
+	c.Operators = append(c.Operators, sid)
+	return true
 }
 
 // legacyDefaultLocalURLs, eski surumlerin config dosyasina KENDILIGINDEN
@@ -111,14 +143,40 @@ func LoadFile(path string) (Config, error) {
 	return cfg, nil
 }
 
+// corruptWarned, bozuk ayar dosyasi uyarisinin surec basina bir kez basilmasini saglar.
+var corruptWarned sync.Map
+
+// backupCorrupt, ayrisamayan ayar dosyasini <dosya>.bak olarak kopyalar ve
+// kullaniciyi stderr'de uyarir (surec basina dosya basina bir kez). Dosya
+// yerinde birakilir; kullanici elle duzeltebilsin.
+func backupCorrupt(path string, perr error) {
+	if _, loaded := corruptWarned.LoadOrStore(path, true); loaded {
+		return
+	}
+	bak := path + ".bak"
+	note := ""
+	if data, err := os.ReadFile(path); err == nil {
+		if werr := os.WriteFile(bak, data, 0o600); werr == nil {
+			_ = os.Chmod(bak, 0o600)
+			note = " (backup: " + bak + ")"
+		}
+	}
+	fmt.Fprintf(os.Stderr, "zorven: WARNING: config file unreadable, using defaults: %s: %v%s\n", path, perr, note)
+}
+
 // Load, ayar dosyasini okur.
 // Once kullanici ayarlarini arar; token bos ise sistem geneli ayarlarina (Service config) bakar.
+// Kullanici dosyasi bozuksa sessizce yok sayilmaz: stderr'e uyari basilir,
+// <dosya>.bak olarak yedeklenir ve hata doner (cagirani varsayilanlarla surebilir).
 func Load() (Config, error) {
 	p, err := Path()
 	var userCfg Config
+	var userErr error
 	if err == nil {
-		userCfg, _ = LoadFile(p)
-		if userCfg.Token != "" {
+		userCfg, userErr = LoadFile(p)
+		if userErr != nil {
+			backupCorrupt(p, userErr)
+		} else if userCfg.Token != "" {
 			return userCfg, nil
 		}
 	}
@@ -126,27 +184,35 @@ func Load() (Config, error) {
 	// Kullanici ayarlarinda token yoksa sistem ayarlarina bak
 	sysCfg, sysErr := LoadFile(SystemPath())
 	if sysErr == nil && sysCfg.Token != "" {
-		return sysCfg, nil
+		return sysCfg, userErr
 	}
 
 	if err != nil {
 		return DefaultConfig(), err
 	}
-	return userCfg, nil
+	return userCfg, userErr
 }
 
-// SaveFile, ayarlari belirtilen dosyaya yazar (0600 izni).
+// SaveFile, ayarlari belirtilen dosyaya yazar (0600 izni). Dosya masaustu
+// uygulamasiyla ORTAKTIR: bu yapinin bilmedigi alanlar (masaustunun auto_connect,
+// token_enc... ya da gelecekte eklenecekler) mevcut dosyadan korunur; yalniz
+// Config'in kendi anahtarlari guncellenir (bkz. MarshalMerged).
 func SaveFile(path string, cfg Config) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("yapilandirma dizini olusturulamadi: %w", err)
 	}
 
-	data, err := json.MarshalIndent(cfg, "", "  ")
+	res, err := MarshalMerged(path, cfg)
 	if err != nil {
 		return fmt.Errorf("ayar verisi serilestirilemedi: %w", err)
 	}
+	if res.Corrupt {
+		// Ezilecek dosya okunamiyordu: icerigi (belki token) kaybolmasin diye yedeklenir.
+		backupBeforeOverwrite(path)
+	}
+	data := res.Data
 
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	if err := writeFileAtomic(path, data, 0o600); err != nil {
 		return fmt.Errorf("ayar dosyasina yazilamadi: %w", err)
 	}
 	// WriteFile mevcut dosyanin iznini DEGISTIRMEZ: eskiden gevsek izinle
@@ -155,6 +221,38 @@ func SaveFile(path string, cfg Config) error {
 	// Windows'ta chmod ACL'i daraltmaz; dosyaya korumali DACL uygulanir.
 	if err := restrictFile(path, isSystemPath(path)); err != nil {
 		return fmt.Errorf("ayar dosyasi izinleri daraltilamadi: %w", err)
+	}
+	return nil
+}
+
+// writeFileAtomic, veriyi ayni dizinde gecici dosyaya yazar, fsync eder ve
+// hedefin uzerine rename eder: yarim yazilmis/kesilmis ayar dosyasi olusmaz.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	cleanup := func() { _ = os.Remove(tmpName) }
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		cleanup()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		cleanup()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return err
+	}
+	_ = os.Chmod(tmpName, perm)
+	if err := os.Rename(tmpName, path); err != nil {
+		cleanup()
+		return err
 	}
 	return nil
 }
@@ -173,9 +271,19 @@ func SaveSystem(cfg Config) error {
 	return SaveFile(SystemPath(), cfg)
 }
 
-// SetToken, token'i gunceller ve kullanici ayarlarina kaydeder.
+// SetToken, token'i gunceller ve YALNIZ kullanici ayar dosyasina kaydeder
+// (sistem ayarlari kullanici dosyasina kopyalanmaz). Dosya bozuksa hata doner.
 func SetToken(token string) error {
-	cfg, _ := Load()
+	p, err := Path()
+	if err != nil {
+		return err
+	}
+	cfg, lerr := LoadFile(p)
+	if lerr != nil {
+		// Bozuk dosya yedeklenir, temiz ayarla devam edilir (token/sunucu yazilabilsin).
+		backupCorrupt(p, lerr)
+		cfg = DefaultConfig()
+	}
 	cfg.Token = strings.TrimSpace(token)
 	return Save(cfg)
 }
@@ -189,8 +297,18 @@ func SetTokenSystem(token string) error {
 
 // SetServer, sunucu adresini gunceller ve kaydeder.
 func SetServer(server string) error {
-	cfg, _ := Load()
+	p, err := Path()
+	if err != nil {
+		return err
+	}
+	cfg, lerr := LoadFile(p)
+	if lerr != nil {
+		// Bozuk dosya yedeklenir, temiz ayarla devam edilir (token/sunucu yazilabilsin).
+		backupCorrupt(p, lerr)
+		cfg = DefaultConfig()
+	}
 	cfg.ServerAddr = strings.TrimSpace(server)
+	cfg.ServerPinned = true
 	return Save(cfg)
 }
 
@@ -198,6 +316,7 @@ func SetServer(server string) error {
 func SetServerSystem(server string) error {
 	cfg, _ := LoadFile(SystemPath())
 	cfg.ServerAddr = strings.TrimSpace(server)
+	cfg.ServerPinned = true
 	return SaveSystem(cfg)
 }
 

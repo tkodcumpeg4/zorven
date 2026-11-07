@@ -3,9 +3,10 @@ package ingress
 // FAZ 4 / F21 — Aktif saglik denetleyicisi.
 //
 // Her replikaya TUNEL UZERINDEN gercek bir istek atilir: HTTP tunellerinde
-// "GET <yol>", TCP tunellerinde yerel hedefe baglanti. Boylece "ajan bagli"
-// degil "yerel servis gercekten yanit veriyor" olculur. Sonuclar esiklerle
-// durum makinesine yazilir; ingress secimi yalnizca bu durumu okur.
+// "GET <yol>", TCP tunellerinde yerel hedefe baglanti (UDP yoklanmaz). Boylece
+// "ajan bagli" degil "yerel servis gercekten yanit veriyor" olculur. Sonuclar
+// esiklerle durum makinesine yazilir; ingress ve rawproxy (ham TCP/UDP) secimi
+// yalnizca bu durumu okur.
 
 import (
 	"context"
@@ -59,7 +60,10 @@ func (c *HealthChecker) Run(ctx context.Context) {
 
 func (c *HealthChecker) tick(ctx context.Context, now time.Time) {
 	for id, e := range c.Router.lbSnapshot() {
-		if !e.cfg.HealthEnabled {
+		// UDP baglantisizdir: tunel uzerinden yoklanacak bir el sikisma yok (HTTP
+		// yoklamasi da anlamsiz). UDP replikalari saglik durumu olmadan, yalniz
+		// cevrimici olanlar arasindan secilir; durum varsayilan "saglikli" kalir.
+		if !e.cfg.HealthEnabled || e.proto == store.ProtoUDP {
 			continue
 		}
 		interval := time.Duration(e.cfg.IntervalSec) * time.Second

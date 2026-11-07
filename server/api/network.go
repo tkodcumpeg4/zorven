@@ -131,7 +131,12 @@ func (s *Server) listNetworkResources(w http.ResponseWriter, r *http.Request) {
 			out = append(out, t)
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"resources": out})
+	// Politika suzgeci SQL'e indirilemez: kararli sirayla bellekte dilimlenir.
+	pg, okPg := pageOf(w, r)
+	if !okPg {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"resources": slicePage(w, pg, out)})
 }
 
 func (s *Server) createNetworkResource(w http.ResponseWriter, r *http.Request) {

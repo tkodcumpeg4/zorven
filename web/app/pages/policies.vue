@@ -14,8 +14,9 @@ const WAF_RULESETS = ['owasp-lite'] as const
 // Suslu parantezler sablonda yorumlanmasin diye sabit olarak tutuluyor.
 const SECRET_REF_PH = '{{secret:webhook-gizli}}'
 
-const loading = ref(true)
-const policies = ref<Policy[]>([])
+const pager = usePagedList<Policy>(p => api.pagePolicies(p), { immediate: false })
+const loading = pager.loading
+const policies = pager.items
 const tunnels = ref<Tunnel[]>([])
 const hostnames = ref<Hostname[]>([])
 
@@ -127,16 +128,14 @@ function onActionTypeChange(r: PolicyRule) {
 }
 
 async function load() {
-  loading.value = true
   try {
-    const [pRes, tRes, hRes] = await Promise.all([api.listPolicies(), api.listTunnels(), api.listHostnames()])
-    policies.value = pRes.policies
+    // Tunel/alan adi: baglama secici icin tam liste (limit=500); politikalar sayfali.
+    const [tRes, hRes] = await Promise.all([api.listTunnels(), api.listHostnames(), pager.reload()])
+    if (pager.error.value) throw pager.error.value
     tunnels.value = tRes
     hostnames.value = hRes
   } catch (e: any) {
     toast.error(hostnameError(e, t('policies.loadError')))
-  } finally {
-    loading.value = false
   }
 }
 
@@ -277,7 +276,7 @@ onMounted(load)
               <button class="rounded-md px-2 py-1 text-xs text-fg-muted hover:text-fg" @click="openEdit(p)">
                 <Icon name="lucide:pencil" class="size-3.5" /> {{ t('common.edit') }}
               </button>
-              <button class="rounded-md px-2 py-1 text-xs text-fg-muted hover:text-danger" @click="remove(p)">
+              <button class="rounded-md px-2 py-1 text-xs text-fg-muted hover:text-danger" :title="t('common.delete')" :aria-label="t('common.delete')" @click="remove(p)">
                 <Icon name="lucide:trash-2" class="size-3.5" />
               </button>
             </div>
@@ -290,6 +289,7 @@ onMounted(load)
           </div>
         </div>
       </div>
+      <ListPager :list="pager" />
 
     <!-- Editor -->
     <div v-if="showEditor" class="fixed inset-0 z-50 grid place-items-center overflow-y-auto bg-black/40 p-4" @click.self="showEditor = false">

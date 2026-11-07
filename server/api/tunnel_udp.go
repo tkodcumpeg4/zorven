@@ -35,7 +35,9 @@ const (
 	udpSeriesWindow   = time.Hour
 )
 
-// validateTunnelUDP, UDP sinirlarini dogrular.
+// validateTunnelUDP, UDP sinirlarini dogrular. PPS alanlarinda 0 "sinirsiz"
+// degil, sunucu varsayilani demektir (rawproxy.DefaultUDPTunnelPPS /
+// DefaultUDPFlowPPS; ZORVEN_UDP_TUNNEL_PPS / ZORVEN_UDP_FLOW_PPS ile degisir).
 func validateTunnelUDP(u store.TunnelUDP) string {
 	switch {
 	case u.IdleTimeoutSec < udpMinIdleSec || u.IdleTimeoutSec > udpMaxIdleSec:
@@ -43,9 +45,9 @@ func validateTunnelUDP(u store.TunnelUDP) string {
 	case u.MaxPacketBytes < udpMinPacket || u.MaxPacketBytes > udpMaxPacket:
 		return "paket boyu sınırı 64 ile 65507 bayt arasında olmalı"
 	case u.MaxPPS < 0 || u.MaxPPS > udpMaxPPSLimit:
-		return "tünel paket/sn sınırı 0 ile 1000000 arasında olmalı (0 = sınırsız)"
+		return "tünel paket/sn sınırı 0 ile 1000000 arasında olmalı (0 = sunucu varsayılanı)"
 	case u.MaxFlowPPS < 0 || u.MaxFlowPPS > udpMaxPPSLimit:
-		return "bağlantı başına paket/sn sınırı 0 ile 1000000 arasında olmalı (0 = sınırsız)"
+		return "bağlantı başına paket/sn sınırı 0 ile 1000000 arasında olmalı (0 = sunucu varsayılanı)"
 	case u.MaxFlows < 1 || u.MaxFlows > udpMaxFlowLimit:
 		return "eş zamanlı bağlantı sınırı 1 ile 100000 arasında olmalı"
 	}

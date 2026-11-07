@@ -15,12 +15,12 @@ func (s *Store) GetTunnelAlert(ctx context.Context, tenantID, tunnelID string) (
 	err := s.pool.QueryRow(ctx,
 		`SELECT COALESCE(al.enabled,false), COALESCE(al.error_rate_pct,10), COALESCE(al.window_min,5),
 		        COALESCE(al.min_requests,20), COALESCE(al.notify_email,''), COALESCE(al.state,'ok'),
-		        al.last_changed_at, al.last_notified_at
+		        al.last_changed_at, al.last_notified_at, COALESCE(al.notify_lang,'')
 		 FROM tunnels t
 		 LEFT JOIN tunnel_alerts al ON al.tunnel_id = t.id
 		 WHERE t.id=$1 AND t.tenant_id=$2`, tunnelID, tenantID).
 		Scan(&a.Enabled, &a.ErrorRatePct, &a.WindowMin, &a.MinRequests, &a.NotifyEmail, &a.State,
-			&a.LastChangedAt, &a.LastNotifiedAt)
+			&a.LastChangedAt, &a.LastNotifiedAt, &a.NotifyLang)
 	if err != nil {
 		return store.TunnelAlert{}, store.ErrNotFound
 	}
@@ -47,14 +47,16 @@ func (s *Store) SetTunnelAlert(ctx context.Context, tenantID string, a store.Tun
 		a.MinRequests = 0
 	}
 	// Durum alanlarina DOKUNMA: yalnizca yapilandirma upsert edilir.
+	// notify_lang: istekte dil sinyali yoksa ('') mevcut deger korunur.
 	if _, err := s.pool.Exec(ctx,
-		`INSERT INTO tunnel_alerts (tunnel_id, enabled, error_rate_pct, window_min, min_requests, notify_email)
-		 VALUES ($1,$2,$3,$4,$5,$6)
+		`INSERT INTO tunnel_alerts (tunnel_id, enabled, error_rate_pct, window_min, min_requests, notify_email, notify_lang)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7)
 		 ON CONFLICT (tunnel_id) DO UPDATE
 		   SET enabled=EXCLUDED.enabled, error_rate_pct=EXCLUDED.error_rate_pct,
 		       window_min=EXCLUDED.window_min, min_requests=EXCLUDED.min_requests,
-		       notify_email=EXCLUDED.notify_email`,
-		a.TunnelID, a.Enabled, a.ErrorRatePct, a.WindowMin, a.MinRequests, a.NotifyEmail); err != nil {
+		       notify_email=EXCLUDED.notify_email,
+		       notify_lang=CASE WHEN EXCLUDED.notify_lang = '' THEN tunnel_alerts.notify_lang ELSE EXCLUDED.notify_lang END`,
+		a.TunnelID, a.Enabled, a.ErrorRatePct, a.WindowMin, a.MinRequests, a.NotifyEmail, a.NotifyLang); err != nil {
 		return fmt.Errorf("uyari kaydedilemedi: %w", err)
 	}
 	return nil
@@ -63,7 +65,7 @@ func (s *Store) SetTunnelAlert(ctx context.Context, tenantID string, a store.Tun
 func (s *Store) ListEnabledAlerts(ctx context.Context) ([]store.TunnelAlert, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT al.tunnel_id, t.tenant_id, al.error_rate_pct, al.window_min, al.min_requests,
-		        al.notify_email, al.state, al.last_changed_at, al.last_notified_at
+		        al.notify_email, al.state, al.last_changed_at, al.last_notified_at, al.notify_lang
 		 FROM tunnel_alerts al
 		 JOIN tunnels t ON t.id = al.tunnel_id
 		 WHERE al.enabled = true`)
@@ -76,7 +78,7 @@ func (s *Store) ListEnabledAlerts(ctx context.Context) ([]store.TunnelAlert, err
 	for rows.Next() {
 		a := store.TunnelAlert{Enabled: true}
 		if err := rows.Scan(&a.TunnelID, &a.TenantID, &a.ErrorRatePct, &a.WindowMin, &a.MinRequests,
-			&a.NotifyEmail, &a.State, &a.LastChangedAt, &a.LastNotifiedAt); err != nil {
+			&a.NotifyEmail, &a.State, &a.LastChangedAt, &a.LastNotifiedAt, &a.NotifyLang); err != nil {
 			return nil, err
 		}
 		out = append(out, a)

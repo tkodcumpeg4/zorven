@@ -8,8 +8,13 @@ const { user: currentUser, platformAdmin } = useAuth()
 const { t } = useI18n()
 
 const overview = ref<TeamOverview | null>(null)
-const members = ref<TeamMember[]>([])
-const pending = ref(true)
+const pager = usePagedList<TeamMember>(async (p) => {
+  const r = await api.pageTeamMembers(p)
+  overview.value = r.overview
+  return r
+}, { immediate: false })
+const members = pager.items
+const pending = pager.loading
 const searchQuery = ref('')
 
 // Davet Modalı State
@@ -51,16 +56,8 @@ function errMsg(err: any, fallback: string): string {
 onMounted(fetchTeam)
 
 async function fetchTeam() {
-  pending.value = true
-  try {
-    const data = await api.listTeamMembers()
-    overview.value = data
-    members.value = data.members || []
-  } catch (err: any) {
-    toast.error(errMsg(err, t('team.teamLoadFailed')))
-  } finally {
-    pending.value = false
-  }
+  await pager.reload()
+  if (pager.error.value) toast.error(errMsg(pager.error.value, t('team.teamLoadFailed')))
 }
 
 const filteredMembers = computed(() => {
@@ -94,6 +91,7 @@ async function handleInvite() {
       inviteRole.value
     )
     members.value.push(newMem)
+    void pager.reload(true)
     if (overview.value) {
       overview.value.count++
     }
@@ -161,6 +159,7 @@ async function handleRemoveMember(member: TeamMember) {
   try {
     await api.removeTeamMember(member.id)
     members.value = members.value.filter(m => m.id !== member.id)
+    void pager.reload(true)
     if (overview.value) {
       overview.value.count--
     }
@@ -467,6 +466,7 @@ function getInitials(name: string, email: string) {
         </table>
       </div>
     </div>
+    <ListPager :list="pager" />
 
     <!-- Modal: Yeni Uye Davet Et -->
     <div

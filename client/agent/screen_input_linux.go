@@ -112,6 +112,49 @@ func (x *xInput) apply(msg protocol.ScreenInput, rect displayRect) inputResult {
 		res = res.merge(x.key(msg, true))
 	case "keyup":
 		res = res.merge(x.key(msg, false))
+	case protocol.InputKindText:
+		res = res.merge(x.typeString(msg.Key))
+	}
+	return res
+}
+
+// typeString, metni karakter karakter yazar (IME/yapistirma). Karakter mevcut
+// klavye duzeninde yoksa o karakter ATLANIR ve sonuc error olur (sessiz kayip
+// yerine gorunur): X11'de gecici keymap degistirmeyiz.
+func (x *xInput) typeString(text string) inputResult {
+	res := inputResult{State: protocol.InputStateOK}
+	missing := 0
+	n := 0
+	for _, r := range text {
+		if n++; n > protocol.MaxScreenText {
+			break
+		}
+		var loc keyLoc
+		var ok bool
+		switch r {
+		case '\n', '\r':
+			if sym, found := codeToKeysym("Enter"); found {
+				loc, ok = x.lookup(sym)
+			}
+		case '\t':
+			if sym, found := codeToKeysym("Tab"); found {
+				loc, ok = x.lookup(sym)
+			}
+		default:
+			if sym := runeKeysym(r); sym != 0 {
+				loc, ok = x.lookup(sym)
+			}
+		}
+		if !ok {
+			missing++
+			continue
+		}
+		res = res.merge(x.typeText(loc, protocol.ScreenInput{}, true))
+		res = res.merge(x.pressCode(loc.code, false))
+	}
+	if missing > 0 && res.State == protocol.InputStateOK {
+		return inputResult{State: protocol.InputStateError,
+			Detail: fmt.Sprintf("%d karakter klavye duzeninde yok, yazilamadi", missing)}
 	}
 	return res
 }

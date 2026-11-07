@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"hash/fnv"
 	"time"
 
 	"github.com/tkodcumpeg4/zorven/shared/protocol"
@@ -61,14 +62,41 @@ type cursorTracker struct {
 	lastAt     time.Time
 	handle     uintptr
 	haveHandle bool
-	cache      map[uintptr]*cursorShape
+	// Onbellek ICERIK ozetiyle calisir: canli (animasyonlu) imlecler her adimda
+	// yeni bir tutac dondurebilir; tutac anahtarli onbellek surekli yeniden
+	// kurulurdu ve ayni gorunum tekrar tekrar gonderilirdi.
+	handles  map[uintptr]cursorHandle // tutac -> ozet (kisa omurlu)
+	lastHash uint64                   // panele son gonderilen bicimin ozeti
+	haveHash bool
+}
+
+// cursorHandle, bir tutacin cozulmus bicimi; tutaclar OS tarafindan yeniden
+// kullanilabilir, bu yuzden girdiler cursorHandleTTL sonra gecersizdir.
+type cursorHandle struct {
+	hash  uint64
+	shape *cursorShape
+	at    time.Time
+}
+
+const cursorHandleTTL = 10 * time.Second
+
+// cursorHash, bicimin icerik ozeti (FNV-1a 64).
+func cursorHash(s *cursorShape) uint64 {
+	h := fnv.New64a()
+	var hdr [16]byte
+	for i, v := range []int{s.W, s.H, s.HotX, s.HotY} {
+		hdr[i*4], hdr[i*4+1], hdr[i*4+2], hdr[i*4+3] = byte(v), byte(v>>8), byte(v>>16), byte(v>>24)
+	}
+	h.Write(hdr[:])
+	h.Write(s.RGBA)
+	return h.Sum64()
 }
 
 func newCursorTracker(src cursorSource, bounds func() displayRect, canvas func() (int, int),
 	sendPos func(protocol.ScreenCursor), sendShape func(protocol.ScreenCursorShape)) *cursorTracker {
 	return &cursorTracker{
 		src: src, bounds: bounds, canvas: canvas, sendPos: sendPos, sendShape: sendShape,
-		minInterval: cursorMinInterval, cache: map[uintptr]*cursorShape{},
+		minInterval: cursorMinInterval, handles: map[uintptr]cursorHandle{},
 	}
 }
 
@@ -92,24 +120,32 @@ func (t *cursorTracker) Step(now time.Time) {
 		st = cursorState{} // gizli say
 	}
 
-	// Bicim: yalniz tutac degisince gonderilir; tutac basina onbellek.
+	// Bicim: tutac degisince cozulur; panele YALNIZ icerik degisince gonderilir.
 	if st.Visible && (!t.haveHandle || st.Handle != t.handle) {
-		sh, ok := t.cache[st.Handle]
+		ch, ok := t.handles[st.Handle]
+		if ok && now.Sub(ch.at) > cursorHandleTTL {
+			ok = false
+		}
 		if !ok {
 			if s, got := t.src.Shape(st.Handle); got && s != nil {
 				s = limitCursorShape(s)
-				if len(t.cache) >= cursorShapeCacheMax {
-					t.cache = map[uintptr]*cursorShape{}
+				if len(t.handles) >= cursorShapeCacheMax {
+					t.handles = map[uintptr]cursorHandle{}
 				}
-				t.cache[st.Handle] = s
-				sh, ok = s, true
+				ch = cursorHandle{hash: cursorHash(s), shape: s, at: now}
+				t.handles[st.Handle] = ch
+				ok = true
 			}
 		}
-		if ok && sh != nil {
-			t.sendShape(protocol.ScreenCursorShape{
-				Type: protocol.TypeScreenCursorShape,
-				W:    sh.W, H: sh.H, HotX: sh.HotX, HotY: sh.HotY, Data: sh.RGBA,
-			})
+		if ok {
+			if !t.haveHash || ch.hash != t.lastHash {
+				sh := ch.shape
+				t.sendShape(protocol.ScreenCursorShape{
+					Type: protocol.TypeScreenCursorShape,
+					W:    sh.W, H: sh.H, HotX: sh.HotX, HotY: sh.HotY, Data: sh.RGBA,
+				})
+				t.lastHash, t.haveHash = ch.hash, true
+			}
 			t.handle, t.haveHandle = st.Handle, true
 		}
 	}
@@ -231,6 +267,8 @@ func cursorFromBitmaps(w, h int, color, mask []byte) *cursorShape {
 	if len(mask) < w*h*2*4 {
 		return nil
 	}
+	invert := make([]bool, w*h)
+	hasInvert := false
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
 			and, xor := andBit(x, y), andBit(x, y+h)
@@ -240,10 +278,20 @@ func cursorFromBitmaps(w, h int, color, mask []byte) *cursorShape {
 				// seffaf
 			case !and && xor:
 				out[i], out[i+1], out[i+2], out[i+3] = 255, 255, 255, 255
+			case and && xor:
+				// Ters cevirme (I-beam): ekran rengini tersler. Panelde terslemeyi
+				// yapamayiz; beyaz doldurup siyah kenar cizeriz ki hem acik hem
+				// koyu zeminde GORUNSUN (siyah doldurma koyu zeminde kayboluyordu).
+				out[i], out[i+1], out[i+2], out[i+3] = 255, 255, 255, 255
+				invert[y*w+x] = true
+				hasInvert = true
 			default:
-				out[i+3] = 255 // siyah (ters cevirme yaklasigi dahil)
+				out[i+3] = 255 // siyah
 			}
 		}
+	}
+	if hasInvert {
+		outlineInvert(out, invert, w, h)
 	}
 	return &cursorShape{W: w, H: h, RGBA: out}
 }
@@ -262,4 +310,23 @@ func argbToRGBA(px []uint32) []byte {
 		out[i*4], out[i*4+1], out[i*4+2], out[i*4+3] = r, g, b, a
 	}
 	return out
+}
+
+// outlineInvert, ters cevirme pikselleriyle komsu SEFFAF piksellere siyah kenar boyar.
+func outlineInvert(out []byte, invert []bool, w, h int) {
+	var edge []int
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			if out[(y*w+x)*4+3] != 0 {
+				continue
+			}
+			if (x > 0 && invert[y*w+x-1]) || (x < w-1 && invert[y*w+x+1]) ||
+				(y > 0 && invert[(y-1)*w+x]) || (y < h-1 && invert[(y+1)*w+x]) {
+				edge = append(edge, (y*w+x)*4)
+			}
+		}
+	}
+	for _, i := range edge { // iki gecis: okunurken yeni kenar komsulugu etkilemesin
+		out[i], out[i+1], out[i+2], out[i+3] = 0, 0, 0, 255
+	}
 }

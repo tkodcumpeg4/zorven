@@ -2,7 +2,9 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"sync"
+	"time"
 
 	"github.com/aymanbagabas/go-pty"
 	"github.com/tkodcumpeg4/zorven/shared/protocol"
@@ -17,6 +19,8 @@ import (
 type terminalManager struct {
 	cs *clientSession
 
+	maxSessions int // es zamanli oturum ust siniri (0 => maxTerminalSessions)
+
 	mu        sync.Mutex
 	sessions  map[string]*terminalSession
 	onChanged func() // oturum sayisi degistiginde cagrilir (nil olabilir)
@@ -25,6 +29,16 @@ type terminalManager struct {
 	plainZsh  bool     // true: Zorven zsh profili kullanilmaz
 	plainBash bool     // true: Zorven bash rcfile'i kullanilmaz
 }
+
+const (
+	// maxTerminalSessions, ajan basina es zamanli kabuk oturumu siniri.
+	maxTerminalSessions = 8
+	// pump toplama ayarlari: kisa surede gelen okumalar tek cerceve olur.
+	termCoalesceWindow = 10 * time.Millisecond
+	termCoalesceMax    = 32 * 1024
+	// termKillGrace, SIGHUP'tan sonra SIGKILL'e kadar taninan sure.
+	termKillGrace = time.Second
+)
 
 type terminalSession struct {
 	id   string
@@ -54,6 +68,10 @@ func (tm *terminalManager) open(ctx context.Context, msg protocol.TerminalOpen) 
 		tm.sendExit(ctx, msg.SessionID, 1, errUnknownShell.Error()+": "+msg.Shell)
 		return
 	}
+	if tm.full() {
+		tm.sendExit(ctx, msg.SessionID, 1, "terminal oturum siniri doldu")
+		return
+	}
 
 	p, err := pty.New()
 	if err != nil {
@@ -77,6 +95,12 @@ func (tm *terminalManager) open(ctx context.Context, msg protocol.TerminalOpen) 
 
 	ts := &terminalSession{id: msg.SessionID, pty: p, cmd: cmd}
 	tm.mu.Lock()
+	if len(tm.sessions) >= tm.limit() { // acilis yarisi: sinir yeniden kontrol
+		tm.mu.Unlock()
+		ts.shutdown()
+		tm.sendExit(ctx, msg.SessionID, 1, "terminal oturum siniri doldu")
+		return
+	}
 	tm.sessions[msg.SessionID] = ts
 	cb := tm.onChanged
 	tm.mu.Unlock()
@@ -90,37 +114,95 @@ func (tm *terminalManager) open(ctx context.Context, msg protocol.TerminalOpen) 
 	// Kabuk bitince temizle ve sunucuya bildir.
 	go func() {
 		err := cmd.Wait()
-		code := 0
-		if err != nil {
-			code = 1
-		}
-		tm.finish(ctx, ts, code, "")
+		tm.finish(ctx, ts, exitCodeOf(cmd, err), "")
 	}()
 }
 
-// pump, PTY ciktisini parca parca sunucuya iletir.
+// exitCodeOf, kabugun gercek cikis kodunu doner (sinyalle olmus => 128+sinyal).
+func exitCodeOf(cmd *pty.Cmd, err error) int {
+	if cmd != nil && cmd.ProcessState != nil {
+		if c := cmd.ProcessState.ExitCode(); c >= 0 {
+			return c
+		}
+		return signalExitCode(cmd.ProcessState)
+	}
+	if err != nil {
+		var ee interface{ ExitCode() int }
+		if errors.As(err, &ee) && ee.ExitCode() >= 0 {
+			return ee.ExitCode()
+		}
+		return 1
+	}
+	return 0
+}
+
+func (tm *terminalManager) limit() int {
+	if tm.maxSessions > 0 {
+		return tm.maxSessions
+	}
+	return maxTerminalSessions
+}
+
+func (tm *terminalManager) full() bool {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	return len(tm.sessions) >= tm.limit()
+}
+
+// pump, PTY ciktisini toplayarak sunucuya iletir. Okuyucu goroutine sinirli
+// kanala yazar; gonderim (sendControl) esenkron bloklar, kanal dolunca okuyucu
+// de bloklanir => bellek sinirsiz buyumez, veri dusmez.
+// Cikis kodunu Wait goroutine'i raporlar; burada yalniz kaynaklar birakilir.
 func (tm *terminalManager) pump(ctx context.Context, ts *terminalSession) {
+	chunks := make(chan []byte, 4)
+	stop := make(chan struct{})
 	defer func() {
+		close(stop)
 		go ts.shutdown()
-		tm.finish(ctx, ts, 0, "")
 	}()
 
-	buf := make([]byte, 8192)
-	for {
-		n, err := ts.pty.Read(buf)
-		if n > 0 {
-			out := make([]byte, n)
-			copy(out, buf[:n])
-			if serr := tm.cs.sendControl(ctx, protocol.TerminalOutput{
-				Type:      protocol.TypeTerminalOutput,
-				SessionID: ts.id,
-				Data:      out,
-			}, protocol.TypeTerminalOutput); serr != nil {
-				return
+	go func() {
+		defer close(chunks)
+		buf := make([]byte, 8192)
+		for {
+			n, err := ts.pty.Read(buf)
+			if n > 0 {
+				out := make([]byte, n)
+				copy(out, buf[:n])
+				select {
+				case chunks <- out:
+				case <-stop:
+					return
+				}
+			}
+			if err != nil {
+				return // EOF veya kabuk kapandi
 			}
 		}
-		if err != nil {
-			return // EOF veya kabuk kapandi
+	}()
+
+	for first := range chunks {
+		batch := first
+		timer := time.NewTimer(termCoalesceWindow)
+	collect:
+		for len(batch) < termCoalesceMax {
+			select {
+			case more, ok := <-chunks:
+				if !ok {
+					break collect
+				}
+				batch = append(batch, more...)
+			case <-timer.C:
+				break collect
+			}
+		}
+		timer.Stop()
+		if serr := tm.cs.sendControl(ctx, protocol.TerminalOutput{
+			Type:      protocol.TypeTerminalOutput,
+			SessionID: ts.id,
+			Data:      batch,
+		}, protocol.TypeTerminalOutput); serr != nil {
+			return
 		}
 	}
 }
@@ -202,7 +284,7 @@ func (tm *terminalManager) closeAll() {
 func (ts *terminalSession) shutdown() {
 	ts.once.Do(func() {
 		if ts.cmd != nil && ts.cmd.Process != nil {
-			ts.cmd.Process.Kill()
+			killProcessTree(ts.cmd.Process, termKillGrace)
 		}
 		ts.pty.Close()
 	})

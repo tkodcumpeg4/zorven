@@ -36,10 +36,19 @@ info:
     "Panel oturumu veya OAuth `full` kapsamı".
 
     ## Sayfalama
-    Liste uçları `?limit=` (varsayılan 50, maks 200) ve `?cursor=` kabul eder.
-    Yanıt gövdesi düz bir dizidir; devam bilgisi başlıklarda döner:
-    `X-Next-Cursor`, `X-Has-More` ve RFC5988 `Link: <...>; rel="next"`.
-    limit/cursor verilmezse tüm liste döner.
+    Liste uçlarının çoğu `?limit=` (1-500, varsayılan 500) ve `?offset=` (varsayılan 0) kabul eder.
+    Yanıt gövdesi düz bir dizidir (ya da o uç için belgelenen nesne); eşleşen toplam kayıt
+    sayısı `X-Total-Count` başlığında döner, `X-Has-More` ise devamında kayıt olup
+    olmadığını söyler. Sayısal olmayan ya da aralık dışı `limit`/`offset` değeri
+    `400 invalid_request` döndürür; yalnızca 500'ün üstündeki `limit` sessizce 500'e düşürülür.
+    Kendi sınırı olan birkaç uç (örneğin `GET /requests`, tünel erişim olayları ve
+    `GET /admin/users`) `limit` değerini kendi işleminde belirtir.
+
+    İstemciler, tüneller, hostname'ler ve cihazlar eski, isteğe bağlı cursor kipini de korur:
+    `?cursor=` verildiğinde kayıtlar id sırasıyla gelir, `limit` varsayılanı 50'dir (en çok 200)
+    ve devam bilgisi başlıklarda döner: `X-Next-Cursor`, `X-Has-More` ve RFC5988
+    `Link: <...>; rel="next"` (`X-Total-Count` yok). Tünel erişim olayları listesi her zaman
+    cursor tabanlıdır (en yeniden eskiye).
 
     ## Hatalar
     Tüm hatalar ortak biçimdedir:
@@ -152,7 +161,6 @@ tags:
     description: CIDR bazlı erişim kuralları
   - name: Analytics
     description: İstek logları, abonelik ve kullanım
-
   - name: Projects
     description: "Projeler ve organizasyon"
   - name: Policies
@@ -209,15 +217,26 @@ paths:
     get:
       tags: [Meta]
       summary: Kullanılabilir planlar
-      security: []
+      description: "Kimlik doğrulama gerekir (herkese açık değildir). Kapsam / erişim: API token'a açık; ek kapsam gerekmez."
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
       responses:
         "200":
           description: Plan listesi
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema:
-                type: array
-                items: { $ref: "#/components/schemas/Plan" }
+                type: object
+                required: [plans]
+                properties:
+                  plans:
+                    type: array
+                    items: { $ref: "#/components/schemas/Plan" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 
   /clients:
     get:
@@ -226,11 +245,13 @@ paths:
       description: "Kapsam: `clients:read`"
       parameters:
         - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
         - $ref: "#/components/parameters/Cursor"
       responses:
         "200":
           description: İstemci listesi
           headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
             X-Next-Cursor: { $ref: "#/components/headers/XNextCursor" }
             X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
@@ -251,7 +272,7 @@ paths:
               type: object
               required: [name]
               properties:
-                name: { type: string, example: "ev-pc" }
+                name: { type: string, example: "home-pc" }
       responses:
         "201":
           description: Oluşturuldu
@@ -317,11 +338,13 @@ paths:
       description: "Kapsam: `tunnels:read`"
       parameters:
         - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
         - $ref: "#/components/parameters/Cursor"
       responses:
         "200":
           description: Tünel listesi
           headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
             X-Next-Cursor: { $ref: "#/components/headers/XNextCursor" }
             X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
@@ -331,6 +354,8 @@ paths:
                 items: { $ref: "#/components/schemas/Tunnel" }
         "403": { $ref: "#/components/responses/Forbidden" }
     post:
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
       tags: [Tunnels]
       summary: Tünel oluştur
       description: "Kapsam: `tunnels:write`"
@@ -346,6 +371,8 @@ paths:
                 client_id: { type: string, example: "cli_a1b2c3" }
                 target: { type: string, example: "http://localhost:8000" }
                 hostname_id: { type: string, description: "Opsiyonel mevcut hostname'e bağla" }
+                no_domain: { type: boolean, default: false, description: "true ise otomatik hostname atanmaz: tünelin kendi adresi olmaz ve yalnızca yol (path) yönlendirmesinin hedefi olarak kullanılır. `hostname_id` verilmişse etkisizdir." }
+                ttl_sec: { type: integer, example: 3600, description: "Tüneli geçici yapar: bu kadar saniye geçince arka planda kaldırılır (60-86400, aksi halde `422 invalid_ttl`). 0, negatif değer ya da hiç verilmemesi = kalıcı. Yanıtta `ephemeral: true` ve `expires_at` bulunur." }
       responses:
         "201":
           description: Oluşturuldu
@@ -409,11 +436,13 @@ paths:
       description: "Kapsam: `hostnames:read`"
       parameters:
         - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
         - $ref: "#/components/parameters/Cursor"
       responses:
         "200":
           description: Hostname listesi
           headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
             X-Next-Cursor: { $ref: "#/components/headers/XNextCursor" }
             X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
@@ -423,6 +452,8 @@ paths:
                 items: { $ref: "#/components/schemas/Hostname" }
         "403": { $ref: "#/components/responses/Forbidden" }
     post:
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
       tags: [Hostnames]
       summary: Platform hostname'i oluştur
       description: |
@@ -462,6 +493,8 @@ paths:
 
   /hostnames/custom:
     post:
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
       tags: [Hostnames]
       summary: Özel (müşteri) domain bağla
       description: "Kapsam: `hostnames:write`. DNS doğrulama talimatları döner."
@@ -473,7 +506,7 @@ paths:
               type: object
               required: [fqdn]
               properties:
-                fqdn: { type: string, example: "api.musteri.com" }
+                fqdn: { type: string, example: "api.customer.com" }
                 tunnel_id: { type: string }
       responses:
         "201":
@@ -544,14 +577,28 @@ paths:
       tags: [IP Allowlist]
       summary: IP kurallarını listele
       description: "Kapsam: `ip_allowlist:read`"
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+        - { name: tunnel_id, in: query, schema: { type: string }, description: "Yalnızca bu tünele uygulanan kurallar: tünele özel kurallar ve kiracı geneli kurallar (`tunnel_id` null)" }
       responses:
         "200":
           description: Kural listesi
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema:
-                type: array
-                items: { $ref: "#/components/schemas/IPRule" }
+                type: object
+                required: [rules, count]
+                properties:
+                  rules:
+                    type: array
+                    items: { $ref: "#/components/schemas/IPRule" }
+                  count:
+                    type: integer
+                    description: "Bu yanıttaki (sayfadaki) kural sayısı; toplam sayı `X-Total-Count` başlığındadır"
         "403": { $ref: "#/components/responses/Forbidden" }
     post:
       tags: [IP Allowlist]
@@ -630,6 +677,8 @@ paths:
       responses:
         "200":
           description: Log listesi
+          headers:
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema:
@@ -726,14 +775,14 @@ paths:
       summary: MCP cagri logu
       description: "Kapsam: `analytics:read`. Yalniz ust veri (yontem, arac, durum, sure); arguman ve sonuc ASLA saklanmaz."
       parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
         - { name: id, in: path, required: true, schema: { type: string } }
         - { name: tool, in: query, schema: { type: string } }
         - { name: status, in: query, schema: { type: string, enum: [ok, error, denied, rate_limited] } }
         - { name: window, in: query, schema: { type: string, enum: ["1h", "24h", "7d", "30d"] } }
-        - { name: limit, in: query, schema: { type: integer, maximum: 200 } }
-        - { name: offset, in: query, schema: { type: integer } }
       responses:
-        "200": { description: "Çağrılar, en yeni önce" }
+        "200": { description: "Çağrılar, en yeni önce", headers: { X-Has-More: { $ref: "#/components/headers/XHasMore" } } }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /tunnels/{id}/mcp/stats:
@@ -795,10 +844,15 @@ paths:
       summary: Aktif kapı izinleri (IP)
       description: "Kapsam: `tunnels:read`. Süresi dolmamış, iptal edilmemiş izinler."
       parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
         - { name: id, in: path, required: true, schema: { type: string } }
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema:
@@ -894,9 +948,15 @@ paths:
       tags: [Projects]
       summary: "Projeleri listele"
       description: "Kapsam / erişim: API token'a açık."
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema: { type: array, items: { $ref: "#/components/schemas/Project" } }
@@ -1012,7 +1072,15 @@ paths:
           description: OK
           content:
             application/json:
-              schema: { type: object, additionalProperties: true }
+              schema:
+                type: object
+                required: [ticket, expires_in, max_fps, max_resolution, control_allowed]
+                properties:
+                  ticket: { type: string, description: "Tek kullanımlık, opak bilet; `GET /clients/{id}/screen` WebSocket'i açılırken `?ticket=` olarak verilir" }
+                  expires_in: { type: integer, description: "Biletin sona ermesine kalan saniye" }
+                  max_fps: { type: integer, maximum: 60, description: "Sunucunun bu bilet için uygulayacağı kare hızı tavanı: plan değeri (30; Team ve Enterprise'ta 60), plan değeri 0 ya da bilinmiyorsa 30. Ajan bunu daha da düşürebilir; etkin değer WebSocket'te `caps.max_fps` ile bildirilir" }
+                  max_resolution: { type: string, description: "Plana göre en yüksek yayın çözünürlüğü: `720p` ya da `1080p`" }
+                  control_allowed: { type: boolean, description: "Çağıranın uzak ekranı denetleyip denetleyemeyeceği (fare ve klavye, pano, dosya aktarımı, kısayollar). Yalnızca kiracı owner/admin ve platform yöneticileri denetleyebilir; üyeler ve servis hesapları yalnızca izler" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "422": { $ref: "#/components/responses/ValidationError" }
@@ -1411,13 +1479,13 @@ paths:
         required: true
         content:
           application/json:
-            schema: { type: object, properties: { waf: { type: object, additionalProperties: true }, geo: { type: object, additionalProperties: true }, bot: { $ref: "#/components/schemas/TunnelSecurity/properties/bot" }, rate: { $ref: "#/components/schemas/TunnelSecurity/properties/rate" } } }
+            schema: { type: object, properties: { waf: { type: object, additionalProperties: true }, geo: { type: object, additionalProperties: true }, bot: { $ref: "#/components/schemas/TunnelSecurity/properties/bot" }, rate: { $ref: "#/components/schemas/TunnelSecurity/properties/rate" }, trusted: { $ref: "#/components/schemas/TunnelSecurity/properties/trusted" } } }
       responses:
         "200":
           description: OK
           content:
             application/json:
-              schema: { type: object, properties: { ok: { type: boolean }, waf: { type: object, additionalProperties: true }, geo: { type: object, additionalProperties: true }, bot: { $ref: "#/components/schemas/TunnelSecurity/properties/bot" }, rate: { $ref: "#/components/schemas/TunnelSecurity/properties/rate" } } }
+              schema: { type: object, properties: { ok: { type: boolean }, waf: { type: object, additionalProperties: true }, geo: { type: object, additionalProperties: true }, bot: { $ref: "#/components/schemas/TunnelSecurity/properties/bot" }, rate: { $ref: "#/components/schemas/TunnelSecurity/properties/rate" }, trusted: { $ref: "#/components/schemas/TunnelSecurity/properties/trusted" } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -1500,9 +1568,15 @@ paths:
       tags: [Tunnels]
       summary: "MCP API anahtarları"
       description: "Kapsam / erişim: yalnızca panel oturumu. OAuth `full` kapsamına da KAPALI (`403 full_scope_excluded`)."
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema: { type: object, additionalProperties: true }
@@ -1567,9 +1641,15 @@ paths:
       tags: [Hostnames]
       summary: "Yol (path) yönlendirmeleri"
       description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı)."
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema: { type: object, properties: { fqdn: { type: string }, routes: { type: array, items: { $ref: "#/components/schemas/PathRoute" } } } }
@@ -1691,9 +1771,15 @@ paths:
       tags: [Policies]
       summary: "Politikaları listele"
       description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı)."
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema: { type: object, properties: { policies: { type: array, items: { $ref: "#/components/schemas/Policy" } }, count: { type: integer } } }
@@ -1815,11 +1901,15 @@ paths:
       summary: "Cihaz envanteri"
       description: "Kapsam / erişim: API token'a açık."
       parameters:
-        - { $ref: "#/components/parameters/Limit" }
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
         - { $ref: "#/components/parameters/Cursor" }
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema: { type: array, items: { $ref: "#/components/schemas/Device" } }
@@ -1884,9 +1974,15 @@ paths:
       tags: [Network]
       summary: "Özel ağ kaynakları"
       description: "Kapsam / erişim: API token'a açık."
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema: { type: object, properties: { resources: { type: array, items: { type: object, additionalProperties: true } } } }
@@ -1928,9 +2024,15 @@ paths:
       tags: [Network]
       summary: "Zorven Net düğümleri"
       description: "Kapsam / erişim: API token'a açık."
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema: { type: object, properties: { nodes: { type: array, items: { type: object, additionalProperties: true } } } }
@@ -1955,9 +2057,15 @@ paths:
       tags: [Network]
       summary: "Port paylaşımları"
       description: "Kapsam / erişim: API token'a açık."
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema: { type: object, properties: { shares: { type: array, items: { $ref: "#/components/schemas/NetShare" } }, count: { type: integer } } }
@@ -2033,9 +2141,15 @@ paths:
       tags: [Network]
       summary: "Tünel bölgesi kuralları"
       description: "Kapsam / erişim: API token'a açık. Owner/admin rolü gerekir."
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema: { type: object, properties: { rules: { type: array, items: { $ref: "#/components/schemas/TunRule" } }, zone: { type: string } } }
@@ -2206,9 +2320,15 @@ paths:
       tags: [Captcha]
       summary: "CAPTCHA sitelerini listele"
       description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı). Yazma owner/admin; okuma member. Her site için bugün ve son 7 gün sayaçları (`stats`) döner; gizli anahtar dönmez."
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema: { type: object, properties: { sites: { type: array, items: { type: object, properties: { id: { type: string }, name: { type: string }, site_key: { type: string }, secret: { type: string, description: "zcsec_..., only on create/rotate" }, domains: { type: array, items: { type: string } }, difficulty: { type: integer, minimum: 14, maximum: 22 }, pass_cookie: { type: object, properties: { enabled: { type: boolean }, ttl_minutes: { type: integer, minimum: 5, maximum: 43200 } } }, created_at: { type: string, format: date-time }, updated_at: { type: string, format: date-time }, stats: { type: object, properties: { today: { $ref: "#/components/schemas/CaptchaTotals" }, last_7_days: { $ref: "#/components/schemas/CaptchaTotals" } } } } } } } }
@@ -2287,9 +2407,15 @@ paths:
       tags: [Secrets]
       summary: "Secret'ları listele (değer yok)"
       description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı)."
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema: { type: object, properties: { secrets: { type: array, items: { $ref: "#/components/schemas/Secret" } }, count: { type: integer } } }
@@ -2332,15 +2458,23 @@ paths:
       tags: [Tokens]
       summary: "API token'larını listele"
       description: "Kapsam / erişim: yalnızca panel oturumu. OAuth `full` kapsamına da KAPALI (`403 full_scope_excluded`)."
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema: { type: object, properties: { tokens: { type: array, items: { $ref: "#/components/schemas/APIToken" } }, count: { type: integer } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
     post:
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
       tags: [Tokens]
       summary: "API token oluştur"
       description: "Token düz metni yalnızca bu yanıtta bir kez döner. Pro+ plan gerekir. Kapsam / erişim: yalnızca panel oturumu. OAuth `full` kapsamına da KAPALI (`403 full_scope_excluded`)."
@@ -2394,9 +2528,15 @@ paths:
       tags: [Tokens]
       summary: "API token'larını listele (takma ad)"
       description: "Kapsam / erişim: yalnızca panel oturumu. OAuth `full` kapsamına da KAPALI (`403 full_scope_excluded`)."
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema: { type: object, properties: { tokens: { type: array, items: { $ref: "#/components/schemas/APIToken" } }, count: { type: integer } } }
@@ -2456,9 +2596,15 @@ paths:
       tags: [Team]
       summary: "Ekip üyeleri"
       description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı)."
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema: { type: object, properties: { members: { type: array, items: { $ref: "#/components/schemas/TeamMember" } }, count: { type: integer } } }
@@ -2467,6 +2613,8 @@ paths:
 
   /team/members/invite:
     post:
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
       tags: [Team]
       summary: "Üye davet et"
       description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı). Owner/admin rolü gerekir."
@@ -2549,9 +2697,15 @@ paths:
       tags: [Team]
       summary: "Üyenin istemci token'ları"
       description: "Kapsam / erişim: yalnızca panel oturumu. OAuth `full` kapsamına da KAPALI (`403 full_scope_excluded`). Owner/admin rolü gerekir."
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema: { type: array, items: { $ref: "#/components/schemas/Client" } }
@@ -2601,9 +2755,15 @@ paths:
       tags: [Team]
       summary: "Bana gelen davetler"
       description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı)."
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema: { type: object, properties: { invitations: { type: array, items: { type: object, additionalProperties: true } } } }
@@ -2681,10 +2841,15 @@ paths:
       summary: "Mesajları listele"
       description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı)."
       parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
         - { name: box, in: query, schema: { type: string }, description: "folder" }
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema: { type: array, items: { $ref: "#/components/schemas/MailMessage" } }
@@ -2749,9 +2914,15 @@ paths:
       tags: [Mail]
       summary: "Klasörler"
       description: "Kapsam / erişim: Panel oturumu veya OAuth `full` kapsamı (API token'a kapalı)."
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema: { type: object, properties: { folders: { type: array, items: { type: string } } } }
@@ -2801,10 +2972,15 @@ paths:
       summary: "Posta uygulama parolaları"
       description: "Kapsam / erişim: yalnızca panel oturumu. OAuth `full` kapsamına da KAPALI (`403 full_scope_excluded`)."
       parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
         - { name: mailbox, in: query, schema: { type: string } }
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema: { type: object, additionalProperties: true }
@@ -2895,9 +3071,15 @@ paths:
       tags: ["Platform admin"]
       summary: "Kiracıları listele"
       description: "Kapsam / erişim: yalnızca gerçek platform yöneticisi (panel oturumu veya OAuth `full`); aksi halde `403 forbidden`."
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema: { type: array, items: { type: object, additionalProperties: true } }
@@ -2909,9 +3091,15 @@ paths:
       tags: ["Platform admin"]
       summary: "Tüm istemciler"
       description: "Kapsam / erişim: yalnızca gerçek platform yöneticisi (panel oturumu veya OAuth `full`); aksi halde `403 forbidden`."
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema: { type: array, items: { type: object, additionalProperties: true } }
@@ -2923,9 +3111,15 @@ paths:
       tags: ["Platform admin"]
       summary: "Tüm hostname'ler"
       description: "Kapsam / erişim: yalnızca gerçek platform yöneticisi (panel oturumu veya OAuth `full`); aksi halde `403 forbidden`."
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema: { type: array, items: { type: object, additionalProperties: true } }
@@ -2937,9 +3131,15 @@ paths:
       tags: ["Platform admin"]
       summary: "Kötüye kullanım raporları"
       description: "Kapsam / erişim: yalnızca gerçek platform yöneticisi (panel oturumu veya OAuth `full`); aksi halde `403 forbidden`."
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema: { type: object, properties: { reports: { type: array, items: { type: object, additionalProperties: true } } } }
@@ -3184,6 +3384,12 @@ components:
             full: "Tam erişim: panel oturumuyla aynı yetki (step-up gerekir)"
 
   parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9_:.-]+$' }
+      description: "Kritik POST'larda tekrar güvenliği. 1-128 karakter ([A-Za-z0-9_-:.]), kiracı başına 24 saat geçerli. Aynı anahtar + aynı istek: ilk yanıt `Idempotent-Replayed: true` ile tekrarlanır. Aynı anahtar + farklı istek: `422 idempotency_key_mismatch`. İlk istek sürerken: `409 idempotency_in_progress`. 5xx ve 401/403/408/409/425/429 yanıtları saklanmaz (aynı anahtarla yeniden denenebilir)."
     PathID:
       name: id
       in: path
@@ -3193,8 +3399,14 @@ components:
       name: limit
       in: query
       required: false
-      schema: { type: integer, default: 50, maximum: 200 }
-      description: Sayfa boyutu (opt-in sayfalama)
+      schema: { type: integer, minimum: 1, maximum: 500, default: 500 }
+      description: "Sayfa boyutu (1-500, varsayılan 500)"
+    Offset:
+      name: offset
+      in: query
+      required: false
+      schema: { type: integer, minimum: 0, default: 0 }
+      description: "Atlanacak kayıt sayısı (sayfalama)"
     Cursor:
       name: cursor
       in: query
@@ -3203,6 +3415,9 @@ components:
       description: Önceki yanıtın X-Next-Cursor değeri
 
   headers:
+    XTotalCount:
+      description: "Filtreye uyan toplam kayıt sayısı"
+      schema: { type: integer }
     XNextCursor:
       description: Sonraki sayfa cursor'ı (varsa)
       schema: { type: string }
@@ -3261,7 +3476,7 @@ components:
       type: object
       properties:
         id: { type: string, example: "cli_a1b2c3" }
-        name: { type: string, example: "ev-pc" }
+        name: { type: string, example: "home-pc" }
         status: { type: string, enum: [online, offline] }
         version: { type: string }
         remote_addr: { type: string }
@@ -3273,10 +3488,23 @@ components:
       type: object
       properties:
         id: { type: string, example: "tun_x9y8z7" }
+        project_id: { type: string, description: "Tünelin ait olduğu proje (boşsa yanıtta yer almaz)" }
         client_id: { type: string, example: "cli_a1b2c3" }
         target: { type: string, example: "http://localhost:8000" }
         enabled: { type: boolean }
         created_at: { type: string, format: date-time }
+        proto: { type: string, enum: [http, tcp, udp], description: "Tünelin taşıdığı protokol" }
+        exposure: { type: string, enum: [auto, port, sni, private], description: "Tünele nasıl erişildiği: `auto` (HTTP), `port` (ayrılmış TCP/UDP portu), `sni` (443 portunda SNI) ya da `private` (özel kaynak; internete hiç açılmaz)" }
+        public_port: { type: integer, description: "Ayrılmış port kipinde atanan genel port (yoksa yanıtta yer almaz)" }
+        public_host: { type: string, description: "Genel host adı; tünel adresi `public_host:public_port` olur (yoksa yanıtta yer almaz)" }
+        frozen: { type: boolean, description: "Platform yöneticisi tüneli askıya aldıysa true (false ise yanıtta yer almaz)" }
+        ephemeral: { type: boolean, description: "`ttl_sec` ile oluşturulan geçici tünel için true (false ise yanıtta yer almaz)" }
+        expires_at: { type: string, format: date-time, description: "Geçici tünelin kaldırılacağı zaman (kalıcı tünelde yanıtta yer almaz)" }
+        expired_at: { type: string, format: date-time, description: "Geçici tünelin süresinin dolup trafiğe kapandığı zaman; silinene kadar (varsayılan 24 saat) saklanır, bu sürede ziyaretçiler `410 tunnel_expired` alır (süresi dolmamış tünelde yanıtta yer almaz)" }
+        delete_at: { type: string, format: date-time, description: "Süresi dolan geçici tünelin ve otomatik platform adının silineceği zaman (`expired_at` + saklama süresi)" }
+        private_name: { type: string, description: "Özel kaynağın adı, örn. `db.internal` (yalnızca `exposure` `private` iken)" }
+        app_id: { type: string, description: "Uygulama yönetimli tünelin sahibi uygulama (`zapp://` hedefi; aksi halde yer almaz)" }
+        app_service: { type: string, description: "Tünelin işaret ettiği uygulama servisi (aksi halde yer almaz)" }
         hostnames:
           type: array
           items: { $ref: "#/components/schemas/Hostname" }
@@ -3383,9 +3611,18 @@ components:
         bandwidth_limit_bytes: { type: [integer, "null"] }
         bandwidth_normal_mbps: { type: integer }
         bandwidth_throttled_mbps: { type: integer }
+        max_screen_streams: { type: [integer, "null"], description: "Eşzamanlı uzak ekran yayını sayısı; null = sınırsız" }
+        screen_max_fps: { type: integer, description: "Uzak ekran yayınlarının en yüksek kare hızı (saniyedeki kare)" }
+        log_retention_days: { type: integer, description: "İstek günlüklerinin ve tünel giriş olaylarının saklandığı gün sayısı" }
         max_members: { type: [integer, "null"] }
         has_api_access: { type: boolean }
         has_ip_allowlist: { type: boolean }
+        extra_device_price: { type: integer, description: "Ek cihaz başına aylık fiyat, USD cent (Team eklentisi; 0 = sunulmaz)" }
+        extra_gb_price: { type: integer, description: "Aylık trafiğe eklenen her ek GB için fiyat, USD cent (Team eklentisi; 0 = sunulmaz)" }
+        max_projects: { type: [integer, "null"], description: "Organizasyon başına proje sayısı (varsayılan proje dahil); null = sınırsız" }
+        max_owned_orgs: { type: [integer, "null"], description: "Bir kullanıcının sahip olabileceği organizasyon sayısı; null = sınırsız" }
+        max_short_names: { type: [integer, "null"], description: "Kiracı başına global kısa ad (`<ad>.<platform>`) sayısı; 0 = yok; null = sınırsız" }
+        max_reserved_ports: { type: [integer, "null"], description: "Kiracı başına ayrılmış TCP/UDP port sayısı; 0 = yok; null = sınırsız" }
 
     Subscription:
       type: object
@@ -3536,10 +3773,16 @@ components:
           description: "Hız sınırı (tünel+IP, pencere başına). Pro+."
           properties:
             enabled: { type: boolean }
-            requests: { type: integer, minimum: 1, maximum: 100000, default: 120, description: "Pencere başına istek (1-100000, varsayılan 120)" }
+            requests: { type: integer, minimum: 1, maximum: 1000000, default: 120, description: "Pencere başına istek (1-1000000, varsayılan 120)" }
             window_seconds: { type: integer, minimum: 1, maximum: 3600, default: 60, description: "Pencere süresi, saniye (1-3600, varsayılan 60)" }
             action: { type: string, enum: [block, challenge], default: block, description: "Sınır aşılınca eylem (varsayılan block)" }
             exclude_paths: { type: array, maxItems: 32, items: { type: string }, description: "Hariç tutulan yollar (en fazla 32, `*` yalnız sonda)" }
+        trusted:
+          type: object
+          description: "Güvenilir IP'ler: bu adreslerden gelen isteklere WAF, bot doğrulaması ve hız sınırı uygulanmaz (erişim kuralları geçerli kalır). Tüm planlar."
+          properties:
+            cidrs: { type: array, maxItems: 100, items: { type: string }, description: "Tek IP (/32 /128'e normalize) veya CIDR; en fazla 100. IPv4 için /8'den, IPv6 için /32'den geniş aralıklar 422 ile reddedilir." }
+            skip_geo: { type: boolean, default: false, description: "Geo (ülke) kuralını da atla (varsayılan false)" }
 
     PathRoute:
       type: object

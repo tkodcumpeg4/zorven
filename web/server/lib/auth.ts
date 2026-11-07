@@ -6,12 +6,12 @@ import { APIError } from "better-auth/api"
 import { authHooks } from "./auth-hooks"
 import { sendMail } from "./mailer"
 import { stripBrandKeywords, slugRejectReason } from "./brand"
-import {
-  verificationEmail,
-  resetPasswordEmail,
-  otpEmail,
-  changeEmailApprovalEmail,
-} from "./email-templates"
+import { createEmailCallbacks } from "./email-callbacks"
+import { pickEmailLangFrom, savedEmailLang, type EmailLang } from "./email-lang"
+import { accountPlugin } from "./account-plugin"
+import { deleteUserOptions } from "./account-delete"
+import { createAccountClient } from "./account-internal"
+import { apiBase } from "./signup-guard"
 
 const { Pool } = pg
 
@@ -45,6 +45,30 @@ const secret = requireEnvOrDevDefault(
 // Signup hook'unun kullandigi ayri bir havuz (Better Auth'un ic havuzuna
 // karismadan ham SQL calistirmak icin).
 const hookPool = new Pool({ connectionString })
+
+/**
+ * Islem e-postasinin dili (tr/en/ja/zh): kullanicinin kayitli tercihi
+ * (announcement_prefs.lang) > panel dili cerezi (zorven_lang) > Accept-Language > tr.
+ * source: Better Auth'un geri cagriya verdigi istek ya da baglam (olmayabilir).
+ * Bkz. email-lang.ts. Dil secimi hatasi e-posta gonderimini ASLA bozmaz.
+ */
+async function emailLangFor(userId: string | undefined, source: unknown): Promise<EmailLang> {
+  return pickEmailLangFrom(source, await savedEmailLang(hookPool, userId))
+}
+
+// Dogrulama, sifre sifirlama, e-posta degisikligi onayi ve 2FA kodu e-postalari
+// (dil secimi + sablon + gonderim; bkz. email-callbacks.ts, birim testli).
+const emailCallbacks = createEmailCallbacks({ langFor: emailLangFor, send: sendMail })
+
+// Hesap silme, etkin oturumlar ve kisisel veri disa aktarma (account-plugin.ts, account-delete.ts).
+// Go ic cagrisi (tek uyeli organizasyonlari silme, uyelik/anahtar temizligi) BETTER_AUTH_SECRET'tan
+// turetilen anahtarla imzalanir; Go ayni degeri okur (server/main.go, firstNonEmpty sirasi ayni).
+const accountDeps = {
+  db: hookPool,
+  account: createAccountClient({ master: secret, baseUrl: apiBase(process.env) }),
+  langFor: emailLangFor,
+  send: sendMail,
+}
 
 /**
  * FAZ 3.5 — kullanici BASINA sahip olunabilecek organizasyon siniri.
@@ -175,16 +199,9 @@ async function uniqueOrgSlug(email: string): Promise<string> {
 //     Platform Admin yapiyordu — bkz. admin.go isPlat).
 //   - Ekip davetleri burada OTOMATIK KABUL EDILMEZ: davetli e-postadaki linkten
 //     (/invite?id=...) acikca kabul eder. Kayit akisi o sayfaya geri doner.
-async function provisionNewUser(userId: string, email: string, name: string): Promise<void> {
+async function provisionNewUser(userId: string, email: string, name: string, lang: EmailLang = "tr"): Promise<void> {
   const client = await hookPool.connect()
   try {
-    const pending = await client.query(
-      `SELECT 1 FROM "invitation"
-       WHERE lower("email") = lower($1) AND "status" = 'pending' AND "expiresAt" > now() LIMIT 1`,
-      [email],
-    )
-    const invitedSomewhere = pending.rows.length > 0
-
     // Uyeligi yoksa kisisel organizasyon olustur.
     const { rows } = await client.query(
       `SELECT count(*)::int AS n FROM "member" WHERE "userId" = $1`,
@@ -282,10 +299,8 @@ export const auth = betterAuth({
     // proxy'sinde temizlenir (server/authproxy.go).
     revokeSessionsOnPasswordReset: true,
     // "Sifremi unuttum" akisi: sifirlama linkini e-posta ile yollar.
-    sendResetPassword: async ({ user, url }) => {
-      const { subject, html, text } = resetPasswordEmail(user.name ?? "", url)
-      await sendMail({ to: user.email, subject, html, text })
-    },
+    // Dil: kayitli tercih > panel dili cerezi > Accept-Language > tr (emailLangFor).
+    sendResetPassword: emailCallbacks.sendResetPassword,
   },
   emailVerification: {
     // Kayit aninda otomatik dogrulama maili gonder.
@@ -295,10 +310,7 @@ export const auth = betterAuth({
     sendOnSignIn: true,
     // Kullanici linke tiklayinca otomatik oturum acilsin (tekrar giris gerekmesin).
     autoSignInAfterVerification: true,
-    sendVerificationEmail: async ({ user, url }) => {
-      const { subject, html, text } = verificationEmail(user.name ?? "", url)
-      await sendMail({ to: user.email, subject, html, text })
-    },
+    sendVerificationEmail: emailCallbacks.sendVerificationEmail,
   },
   user: {
     // Profil sayfasindan e-posta degistirme. Guvenlik: onay linki MEVCUT
@@ -310,11 +322,12 @@ export const auth = betterAuth({
     // oldugu icin onay adimi atlanip link dogrudan yeni adrese gidiyordu).
     changeEmail: {
       enabled: true,
-      sendChangeEmailConfirmation: async ({ user, newEmail, url }) => {
-        const { subject, html, text } = changeEmailApprovalEmail(user.name ?? "", newEmail, url)
-        await sendMail({ to: user.email, subject, html, text })
-      },
+      sendChangeEmailConfirmation: emailCallbacks.sendChangeEmailConfirmation,
     },
+    // Hesabi silme (panel: Profil > Tehlikeli bolge). Taze oturum + parola + 30 dk gecerli
+    // e-posta onay baglantisi; ayrintilar ve Better Auth'un tazelik/parola kontrolunu
+    // e-posta onayi varken atladigi not icin bkz. account-delete.ts.
+    deleteUser: deleteUserOptions(accountDeps),
   },
   // Kullanici olusturuldugunda (kayit): bekleyen davetleri kabul et ve/veya
   // kisisel organizasyon olustur. Hata olursa kaydi BOZMA (yalnizca logla) —
@@ -322,9 +335,10 @@ export const auth = betterAuth({
   databaseHooks: {
     user: {
       create: {
-        after: async (user: any) => {
+        after: async (user: any, ctx: any) => {
           try {
-            await provisionNewUser(user.id, user.email, user.name ?? "")
+            // Kayit istegi (panel dili cerezi / Accept-Language) kayit e-postalarinin dilini belirler.
+            await provisionNewUser(user.id, user.email, user.name ?? "", await emailLangFor(user.id, ctx))
           } catch (e) {
             console.error("[signup-hook] kullanici provizyonu basarisiz:", e)
           }
@@ -417,14 +431,18 @@ export const auth = betterAuth({
     twoFactor({
       issuer: "Zorven",
       otpOptions: {
-        // E-posta OTP suresi (saniye) ve gonderim: kendi mail sunucumuz.
-        period: 300,
-        async sendOTP({ user, otp }) {
-          const { subject, html, text } = otpEmail(user.name ?? "", otp)
-          await sendMail({ to: user.email, subject, html, text })
-        },
+        // E-posta OTP suresi DAKIKA cinsinden (Better Auth: period * 60 * 1000).
+        // Eskiden "saniye" sanilip 300 yaziliyordu: kod 5 saat gecerli kaliyordu.
+        period: 5,
+        // Kod veritabaninda duz metin degil, ozet olarak saklanir.
+        storeOTP: "hashed",
+        // Ikinci parametre uc baglamidir ({ request, headers }); dil secimi ayni kural.
+        sendOTP: emailCallbacks.sendOTP,
       },
     }),
+    // Etkin oturumlar (/zorven/sessions), kisisel veri disa aktarma (/zorven/account/export)
+    // ve hesap silme kancalari. Go yalniz /api/auth/* yolunu aktardigi icin uclar burada.
+    accountPlugin(accountDeps),
     bearer(),
   ],
 })

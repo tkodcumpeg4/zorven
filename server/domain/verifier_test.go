@@ -74,6 +74,30 @@ func TestValidateDomain(t *testing.T) {
 	}
 }
 
+// Ek 1 madde 28: joker (*.) ozel alan adlari ACME ile sertifika alamayacagi icin acik hatayla reddedilir;
+// hata ErrInvalidDomain'i de korur (mevcut hata bicimi: API invalid_domain, Apps invalid_hostname).
+func TestValidateDomain_RejectsWildcard(t *testing.T) {
+	for _, d := range []string{"*.example.com", "*.sub.example.com", "*.example.com.", "*.EXAMPLE.com", "foo.*.example.com", "a*b.example.com", "*"} {
+		err := ValidateDomain(d, "rpshell.app")
+		if err == nil {
+			t.Errorf("ValidateDomain(%q) reddedilmeliydi", d)
+			continue
+		}
+		if !errors.Is(err, ErrWildcardDomain) || !errors.Is(err, ErrInvalidDomain) {
+			t.Errorf("ValidateDomain(%q) ErrWildcardDomain ve ErrInvalidDomain sarmali: %v", d, err)
+		}
+		if !strings.Contains(err.Error(), "joker alan adlari") || !strings.Contains(err.Error(), "ayri ekleyin") {
+			t.Errorf("ValidateDomain(%q) mesaji acik olmali: %q", d, err.Error())
+		}
+	}
+	// Joker olmayan adlar etkilenmez.
+	for _, d := range []string{"app.example.com", "a-b.example.com", "x.y.example.co.uk"} {
+		if err := ValidateDomain(d, "rpshell.app"); err != nil {
+			t.Errorf("ValidateDomain(%q) kabul edilmeliydi: %v", d, err)
+		}
+	}
+}
+
 func TestVerifyCustomDomain_CNAME(t *testing.T) {
 	ctx := context.Background()
 	platform := "rpshell.app"

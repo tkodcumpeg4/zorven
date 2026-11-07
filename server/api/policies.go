@@ -13,6 +13,11 @@ import (
 
 // FAZ 1 (F04): Birlesik Policy motoru REST uclari. Her degisiklikte router snapshot'i
 // tazelenir (tunnelsChanged). Pro+ plan gerektirir.
+//
+// PLAN KAPISI (karar 2026-10-30, Ek 1 madde 3): kapi YALNIZ olusturmada ve duzenlemede
+// (createPolicy, updatePolicy) uygulanir. Plan dusunce MEVCUT policy'ler uygulanmaya DEVAM eder
+// (ingress plan sormaz; kapatmak tuneli sessizce acardi); olusturma ve duzenleme kapali kalir;
+// SILME (deletePolicy) ve baglantiyi kaldirma (unbind) HER ZAMAN acik kalir. Test: plan_gate_test.go.
 
 func (s *Server) listPolicies(w http.ResponseWriter, r *http.Request) {
 	tenantID, ok := s.tenantFor(r)
@@ -22,11 +27,16 @@ func (s *Server) listPolicies(w http.ResponseWriter, r *http.Request) {
 	}
 	projID, _ := s.projectFor(r)
 
-	policies, err := s.Store.ListPolicies(r.Context(), tenantID, projID)
+	pg, ok := pageOf(w, r)
+	if !ok {
+		return
+	}
+	policies, total, err := s.Store.ListPoliciesPage(r.Context(), tenantID, projID, pg)
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
+	setPageTotals(w, pg, len(policies), total)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"policies": policies,
 		"count":    len(policies),
@@ -202,6 +212,8 @@ func (s *Server) updatePolicy(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, pol)
 }
 
+// deletePolicy, policy'yi siler. Plan ozelligi KONTROL EDILMEZ: plani dusen kiraci policy'lerini
+// her zaman silebilmeli (aksi halde artik duzenleyemedigi policy'de takili kalir).
 func (s *Server) deletePolicy(w http.ResponseWriter, r *http.Request) {
 	if !s.requirePrivilegedCaller(w, r) {
 		return

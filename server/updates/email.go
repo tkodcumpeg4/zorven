@@ -18,6 +18,7 @@ var emailTexts = map[string]emailStrings{
 	LangTR: {"Web'de görüntüle", "Bu e-postayı Zorven ürün duyurularına abone olduğun için alıyorsun.", "Duyuruları almayı bırak", "Bakım penceresi", "Zorven · Kendi sunucunda barındırılan tünel platformu", "tr", "Sürüm"},
 	LangEN: {"View on the web", "You are receiving this because you subscribed to Zorven product announcements.", "Unsubscribe from announcements", "Maintenance window", "Zorven · Self-hosted tunnel platform", "en", "Version"},
 	LangJA: {"Webで表示", "Zorven の製品お知らせを購読しているため、このメールをお送りしています。", "お知らせメールの配信を停止", "メンテナンス時間", "Zorven · セルフホスト型トンネルプラットフォーム", "ja", "バージョン"},
+	LangZH: {"在网页中查看", "你收到此邮件，是因为你订阅了 Zorven 产品公告。", "退订公告邮件", "维护窗口", "Zorven · 可自托管的隧道平台", "zh-CN", "版本"},
 }
 
 // Email, bir duyuru e-postasinin parcalari.
@@ -59,7 +60,7 @@ func BuildEmail(p store.UpdatePost, lang, baseURL string, key []byte, userID str
 	return Email{
 		Subject: subject,
 		Text:    text.String(),
-		HTML:    emailHTML(p, tx, title, body, window, postURL, unsub),
+		HTML:    emailHTML(p, tx, used, title, body, window, postURL, unsub),
 		Lang:    used,
 		Headers: []string{
 			"List-Unsubscribe: <" + unsub + ">",
@@ -87,7 +88,7 @@ var emailStyler = strings.NewReplacer(
 	"<hr>", `<hr style="border:0;border-top:1px solid #232a33;margin:16px 0;">`,
 )
 
-func emailHTML(p store.UpdatePost, tx emailStrings, title, body, window, postURL, unsub string) string {
+func emailHTML(p store.UpdatePost, tx emailStrings, used, title, body, window, postURL, unsub string) string {
 	e := html.EscapeString
 	badge := e(KindLabel(p.Kind, tx.Lang))
 	if p.Version != "" {
@@ -114,6 +115,6 @@ func emailHTML(p store.UpdatePost, tx emailStrings, title, body, window, postURL
 </td></tr></table>
 <div style="font-family:Arial,Helvetica,sans-serif;font-size:11px;line-height:1.6;color:#8b98a5;padding:18px 12px;max-width:520px;">%s<br><a href="%s" style="color:#8b98a5;">%s</a><br>%s</div>
 </td></tr></table></body></html>`,
-		tx.Lang, badge, e(title), win, emailStyler.Replace(RenderMarkdown(body)),
+		used, badge, e(title), win, emailStyler.Replace(RenderMarkdown(body)),
 		e(postURL), e(tx.ViewOnline), e(tx.Why), e(unsub), e(tx.Unsub), e(tx.Footer))
 }

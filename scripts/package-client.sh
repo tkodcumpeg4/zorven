@@ -3,9 +3,9 @@
 # Baska bir Windows PC'ye kopyalanacak "istemci kurulum paketi" hazirlar.
 #
 # Ciktisi (dist/client-setup/) sunucunun sertifikasini ve LAN adresini icerir;
-# o klasoru diger PC'ye kopyalayip install.bat'a cift tiklamak yeterli. Uygulama
-# acilinca CA sertifikasi ve sunucu adresi ONCEDEN DOLU gelir; kullanici yalnizca
-# kendi token'ini (rpsh_live_...) yapistirir.
+# o klasoru diger PC'ye kopyalayip Zorven-Setup.exe'ye cift tiklamak yeterli. CA
+# sertifikasi ve sunucu adresi artik kurulumda OTOMATIK doldurulmaz (eski
+# install.ps1 kaldirildi); kullanici bunlari Ayarlar > Gelismis'ten girer.
 #
 # Kullanim:  ./scripts/package-client.sh
 set -euo pipefail
@@ -53,11 +53,9 @@ PORT="${ZORVEN_PORT:-8443}"
 # 4. Paketi olustur
 rm -rf "$OUT"
 mkdir -p "$OUT"
-cp "$EXE" "$OUT/rpshell-desktop.exe"
+# Ikili kendi kurulumunu yapar (dosya adinda "Setup" => kurulum kipi; bkz. installer/README.md).
+cp "$EXE" "$OUT/Zorven-Setup.exe"
 cp "$CERT" "$OUT/server.crt"
-cp "$ROOT/installer/install.ps1" "$OUT/"
-cp "$ROOT/installer/uninstall.ps1" "$OUT/"
-cp "$ROOT/installer/install.bat" "$OUT/"
 
 if [ -n "$LAN_IP" ]; then
   echo "${LAN_IP}:${PORT}" > "$OUT/server.txt"
@@ -71,10 +69,10 @@ cat > "$OUT/OKU.txt" <<EOF
 rpshell istemci kurulumu (baska PC icin)
 
 1. Bu klasoru hedef Windows PC'ye kopyala.
-2. install.bat'a cift tikla.
-3. Acilan uygulamada:
-   - Tunel sunucusu adresi: ONCEDEN DOLU (${LAN_IP:-<sunucu-ip>}:${PORT})
-   - CA sertifikasi: ONCEDEN DOLU (paketteki server.crt)
+2. Zorven-Setup.exe'ye cift tikla (Program Files'a kurar, yonetici onayi ister).
+3. Acilan uygulamada Ayarlar > Gelismis'ten:
+   - Tunel sunucusu adresi: ${LAN_IP:-<sunucu-ip>}:${PORT} (server.txt)
+   - CA sertifikasi: server.crt dosyasinin yolu (kurulum bunlari OTOMATIK doldurmaz)
    - Istemci token'i: dashboard'dan bu PC icin olusturup yapistir (rpsh_live_...)
 4. Durum sekmesi > Baglan.
 
@@ -100,7 +98,7 @@ ls -1 "$OUT"
 if [ -f "$ZIP" ]; then
   echo
   echo "ZIP hazir: $ZIP"
-  echo "  -> Bu ZIP'i diger PC'ye kopyala, ac, install.bat'a cift tikla."
+  echo "  -> Bu ZIP'i diger PC'ye kopyala, ac, Zorven-Setup.exe'ye cift tikla."
 else
   echo
   echo "ZIP olusturulamadi (zip/powershell yok). $OUT klasorunu elle kopyala."

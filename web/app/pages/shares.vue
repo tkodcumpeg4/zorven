@@ -8,9 +8,10 @@ const api = useApi()
 const toast = useToast()
 const { t } = useI18n()
 
-const loading = ref(true)
+const pager = usePagedList<NetShare>(p => api.pageNetShares(p), { immediate: false })
+const loading = pager.loading
 const unavailable = ref('')
-const shares = ref<NetShare[]>([])
+const shares = pager.items
 const clients = ref<Client[]>([])
 const members = ref<TeamMember[]>([])
 
@@ -22,11 +23,11 @@ const mine = computed(() => shares.value.filter(s => s.can_manage))
 const incoming = computed(() => shares.value.filter(s => s.relation === 'grantee'))
 
 async function load() {
-  loading.value = true
   unavailable.value = ''
   try {
-    const [sh, cl] = await Promise.all([api.listNetShares(), api.listClients()])
-    shares.value = sh
+    // Istemciler: secici/etiket icin tam liste (limit=500); paylasimlar sayfali (yonettiklerim + gelenler tek sayfali akis).
+    const [cl] = await Promise.all([api.listClients(), pager.reload(true)])
+    if (pager.error.value) throw pager.error.value
     clients.value = cl
     try {
       members.value = (await api.listTeamMembers()).members.filter(m => m.status !== 'pending' && m.user_id)
@@ -139,9 +140,9 @@ function accessCmd(s: NetShare): string {
   return `ZORVEN_API_TOKEN=zrv_api_... zorven access ${s.name} --local ${s.port}`
 }
 
-let timer: ReturnType<typeof setInterval> | undefined
-onMounted(() => { load(); timer = setInterval(() => { if (!saving.value) load() }, 15000) })
-onBeforeUnmount(() => { if (timer) clearInterval(timer) })
+onMounted(() => { load() })
+// Olay yok: 15 sn yoklama; hatada ussel bekleme, sekme gizliyken durur.
+useLiveRefresh(async () => { await load(); return !unavailable.value }, { fallbackMs: 15000, skip: () => saving.value })
 </script>
 
 <template>
@@ -310,6 +311,7 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer) })
           </div>
         </div>
       </section>
+      <ListPager :list="pager" />
     </template>
   </div>
 </template>

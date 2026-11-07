@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -43,12 +44,29 @@ func basicLogin(t *testing.T, h *Handler, user, pass string) *http.Cookie {
 	return c
 }
 
-func doorGetWith(h *Handler, c *http.Cookie) *httptest.ResponseRecorder {
+// doorOpenFlow: GET / (onay sayfasi) -> formdaki CSRF jetonuyla POST / (kapiyi acar).
+// GET onay sayfasi vermezse (giris yok vb.) o yanit doner.
+func doorOpenFlow(h *Handler, prep func(*http.Request)) *httptest.ResponseRecorder {
 	r := doorReq("GET", "/")
-	r.AddCookie(c)
+	prep(r)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
-	return w
+	m := regexp.MustCompile(`name="zv_csrf" value="([^"]+)"`).FindStringSubmatch(w.Body.String())
+	if w.Code != http.StatusOK || m == nil {
+		return w
+	}
+	pr := httptest.NewRequest("POST", "https://"+doorHost+"/", strings.NewReader(url.Values{"zv_csrf": {m[1]}}.Encode()))
+	pr.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	pr.Header.Set("Origin", "https://"+doorHost)
+	pr.RemoteAddr = "203.0.113.7:4444"
+	prep(pr)
+	pw := httptest.NewRecorder()
+	h.ServeHTTP(pw, pr)
+	return pw
+}
+
+func doorGetWith(h *Handler, c *http.Cookie) *httptest.ResponseRecorder {
+	return doorOpenFlow(h, func(r *http.Request) { r.AddCookie(c) })
 }
 
 func setup(t *testing.T) (*Handler, *memDoorStore) {

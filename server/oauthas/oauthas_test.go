@@ -639,3 +639,15 @@ func TestCodeReuseRevokesGrant(t *testing.T) {
 		}
 	}
 }
+
+// apps:deploy yalniz API anahtari / servis hesabi icindir; OAuth/MCP katalogunda YOKTUR.
+func TestAppsDeployNotOfferedViaOAuth(t *testing.T) {
+	for _, s := range SupportedScopes() {
+		if s == "apps:deploy" {
+			t.Fatal("apps:deploy OAuth katalogunda olmamali")
+		}
+	}
+	if _, unknown := ParseScopes("apps:deploy"); unknown != "apps:deploy" {
+		t.Fatalf("apps:deploy bilinmeyen sayilmali, unknown=%q", unknown)
+	}
+}

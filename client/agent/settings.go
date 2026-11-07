@@ -137,11 +137,15 @@ func (st *settingsState) metricsEveryOr(def time.Duration) time.Duration {
 	return st.eff.metricsEvery
 }
 
+// defaultMetricsEvery, metrics_interval_sec ayarlanmadiginda metrik toplama araligi.
+const defaultMetricsEvery = 10 * time.Second
+
 // cachedMetrics, metrics_interval_sec ayarlandiysa son toplanan metrikleri
 // aralik dolana kadar yeniden kullanir; collect yalnizca gerekince cagrilir.
-// Aralik ayarlanmadiysa her cagrida toplar (eski davranis).
+// Aralik ayarlanmadiysa defaultMetricsEvery kullanilir: her ping'te (CPU/bellek
+// toplamak pahalidir) yeniden toplanmaz.
 func cachedMetrics[T any](st *settingsState, now time.Time, collect func() T) T {
-	every := st.metricsEveryOr(0)
+	every := st.metricsEveryOr(defaultMetricsEvery)
 	if st == nil || every <= 0 {
 		return collect()
 	}

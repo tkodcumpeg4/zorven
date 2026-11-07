@@ -37,6 +37,7 @@ const WSReadLimit = 1 << 20 // 1 MB
 const (
 	CodeTunnelNotFound   = "tunnel_not_found"
 	CodeTunnelDisabled   = "tunnel_disabled"
+	CodeTunnelExpired    = "tunnel_expired"
 	CodeClientOffline    = "client_offline"
 	CodeLocalUnreachable = "local_unreachable"
 	CodeUpstreamTimeout  = "upstream_timeout"
@@ -182,6 +183,11 @@ type Hello struct {
 	// Metrics, istemcinin ilk baglanti anindaki canli donanim metrikleri.
 	Metrics *Metrics `json:"metrics,omitempty"`
 
+	// PrevNode (Faz 0C-4), ajanin bundan once bagli oldugu sunucu dugumunun
+	// kimligi. Ajan baska dugume gecince sunucu bunu, eski dugumdeki oturumun
+	// dusmesi icin ipucu olarak kullanir. Eski ajanlar gondermez.
+	PrevNode string `json:"prev_node,omitempty"`
+
 	// Shells / DefaultShell (uzak terminal kabuk secici): ajanin bu makinede
 	// KENDI buldugu kabuklar ve varsayilani (ShellInfo.ID). Eski istemciler
 	// gondermez; sunucu o zaman kabuk secimi sunmaz (geriye uyumlu).
@@ -261,6 +267,13 @@ type HelloAck struct {
 	// aninda gonderilir ki ajan ilk andan itibaren dogru yapilandirmayla
 	// calissin; sonraki degisiklikler config_update ile iletilir.
 	Settings *AgentSettings `json:"settings,omitempty"`
+
+	// NodeID, bu oturumu tutan sunucu dugumunun kimligi (bos: kume yok / eski
+	// sunucu). Nodes, kumedeki dugumler; AssignedNode, ajanin baglanti koparsa
+	// ONCE denemesi gereken dugum ipucu. Hepsi istege baglidir (bkz. nodes.go).
+	NodeID       string     `json:"node_id,omitempty"`
+	AssignedNode string     `json:"assigned_node,omitempty"`
+	Nodes        []NodeHint `json:"nodes,omitempty"`
 }
 
 type Ping struct {
@@ -282,6 +295,13 @@ type HTTPRequest struct {
 	// bekleyen backend'ler bos govde gormesin). -1/0: bilinmiyor -> chunked.
 	ContentLength int64  `json:"content_length,omitempty"`
 	RemoteAddr    string `json:"remote_addr"`
+
+	// HTTPMajor, ziyaretcinin istek surumu (1 veya 2); eski sunucular gondermez (0).
+	// TETrailers, istegin "TE: trailers" istedigi (gRPC dahil) bilgisidir; ajan
+	// h2 yerel baglantida TE: trailers basligini buna gore yazar. Ikisi de
+	// bilgilendirme amaclidir ve omitempty'dir (eski ajanlar yok sayar).
+	HTTPMajor  int  `json:"http_major,omitempty"`
+	TETrailers bool `json:"te_trailers,omitempty"`
 }
 
 type Cancel struct {
@@ -408,6 +428,8 @@ type StreamClose struct {
 type Bye struct {
 	Type   MessageType `json:"type"`
 	Reason string      `json:"reason"`
+	// Code (opsiyonel): yapisal sebep, bkz. ByeCode* (messages_v3_core.go).
+	Code string `json:"code,omitempty"`
 }
 
 // --- Yardimcilar -----------------------------------------------------------
@@ -704,6 +726,22 @@ const FeatureScreen2Feedback = "screen2_feedback"
 // yansitirsa istemci screen2_video mesajlarini dinler ve otomatik karo/video
 // gecisi yapabilir; aksi halde karo modu (eski davranis).
 const FeatureScreen2Video = "screen2_video"
+
+// FeatureScreen2FPS60, istemcinin screen2 yakalama hizini 30 fps'in uzerine,
+// Screen2FPSMax'a (60) kadar cikarabildigini bildirir. Istemci Hello'da ilan
+// eder, sunucu HelloAck'te yansitirsa etkindir. Yansitilmazsa (eski sunucu) ajan
+// 30'un ustune CIKMAZ; ilan edilmezse (eski ajan) sunucu 30'un ustunde bir fps
+// YOLLAMAZ: eski ajan 30 ustu degeri gecersiz sayip 15'e duser. Hangi fps'e
+// izin verildigine sunucu karar verir (planin ekran fps degeri, ustten 60).
+const FeatureScreen2FPS60 = "screen2_fps60"
+
+// Ekran fps tavanlari. Screen2FPSBase, her screen2 istemcisinin (yetenek
+// pazarlanmadan da) destekledigi tavandir; Screen2FPSMax, FeatureScreen2FPS60
+// pazarlanmis akista mutlak ust sinirdir (plan degeri bunu asamaz).
+const (
+	Screen2FPSBase = 30
+	Screen2FPSMax  = 60
+)
 
 // Video modu degerleri (Screen2Video.Mode ve panel tercihi).
 const (

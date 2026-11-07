@@ -20,7 +20,8 @@ const canManage = computed(() => {
 // IP allowlist: yazma owner/admin; yeni kural ayrica plan ozelligi ister
 // (plan dusunce mevcut kurallar uygulanmaya devam eder, yeni kural eklenemez).
 const { isPrivileged } = useRole()
-const ipPlanBlocked = computed(() => !platformAdmin.value && !!currentPlan.value && currentPlan.value.has_ip_allowlist === false)
+// Acik surumde plan yok: IP izin listesi hicbir planda kilitli degildir.
+const ipPlanBlocked = computed(() => false)
 const canAddRule = computed(() => isPrivileged.value && !ipPlanBlocked.value)
 const ipAddHint = computed(() => !isPrivileged.value ? t('common.adminOnly') : ipPlanBlocked.value ? t('tokens.ipPlanBlocked') : undefined)
 
@@ -51,10 +52,11 @@ function switchTab(tab: 'tokens' | 'ip' | 'apps') {
 
 // Global data
 const loading = ref(true)
-const tunnels = ref<Tunnel[]>([])
+const tunnels = ref<Tunnel[]>([]) // tunel secicileri icin tam liste (limit=500)
 
 // --- API Tokens State ---
-const tokens = ref<APIToken[]>([])
+const tokPager = usePagedList<APIToken>(p => api.pageAPITokens(p), { queryKey: 'tpage', immediate: false })
+const tokens = tokPager.items
 const showCreateTokenModal = ref(false)
 const createTokenName = ref('')
 const createTokenExpiry = ref(30) // days
@@ -86,8 +88,12 @@ const availableScopes = [
 ]
 
 // --- IP Allowlist State ---
-const ipRules = ref<IPAllowlistRule[]>([])
 const selectedTunnelFilter = ref<string>((route.query.tunnel as string) || '')
+const ipPager = usePagedList<IPAllowlistRule, { tunnel: string }>(
+  (p, f) => api.pageIPRules(p, f.tunnel || undefined),
+  { queryKey: 'ippage', immediate: false, filters: () => ({ tunnel: selectedTunnelFilter.value }) },
+)
+const ipRules = ipPager.items
 const showCreateRuleModal = ref(false)
 const ruleCidr = ref('')
 const ruleTunnelId = ref<string>((route.query.tunnel as string) || '')
@@ -108,13 +114,10 @@ onMounted(async () => {
 async function fetchData() {
   loading.value = true
   try {
-    const [tokensRes, rulesRes, tunnelsRes] = await Promise.all([
-      api.listAPITokens().catch(() => ({ tokens: [], count: 0 })),
-      api.listIPRules().catch(() => ({ rules: [], count: 0 })),
+    const [tunnelsRes] = await Promise.all([
       api.listTunnels().catch(() => []),
+      tokPager.reload(), ipPager.reload(),
     ])
-    tokens.value = tokensRes.tokens || []
-    ipRules.value = rulesRes.rules || []
     tunnels.value = tunnelsRes || []
   } catch (err: any) {
     toast.error(errMsg(err, t('tokens.dataLoadFailed')))
@@ -159,7 +162,7 @@ async function handleCreateToken() {
       scopes,
       createTokenExpiry.value
     )
-    tokens.value.unshift(res.api_token)
+    void tokPager.reload(true)
     issuedSecret.value = {
       name: res.api_token.name,
       token: res.token,
@@ -211,6 +214,7 @@ async function handleRevokeToken(tokenItem: APIToken) {
   try {
     await api.revokeAPIToken(tokenItem.id)
     tokens.value = tokens.value.filter(t => t.id !== tokenItem.id)
+    void tokPager.reload(true)
     toast.success(t('tokens.tokenRevoked'))
   } catch (err: any) {
     toast.error(errMsg(err, t('tokens.tokenRevokeFailed')))
@@ -248,7 +252,7 @@ async function handleCreateRule() {
       ruleDescription.value.trim(),
       ruleTunnelId.value || undefined
     )
-    ipRules.value.unshift(newRule)
+    void ipPager.reload(true)
     toast.success(t('tokens.ruleCreated'))
     showCreateRuleModal.value = false
     ruleCidr.value = ''
@@ -282,6 +286,7 @@ async function handleDeleteRule(rule: IPAllowlistRule) {
   try {
     await api.deleteIPRule(rule.id)
     ipRules.value = ipRules.value.filter(r => r.id !== rule.id)
+    void ipPager.reload(true)
     toast.success(t('tokens.ruleDeleted'))
   } catch (err: any) {
     toast.error(errMsg(err, t('tokens.ruleDeleteFailed')))
@@ -361,7 +366,7 @@ function isExpired(expiresAt?: string | null) {
         <Icon name="lucide:key-round" class="size-4" :class="activeTab === 'tokens' ? 'text-accent' : ''" />
         <span>{{ t('tokens.tabTokens') }}</span>
         <span class="rounded-full bg-surface px-2 py-0.5 text-xs font-mono text-fg-muted border border-line">
-          {{ tokens.length }}
+          {{ tokPager.total.value ?? tokens.length }}
         </span>
       </button>
 
@@ -374,7 +379,7 @@ function isExpired(expiresAt?: string | null) {
         <Icon name="lucide:network" class="size-4" :class="activeTab === 'ip' ? 'text-accent' : ''" />
         <span>{{ t('tokens.tabIp') }}</span>
         <span class="rounded-full bg-surface px-2 py-0.5 text-xs font-mono text-fg-muted border border-line">
-          {{ ipRules.length }}
+          {{ ipPager.total.value ?? ipRules.length }}
         </span>
       </button>
 
@@ -401,7 +406,7 @@ function isExpired(expiresAt?: string | null) {
             <Icon name="lucide:key" class="size-3.5 text-accent" />
             <span>{{ t('tokens.totalTokens') }}</span>
           </div>
-          <div class="font-mono text-2xl font-bold text-fg">{{ tokens.length }}</div>
+          <div class="font-mono text-2xl font-bold text-fg">{{ tokPager.total.value ?? tokens.length }}</div>
           <p class="mt-1 text-[11px] text-fg-subtle">{{ t('tokens.totalTokensHint') }}</p>
         </div>
 
@@ -425,7 +430,7 @@ function isExpired(expiresAt?: string | null) {
             <Icon name="lucide:list" class="size-4 text-accent" />
             {{ t('tokens.activeTokens') }}
           </h2>
-          <span class="text-xs text-fg-muted font-mono font-medium">{{ t('tokens.tokensRegistered', { n: tokens.length }) }}</span>
+          <span class="text-xs text-fg-muted font-mono font-medium">{{ t('tokens.tokensRegistered', { n: tokPager.total.value ?? tokens.length }) }}</span>
         </div>
 
         <div v-if="loading" class="p-8 text-center text-fg-muted">
@@ -529,12 +534,13 @@ function isExpired(expiresAt?: string | null) {
             </tbody>
           </table>
         </div>
+        <ListPager class="px-4 pb-3" :list="tokPager" />
       </div>
       <McpConnectCard />
     </div>
 
-    <!-- TAB 3: INGRESS IP FILTRELEME (ALLOWLIST) -->
-    <div v-else class="space-y-6">
+    <!-- TAB 3: INGRESS IP FILTRELEME (ALLOWLIST). v-else DEGIL: "apps" sekmesinde de IP icerigi basiliyordu. -->
+    <div v-else-if="activeTab === 'ip'" class="space-y-6">
       <!-- Bilgilendirme Bannerı -->
       <div class="rounded-xl border border-accent/30 bg-accent/5 p-4 flex items-start gap-3 shadow-sm">
         <Icon name="lucide:shield-alert" class="size-5 text-accent shrink-0 mt-0.5" />
@@ -682,6 +688,7 @@ function isExpired(expiresAt?: string | null) {
             </tbody>
           </table>
         </div>
+        <ListPager class="px-4 pb-3" :list="ipPager" />
       </div>
     </div>
 

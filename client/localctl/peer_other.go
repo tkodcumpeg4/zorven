@@ -1,8 +1,8 @@
-//go:build !linux && !windows
+//go:build !linux && !windows && !darwin
 
 package localctl
 
 import "net"
 
-// Linux disi Unix: dizin 0700 + soket 0600 korumayi saglar.
-func checkPeer(c net.Conn) error { return nil }
+// Diger Unix: dizin 0700 + soket 0600 korumayi saglar.
+func checkPeer(c net.Conn, _ Endpoint) error { return nil }

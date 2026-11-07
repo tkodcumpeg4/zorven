@@ -52,6 +52,8 @@ type UpdatePost struct {
 	BodyEN           string           `json:"body_en"`
 	TitleJA          string           `json:"title_ja"`
 	BodyJA           string           `json:"body_ja"`
+	TitleZH          string           `json:"title_zh"`
+	BodyZH           string           `json:"body_zh"`
 	MaintenanceStart *time.Time       `json:"maintenance_start"`
 	MaintenanceEnd   *time.Time       `json:"maintenance_end"`
 	PublishedAt      *time.Time       `json:"published_at"` // nil = taslak

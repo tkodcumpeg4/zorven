@@ -118,8 +118,9 @@ func (e Endpoint) netOp(ctl Controller, req Request, resp *Response) error {
 		}
 		resp.Shares = l
 	case "access_open":
-		if req.Target == "" || req.Local == "" {
-			return errors.New("hedef ve yerel adres gerekli")
+		// Local bos olabilir ("host:" veya ""): ajan paylasimin portunu kullanir.
+		if req.Target == "" {
+			return errors.New("hedef gerekli")
 		}
 		addr, err := nc.AccessOpen(ctx, req.Target, req.Local)
 		if err != nil {

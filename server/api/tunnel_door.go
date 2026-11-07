@@ -248,11 +248,16 @@ func (s *Server) listDoorGrants(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	grants, err := s.Store.ListDoorGrants(r.Context(), tenantID, tun.ID, true, 200)
+	pg, okPg := pageOf(w, r)
+	if !okPg {
+		return
+	}
+	grants, total, err := s.Store.ListDoorGrantsPage(r.Context(), tenantID, tun.ID, true, pg)
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
+	setPageTotals(w, pg, len(grants), total)
 	writeJSON(w, http.StatusOK, grants)
 }
 

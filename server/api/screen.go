@@ -73,11 +73,15 @@ func (s *Server) issueScreenTicket(w http.ResponseWriter, r *http.Request) {
 	// WS acilisinda kullanici baglami yoktur.
 	controlAllowed := s.screenControlAllowed(r, tenantID)
 	ticket := s.Tickets.issueFull(ticketKindScreen, tenantID, body.ClientID, release, controlAllowed)
+	s.Tickets.setMaxFPS(ticket, spec.MaxFPS)
 	s.logger().Info("ekran bileti verildi", "tenant_id", tenantID, "client_id", body.ClientID, "remote_addr", r.RemoteAddr)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ticket":          ticket,
-		"expires_in":      int(ticketTTL.Seconds()),
-		"max_fps":         spec.MaxFPS,
+		"ticket":     ticket,
+		"expires_in": int(ticketTTL.Seconds()),
+		// Sunucunun bu bilet icin uygulayacagi fps tavani: plan degeri (bilinmiyorsa
+		// 30, en fazla 60). Ajan yetenegine gore daha da dusebilir; etkin deger WS'teki
+		// caps.max_fps ile bildirilir.
+		"max_fps":         planFPSCap(spec.MaxFPS),
 		"max_resolution":  spec.MaxResolution,
 		"control_allowed": controlAllowed,
 	})
@@ -148,7 +152,10 @@ func (s *Server) screenHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Istege bagli parametreler (query): fps, quality, max_width, mode.
 	q := r.URL.Query()
-	fps := atoiDefault(q.Get("fps"), 0)
+	// fps istegine guvenilmez: planin tavani (bilette tasinir) sunucuda zorlanir.
+	// Ajan yetenegine gore kirpma paylasimli yayinda hub'da, diger yollarda
+	// tunnel.Session'da yapilir.
+	fps := min(atoiDefault(q.Get("fps"), 0), planFPSCap(tinfo.MaxFPS))
 	quality := atoiDefault(q.Get("quality"), 0)
 	maxWidth := atoiDefault(q.Get("max_width"), 0)
 	mode := q.Get("mode") // auto|screen2|mjpeg|h264
@@ -183,7 +190,7 @@ func (s *Server) screenHandler(w http.ResponseWriter, r *http.Request) {
 	if activeMode == screenModeScreen2 {
 		handled, handed := s.serveScreen2Shared(ctx, cancel, conn, sess, clientID,
 			tunnel.Screen2Options{FPS: fps, Quality: quality, MaxWidth: maxWidth, Display: display},
-			q.Get("view_only") == "1" || locked, locked, releaseSlot)
+			q.Get("view_only") == "1" || locked, locked, tinfo.MaxFPS, releaseSlot)
 		if handed {
 			releaseSlot = nil
 		}
@@ -356,6 +363,7 @@ func (s *Server) screenHandler(w http.ResponseWriter, r *http.Request) {
 				case "keyframe":
 					_ = sess.Screen2Keyframe(ctx, sessionID)
 				case "settings":
+					c.opts.FPS = min(c.opts.FPS, planFPSCap(tinfo.MaxFPS))
 					_ = sess.Screen2Settings(ctx, sessionID, c.opts)
 				}
 				continue
@@ -469,7 +477,7 @@ func parseScreenControl(data []byte) (screenControl, bool) {
 			return v
 		}
 		c := screenControl{kind: "settings", layer: m.Layer, opts: tunnel.Screen2Options{
-			FPS:      clamp(m.FPS, 60),
+			FPS:      clamp(m.FPS, protocol.Screen2FPSMax),
 			Quality:  clamp(m.Quality, 100),
 			MaxWidth: clamp(m.MaxWidth, 16384),
 			Display:  -1,
@@ -530,11 +538,12 @@ func pumpScreen2(ctx context.Context, in <-chan []byte, out chan<- []byte, askKe
 
 // serveScreen2Shared, panel WS'ini paylasimli screen2 yayinina baglar.
 // handled=false: screen2 acilamadi (istemci desteklemiyor) ve cagiran eski yola
-// dusmeli. handed: slot yayina devredildi (cagiran birakmamali).
+// dusmeli. handed: slot yayina devredildi (cagiran birakmamali). planFPS:
+// kiracinin planindaki ekran fps degeri (izleyicinin fps tavanini belirler).
 func (s *Server) serveScreen2Shared(ctx context.Context, cancel context.CancelFunc, conn *websocket.Conn,
 	sess *tunnel.Session, clientID string, o tunnel.Screen2Options, viewOnly, locked bool,
-	release func()) (handled, handed bool) {
-	v, err := s.screen2Hubs.join(clientID, sess, o, viewOnly, locked, release)
+	planFPS int, release func()) (handled, handed bool) {
+	v, err := s.screen2Hubs.joinCapped(clientID, sess, o, viewOnly, locked, release, planFPS)
 	if errors.Is(err, tunnel.ErrScreen2Unsupported) {
 		return false, false
 	}

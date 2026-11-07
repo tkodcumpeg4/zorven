@@ -217,7 +217,7 @@ func TestHelperCapturerDelegation(t *testing.T) {
 	fc := &fakeConnector{be: be}
 	cl := newHelperClient(fc)
 	defer cl.Close()
-	cp := helperCapturer{cl}
+	cp := helperCapturer{c: cl}
 
 	if n := cp.NumDisplays(); n != 1 {
 		t.Fatalf("NumDisplays=%d", n)

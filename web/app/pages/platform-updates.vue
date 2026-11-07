@@ -6,22 +6,23 @@ const { t, locale } = useI18n()
 
 type Post = {
   id: string; slug: string; kind: string; version: string
-  title_tr: string; body_tr: string; title_en: string; body_en: string; title_ja: string; body_ja: string
+  title_tr: string; body_tr: string; title_en: string; body_en: string; title_ja: string; body_ja: string; title_zh: string; body_zh: string
   maintenance_start: string | null; maintenance_end: string | null
   published_at: string | null; emailed_at: string | null
   email_stats: { total: number, sent: number, failed: number, done: boolean, interrupted?: boolean }
 }
 
-const posts = ref<Post[]>([])
-const pending = ref(true)
+const pager = usePagedList<Post>(p => api.pageAdminUpdates(p), { immediate: false })
+const posts = pager.items
+const pending = pager.loading
 const editing = ref(false)
 const editId = ref<string | null>(null)
 const saving = ref(false)
-const lang = ref<'tr' | 'en' | 'ja'>('tr')
+const lang = ref<'tr' | 'en' | 'ja' | 'zh'>('tr')
 
 const blank = () => ({
   slug: '', kind: 'update', version: '',
-  title_tr: '', body_tr: '', title_en: '', body_en: '', title_ja: '', body_ja: '',
+  title_tr: '', body_tr: '', title_en: '', body_en: '', title_ja: '', body_ja: '', title_zh: '', body_zh: '',
   mStart: '', mEnd: '',
 })
 const form = reactive(blank())
@@ -42,14 +43,8 @@ function toISO(local: string): string | null {
 }
 
 async function load(silent = false) {
-  if (!silent) pending.value = true
-  try {
-    posts.value = (await api.adminListUpdates()).updates ?? []
-  } catch (e: any) {
-    toast.error(e?.data?.error?.message || t('updatesAdmin.loadFailed'))
-  } finally {
-    pending.value = false
-  }
+  await pager.reload(silent)
+  if (pager.error.value) toast.error((pager.error.value as any)?.data?.error?.message || t('updatesAdmin.loadFailed'))
 }
 
 function openNew() {
@@ -63,6 +58,7 @@ function openEdit(p: Post) {
     slug: p.slug, kind: p.kind, version: p.version,
     title_tr: p.title_tr, body_tr: p.body_tr, title_en: p.title_en, body_en: p.body_en,
     title_ja: p.title_ja, body_ja: p.body_ja,
+    title_zh: p.title_zh || '', body_zh: p.body_zh || '',
     mStart: toLocalInput(p.maintenance_start), mEnd: toLocalInput(p.maintenance_end),
   })
   editId.value = p.id
@@ -75,6 +71,7 @@ function payload() {
     slug: form.slug.trim().toLowerCase(), kind: form.kind, version: form.version.trim(),
     title_tr: form.title_tr, body_tr: form.body_tr, title_en: form.title_en, body_en: form.body_en,
     title_ja: form.title_ja, body_ja: form.body_ja,
+    title_zh: form.title_zh, body_zh: form.body_zh,
     maintenance_start: form.kind === 'maintenance' ? toISO(form.mStart) : null,
     maintenance_end: form.kind === 'maintenance' ? toISO(form.mEnd) : null,
   }
@@ -124,7 +121,7 @@ async function remove() {
 }
 
 // Canli onizleme: sunucu tarafli guvenli render (debounce)
-const bodyOf = computed(() => (lang.value === 'tr' ? form.body_tr : lang.value === 'en' ? form.body_en : form.body_ja))
+const bodyOf = computed(() => (lang.value === 'tr' ? form.body_tr : lang.value === 'en' ? form.body_en : lang.value === 'ja' ? form.body_ja : form.body_zh))
 const previewHtml = ref('')
 let timer: ReturnType<typeof setTimeout> | null = null
 watch([bodyOf, editing], () => {
@@ -144,7 +141,7 @@ const siteOrigin = computed(() => {
   return `https://${d}`
 })
 const publicPath = computed(() => {
-  const pre = locale.value === 'en' ? '/en' : locale.value === 'ja' ? '/ja' : ''
+  const pre = locale.value === 'en' ? '/en' : locale.value === 'ja' ? '/ja' : locale.value === 'zh' ? '/zh' : ''
   return `${siteOrigin.value}${pre}/updates/${form.slug}`
 })
 
@@ -225,12 +222,9 @@ async function doSend() {
 }
 
 // Gonderim suruyorken ilerlemeyi yokla (4 sn)
-let poll: ReturnType<typeof setInterval> | null = null
-watch(() => posts.value.some(p => phaseOf(p) === 'sending'), (any) => {
-  if (any && !poll) poll = setInterval(() => load(true), 4000)
-  else if (!any && poll) { clearInterval(poll); poll = null }
-}, { immediate: true })
-onBeforeUnmount(() => { if (poll) clearInterval(poll) })
+// Hatada ussel bekleme (4 sn -> 60 sn), sekme gizliyken durur.
+const anySending = computed(() => posts.value.some(p => phaseOf(p) === 'sending'))
+useLiveRefresh(async () => { await load(true); return !pager.error.value }, { fallbackMs: 4000, skip: () => !anySending.value })
 
 // JSON ice / disa aktarma
 type ImportRes = { index: number, slug: string, action: 'create' | 'update' | 'skip' | 'error', publish: boolean, messages?: string[] }
@@ -384,6 +378,7 @@ onMounted(() => {
           </tr>
         </tbody>
       </table>
+      <ListPager class="px-4 pb-3" :list="pager" />
     </section>
 
     <!-- Duzenleyici -->
@@ -416,7 +411,7 @@ onMounted(() => {
 
       <div class="rounded-xl border border-line bg-surface/60 p-5">
         <div class="flex gap-1 border-b border-line pb-2">
-          <button v-for="l in (['tr', 'en', 'ja'] as const)" :key="l" type="button"
+          <button v-for="l in (['tr', 'en', 'ja', 'zh'] as const)" :key="l" type="button"
             class="rounded-md px-3 py-1 text-sm uppercase" :class="lang === l ? 'bg-accent text-on-accent' : 'text-fg-muted hover:bg-surface'"
             @click="lang = l">{{ l }}</button>
         </div>
@@ -426,12 +421,14 @@ onMounted(() => {
             <label class="block text-xs text-fg-muted">{{ t('updatesAdmin.titleField') }}
               <input v-if="lang === 'tr'" v-model="form.title_tr" type="text" maxlength="200" class="mt-1 w-full rounded-md border border-line bg-bg px-3 py-2 text-sm text-fg focus:border-accent focus:outline-none">
               <input v-else-if="lang === 'en'" v-model="form.title_en" type="text" maxlength="200" class="mt-1 w-full rounded-md border border-line bg-bg px-3 py-2 text-sm text-fg focus:border-accent focus:outline-none">
-              <input v-else v-model="form.title_ja" type="text" maxlength="200" class="mt-1 w-full rounded-md border border-line bg-bg px-3 py-2 text-sm text-fg focus:border-accent focus:outline-none">
+              <input v-else-if="lang === 'ja'" v-model="form.title_ja" type="text" maxlength="200" class="mt-1 w-full rounded-md border border-line bg-bg px-3 py-2 text-sm text-fg focus:border-accent focus:outline-none">
+              <input v-else v-model="form.title_zh" type="text" maxlength="200" class="mt-1 w-full rounded-md border border-line bg-bg px-3 py-2 text-sm text-fg focus:border-accent focus:outline-none">
             </label>
             <label class="block text-xs text-fg-muted">{{ t('updatesAdmin.bodyField') }}
               <textarea v-if="lang === 'tr'" v-model="form.body_tr" rows="16" class="mt-1 w-full rounded-md border border-line bg-bg px-3 py-2 font-mono text-sm text-fg focus:border-accent focus:outline-none" />
               <textarea v-else-if="lang === 'en'" v-model="form.body_en" rows="16" class="mt-1 w-full rounded-md border border-line bg-bg px-3 py-2 font-mono text-sm text-fg focus:border-accent focus:outline-none" />
-              <textarea v-else v-model="form.body_ja" rows="16" class="mt-1 w-full rounded-md border border-line bg-bg px-3 py-2 font-mono text-sm text-fg focus:border-accent focus:outline-none" />
+              <textarea v-else-if="lang === 'ja'" v-model="form.body_ja" rows="16" class="mt-1 w-full rounded-md border border-line bg-bg px-3 py-2 font-mono text-sm text-fg focus:border-accent focus:outline-none" />
+              <textarea v-else v-model="form.body_zh" rows="16" class="mt-1 w-full rounded-md border border-line bg-bg px-3 py-2 font-mono text-sm text-fg focus:border-accent focus:outline-none" />
               <span class="mt-0.5 block">{{ t('updatesAdmin.bodyHint') }}</span>
             </label>
           </div>

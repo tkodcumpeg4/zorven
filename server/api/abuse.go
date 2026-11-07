@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/tkodcumpeg4/zorven/server/abuse"
 	"github.com/tkodcumpeg4/zorven/server/store"
@@ -34,7 +35,27 @@ func (s *Server) reportAbuse(w http.ResponseWriter, r *http.Request) {
 	if len(reason) > 2000 {
 		reason = reason[:2000]
 	}
-	rep, err := s.Store.CreateAbuseReport(r.Context(), fqdn, reason, clientIP(r))
+	ip := clientIP(r)
+	// Spam onlemi: saatte IP basina en fazla 3 bildirim, ayni host'u 24 saatte bir kez.
+	if byIP, _, _, err := s.Store.AbuseReportCounts(r.Context(), time.Now().Add(-time.Hour), ip, "", fqdn); err == nil && byIP >= 3 {
+		writeJSONError(w, http.StatusTooManyRequests, "rate_limited", "cok fazla bildirim")
+		return
+	}
+	if _, _, same, err := s.Store.AbuseReportCounts(r.Context(), time.Now().Add(-24*time.Hour), ip, "", fqdn); err == nil && same > 0 {
+		writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "duplicate": true})
+		return
+	}
+	ua := r.UserAgent()
+	if len(ua) > 400 {
+		ua = ua[:400]
+	}
+	lang := r.Header.Get("Accept-Language")
+	if len(lang) > 100 {
+		lang = lang[:100]
+	}
+	rep, err := s.Store.CreateAbuseReportFull(r.Context(), store.AbuseReport{
+		FQDN: fqdn, Reason: reason, ReporterIP: ip, ReporterUA: ua, ReporterLang: lang, Category: "api",
+	})
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -69,7 +90,11 @@ func (s *Server) adminListAbuseReports(w http.ResponseWriter, r *http.Request) {
 			"bu uc yalnizca platform admin yetkisiyle kullanilabilir")
 		return
 	}
-	reps, err := s.Store.ListAbuseReports(r.Context(), 200)
+	pg, ok := pageOf(w, r)
+	if !ok {
+		return
+	}
+	reps, total, err := s.Store.ListAbuseReportsPage(r.Context(), pg)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -77,6 +102,7 @@ func (s *Server) adminListAbuseReports(w http.ResponseWriter, r *http.Request) {
 	if reps == nil {
 		reps = []store.AbuseReport{}
 	}
+	setPageTotals(w, pg, len(reps), total)
 	writeJSON(w, http.StatusOK, map[string]any{"reports": reps, "count": len(reps)})
 }
 

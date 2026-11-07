@@ -19,6 +19,7 @@ import type {
   PathRoute,
   TunnelMTLS,
   TunnelSecurity,
+  AccountDeletionPlan,
   Project,
   Secret, Policy, PolicyConfig, CaptchaSite, CaptchaSiteInput,
   TeamInvitation,
@@ -102,6 +103,11 @@ const delay = (ms = 220) => new Promise(r => setTimeout(r, ms))
 
 // --- Public API -----------------------------------------------------------
 
+/** Sayfalama parametreleri (sunucu: ?limit=&offset=). */
+export interface PageParams { limit: number, offset: number }
+/** Sayfali liste sonucu. total null ise yalniz hasMore bilinir (X-Has-More). */
+export interface PagedResult<T> { items: T[], total: number | null, hasMore: boolean, /** Ham yanit govdesi (ek alanlar icin, ornegin retention_days). */ raw?: any }
+
 export function useApi() {
   const { key } = useAdminKey()
   const { adminTenant } = useAdminTenant()
@@ -139,6 +145,31 @@ export function useApi() {
     return { data: res._data as T, headers: res.headers }
   }
 
+  /**
+   * Sayfali liste istegi. Sunucu sozlesmesi: ?limit&offset, toplam X-Total-Count
+   * (veya X-Has-More). Baslik yoksa (eski sunucu) donen dizi TAM liste sayilir ve
+   * istemci tarafinda dilimlenir.
+   */
+  async function reqPage<T>(path: string, p: PageParams, extract: (data: any) => T[], query: Record<string, unknown> = {}): Promise<PagedResult<T>> {
+    const q: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(query)) if (v !== undefined && v !== null && v !== '') q[k] = v
+    q.limit = p.limit
+    q.offset = p.offset
+    const { data, headers } = await reqWithHeaders<any>(path, { query: q })
+    const all = extract(data) ?? []
+    const tc = headers.get('X-Total-Count')
+    if (tc !== null && tc !== '' && !Number.isNaN(Number(tc))) {
+      const total = Number(tc)
+      return { items: all, total, hasMore: p.offset + all.length < total, raw: data }
+    }
+    const hm = headers.get('X-Has-More')
+    if (hm !== null) return { items: all, total: null, hasMore: hm === 'true', raw: data }
+    // Eski sunucu: tam liste geldi.
+    return { items: all.slice(p.offset, p.offset + p.limit), total: all.length, hasMore: false, raw: data }
+  }
+  const pickKey = (k: string) => (d: any): any[] => Array.isArray(d) ? d : (d?.[k] ?? [])
+  const asArr = (d: any): any[] => Array.isArray(d) ? d : []
+
   // --- Projeler (FAZ 0 / F00) ---
   async function listProjects(): Promise<Project[]> {
     if (USE_MOCK) {
@@ -173,9 +204,15 @@ export function useApi() {
     await req('/organization', { method: 'DELETE', body: { confirm_slug: confirmSlug } })
   }
 
+  // Hesabi silersem ne olur: tek uyesi oldugum (silinecek) ve ayrilacagim organizasyonlar,
+  // silmeyi engelleyenler. Yalniz oturumlu kullanici (API token / admin anahtari 403).
+  async function getAccountDeletionPreview(): Promise<AccountDeletionPlan> {
+    return req<AccountDeletionPlan>('/account/deletion-preview')
+  }
+
   async function listClients(): Promise<Client[]> {
     if (USE_MOCK) { await delay(); return structuredClone(mockClients) }
-    const res = await req<Client[]>(`/clients`)
+    const res = await req<Client[]>(`/clients`, { query: { limit: 500 } })
     return res ?? []
   }
 
@@ -204,22 +241,25 @@ export function useApi() {
 
   async function listTunnels(): Promise<Tunnel[]> {
     if (USE_MOCK) { await delay(); return structuredClone(mockTunnels) }
-    const res = await req<Tunnel[]>(`/tunnels`)
+    const res = await req<Tunnel[]>(`/tunnels`, { query: { limit: 500 } })
     return res ?? []
   }
 
   /**
    * Tünel oluşturur. `name` TAM hostname değil, tek bir DNS etiketidir
    * (ör. "api"); sunucu bunu platform domainiyle birleştirip kiracı kapsamlı
-   * adı otomatik verir.
+   * adı otomatik verir. `ttl_sec` (60..86400) verilirse tünel GEÇİCİDİR ve süre
+   * dolunca sunucu tarafından silinir; verilmezse kalıcıdır. Sunucu 0/negatif
+   * değeri sessizce "kalıcı" sayar, bu yüzden çağıran yalnızca geçerli değer göndermeli.
    */
-  async function createTunnel(input: { name: string, client_id: string, target: string, hostname_id?: string, no_domain?: boolean }): Promise<Tunnel> {
+  async function createTunnel(input: { name: string, client_id: string, target: string, hostname_id?: string, no_domain?: boolean, ttl_sec?: number }): Promise<Tunnel> {
     if (USE_MOCK) {
       await delay(400)
       const id = `tun_${Math.random().toString(36).slice(2, 8)}`
       const tunnel: Tunnel = {
         id, client_id: input.client_id, target: input.target,
         enabled: true, created_at: new Date().toISOString(),
+        ...(input.ttl_sec ? { ephemeral: true, expires_at: new Date(Date.now() + input.ttl_sec * 1000).toISOString() } : {}),
         hostnames: [mockHost(`hst_${id}`, id, `${input.name}--demo.example.com`, 'scoped')],
       }
       mockTunnels.push(tunnel)
@@ -476,7 +516,7 @@ export function useApi() {
     return req<TunnelSecurity>(`/tunnels/${id}/security`)
   }
 
-  async function setTunnelSecurity(id: string, payload: Pick<TunnelSecurity, 'waf' | 'geo' | 'bot' | 'rate'>): Promise<void> {
+  async function setTunnelSecurity(id: string, payload: Pick<TunnelSecurity, 'waf' | 'geo' | 'bot' | 'rate' | 'trusted'>): Promise<void> {
     if (USE_MOCK) { await delay(); return }
     await req(`/tunnels/${id}/security`, { method: 'PUT', body: payload })
   }
@@ -488,7 +528,7 @@ export function useApi() {
       await delay()
       return structuredClone(mockTunnels.flatMap(t => t.hostnames ?? []))
     }
-    const res = await req<Hostname[]>(`/hostnames`)
+    const res = await req<Hostname[]>(`/hostnames`, { query: { limit: 500 } })
     return res ?? []
   }
 
@@ -626,7 +666,7 @@ export function useApi() {
   }
   // --- FAZ 3 / F14: Cihazlar ---
   async function listDevices(): Promise<Device[]> {
-    return req<Device[]>('/devices')
+    return req<Device[]>('/devices', { query: { limit: 500 } })
   }
   async function getDevice(id: string): Promise<Device> {
     return req<Device>(`/devices/${id}`)
@@ -634,7 +674,7 @@ export function useApi() {
 
   // --- FAZ 3 / F17: Zorven Network (özel kaynaklar) ---
   async function listNetworkResources(): Promise<Tunnel[]> {
-    const r = await req<{ resources: Tunnel[] }>('/network/resources')
+    const r = await req<{ resources: Tunnel[] }>('/network/resources', { query: { limit: 500 } })
     return r.resources || []
   }
   async function createNetworkResource(p: { name: string, client_id: string, target?: string, subnet?: string }): Promise<Tunnel> {
@@ -643,7 +683,7 @@ export function useApi() {
 
   // --- Zorven Net (WireGuard port paylaşımı) ---
   async function listNetShares(): Promise<NetShare[]> {
-    const r = await req<{ shares: NetShare[] }>('/net/shares')
+    const r = await req<{ shares: NetShare[] }>('/net/shares', { query: { limit: 500 } })
     return r.shares || []
   }
   async function createNetShare(p: { client_id: string, port: number, proto: string, name?: string, to: NetGrantee[], expires_in_sec?: number }): Promise<void> {
@@ -653,12 +693,12 @@ export function useApi() {
     await req(`/net/shares/${id}`, { method: 'DELETE' })
   }
   async function listNetNodes(): Promise<NetNode[]> {
-    const r = await req<{ nodes: NetNode[] }>('/net/nodes')
+    const r = await req<{ nodes: NetNode[] }>('/net/nodes', { query: { limit: 500 } })
     return r.nodes || []
   }
   // --- Zorven Net Mod B (tam ağ katmanı): erişim kuralları + ağ aralığı ---
   async function listNetTunRules(): Promise<NetTunRule[]> {
-    const r = await req<{ rules: NetTunRule[] }>('/net/tun/rules')
+    const r = await req<{ rules: NetTunRule[] }>('/net/tun/rules', { query: { limit: 500 } })
     return r.rules || []
   }
   async function createNetTunRule(p: { src: NetGrantee, dst: string, proto: string, ports?: string, name?: string }): Promise<NetTunRule> {
@@ -698,49 +738,50 @@ export function useApi() {
       const timer = setInterval(() => onRequest(makeRequest(0)), 2_600)
       return () => clearInterval(timer)
     }
-    // EventSource OZEL BASLIK GONDEREMEZ; Authorization eklenemez.
-    // Bu yuzden fetch + ReadableStream ile SSE'yi elle cozuyoruz.
-    const ctrl = new AbortController()
-    void (async () => {
-      try {
-        const res = await fetch(`${BASE}/events`, {
-          headers: { Authorization: `Bearer ${key.value}` },
-          signal: ctrl.signal,
-        })
-        if (!res.ok || !res.body) return
+    // Sekme basina tek SSE baglantisi (useLiveEvents) paylasilir; kopunca
+    // ussel geri cekilmeyle kendiliginden yeniden baglanir.
+    return useLiveEvents().on('request.completed', d => onRequest(d as RequestLog))
+  }
 
-        const reader = res.body.getReader()
-        const decoder = new TextDecoder()
-        let buf = ''
-
-        for (;;) {
-          const { done, value } = await reader.read()
-          if (done) break
-          buf += decoder.decode(value, { stream: true })
-
-          // SSE olaylari bos satirla ayrilir.
-          let sep: number
-          while ((sep = buf.indexOf('\n\n')) !== -1) {
-            const block = buf.slice(0, sep)
-            buf = buf.slice(sep + 2)
-
-            let type = ''
-            let data = ''
-            for (const line of block.split('\n')) {
-              if (line.startsWith('event: ')) type = line.slice(7).trim()
-              else if (line.startsWith('data: ')) data += line.slice(6)
-              // ": heartbeat" yorum satiri yok sayilir
-            }
-            if (type === 'request.completed' && data) {
-              try { onRequest(JSON.parse(data) as RequestLog) } catch { /* bozuk kare */ }
-            }
-          }
+  /**
+   * SSE akisini acar ve olaylari onEvent(tip, hamVeri) ile iletir; akis bitince
+   * veya iptalde cozulur, HTTP hatasinda firlatir. EventSource OZEL BASLIK
+   * GONDEREMEZ (Authorization), bu yuzden fetch + ReadableStream ile elle cozulur.
+   */
+  async function openEventStream(
+    onEvent: (type: string, data: string) => void,
+    signal: AbortSignal,
+    onOpen?: () => void,
+  ): Promise<void> {
+    const res = await fetch(`${BASE}/events`, {
+      // Yonetime Gec (X-Tenant-ID) ve secili proje (X-Zorven-Project) dahil.
+      headers: buildHeaders({ headers: { Authorization: `Bearer ${key.value}` } }),
+      signal,
+    })
+    if (!res.ok || !res.body) throw new Error(`events ${res.status}`)
+    onOpen?.()
+    const reader = res.body.getReader()
+    const decoder = new TextDecoder()
+    let buf = ''
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += decoder.decode(value, { stream: true })
+      // SSE olaylari bos satirla ayrilir.
+      let sep: number
+      while ((sep = buf.indexOf('\n\n')) !== -1) {
+        const block = buf.slice(0, sep)
+        buf = buf.slice(sep + 2)
+        let type = ''
+        let data = ''
+        for (const line of block.split('\n')) {
+          if (line.startsWith('event: ')) type = line.slice(7).trim()
+          else if (line.startsWith('data: ')) data += line.slice(6)
+          // ": heartbeat" yorum satiri yok sayilir
         }
-      } catch {
-        // Iptal veya ag hatasi: sessizce biter, cagiran yeniden abone olabilir.
+        if (type) onEvent(type, data)
       }
-    })()
-    return () => ctrl.abort()
+    }
   }
 
   /**
@@ -957,7 +998,7 @@ export function useApi() {
         plan: 'team',
       }
     }
-    return req<TeamOverview>('/team/members')
+    return req<TeamOverview>('/team/members', { query: { limit: 500 } })
   }
 
   async function inviteTeamMember(email: string, name?: string, role: string = 'member'): Promise<TeamMember> {
@@ -1044,7 +1085,7 @@ export function useApi() {
       await delay()
       return { tokens: [], count: 0 }
     }
-    return req<{ tokens: APIToken[], count: number }>('/api-tokens')
+    return req<{ tokens: APIToken[], count: number }>('/api-tokens', { query: { limit: 500 } })
   }
 
   async function createAPIToken(name: string, scopes: string[] = ['*'], expiresInDays = 0): Promise<CreateAPITokenResponse> {
@@ -1215,7 +1256,7 @@ export function useApi() {
     return req<{ success: boolean, email_sent: boolean }>(`/team/members/${id}/resend`, { method: 'POST' })
   }
   async function listMyInvitations(): Promise<TeamInvitation[]> {
-    const res = await req<{ invitations: TeamInvitation[] }>('/invitations')
+    const res = await req<{ invitations: TeamInvitation[] }>('/invitations', { query: { limit: 500 } })
     return res?.invitations ?? []
   }
   async function getInvitation(id: string): Promise<TeamInvitation> {
@@ -1231,7 +1272,7 @@ export function useApi() {
   // --- Secret Vault (FAZ 1 / F06) ---
   async function listSecrets(): Promise<{ secrets: Secret[], count: number }> {
     if (USE_MOCK) { await delay(); return { secrets: [], count: 0 } }
-    return req<{ secrets: Secret[], count: number }>('/secrets')
+    return req<{ secrets: Secret[], count: number }>('/secrets', { query: { limit: 500 } })
   }
   async function createSecret(name: string, value: string): Promise<{ secret: Secret, value: string }> {
     if (USE_MOCK) {
@@ -1248,7 +1289,7 @@ export function useApi() {
   // --- Zorven CAPTCHA ---
   async function listCaptchaSites(): Promise<{ sites: CaptchaSite[] }> {
     if (USE_MOCK) { await delay(); return { sites: [] } }
-    return req<{ sites: CaptchaSite[] }>('/captcha/sites')
+    return req<{ sites: CaptchaSite[] }>('/captcha/sites', { query: { limit: 500 } })
   }
   async function createCaptchaSite(input: CaptchaSiteInput): Promise<CaptchaSite> {
     return req<CaptchaSite>('/captcha/sites', { method: 'POST', body: input })
@@ -1263,10 +1304,9 @@ export function useApi() {
     await req(`/captcha/sites/${encodeURIComponent(id)}`, { method: 'DELETE' })
   }
 
-  // --- Birlesik Policy motoru (FAZ 1 / F04) ---
   async function listPolicies(): Promise<{ policies: Policy[], count: number }> {
     if (USE_MOCK) { await delay(); return { policies: [], count: 0 } }
-    return req<{ policies: Policy[], count: number }>('/policies')
+    return req<{ policies: Policy[], count: number }>('/policies', { query: { limit: 500 } })
   }
   async function getPolicy(id: string): Promise<Policy> {
     return req<Policy>(`/policies/${id}`)
@@ -1292,9 +1332,72 @@ export function useApi() {
     await req(`/policies/${id}/unbind`, { method: 'POST', body: binding })
   }
 
+  // --- Sayfali liste varyantlari ({items,total,hasMore}); duz liste metodlari limit=500 ile kalir (acilir liste/arama icin) ---
+  const pageClients = (p: PageParams) => reqPage<Client>('/clients', p, asArr)
+  const pageTunnels = (p: PageParams) => reqPage<Tunnel>('/tunnels', p, asArr)
+  const pageHostnames = (p: PageParams) => reqPage<Hostname>('/hostnames', p, asArr)
+  const pageDevices = (p: PageParams) => reqPage<Device>('/devices', p, asArr)
+  const pageNetworkResources = (p: PageParams) => reqPage<Tunnel>('/network/resources', p, pickKey('resources'))
+  const pageNetShares = (p: PageParams) => reqPage<NetShare>('/net/shares', p, pickKey('shares'))
+  const pageNetTunRules = (p: PageParams) => reqPage<NetTunRule>('/net/tun/rules', p, pickKey('rules'))
+  const pageAdminTenants = (p: PageParams) => reqPage<TenantWithCounts>('/admin/tenants', p, asArr)
+  const pageAdminClients = (p: PageParams) => reqPage<ClientWithTenant>('/admin/clients', p, asArr)
+  const pageAdminHostnames = (p: PageParams) => reqPage<HostnameWithTenant>('/admin/hostnames', p, asArr)
+  const pageAdminAbuseReports = (p: PageParams) => reqPage<AbuseReport>('/admin/abuse-reports', p, pickKey('reports'))
+  // Guncellemeler: toplam X-Total-Count veya (eski sunucuda) govdedeki total.
+  async function pageAdminUpdates(p: PageParams): Promise<PagedResult<any>> {
+    const { data, headers } = await reqWithHeaders<{ updates?: any[], total?: number }>('/admin/updates', { query: { limit: p.limit, offset: p.offset } })
+    const items = data?.updates ?? []
+    const tc = headers.get('X-Total-Count')
+    const total = tc !== null && tc !== '' && !Number.isNaN(Number(tc)) ? Number(tc) : (typeof data?.total === 'number' ? data.total : null)
+    if (total === null) return { items: items.slice(p.offset, p.offset + p.limit), total: items.length, hasMore: false }
+    return { items: items.slice(0, p.limit), total, hasMore: p.offset + items.length < total }
+  }
+  const pageAPITokens = (p: PageParams) => reqPage<APIToken>('/api-tokens', p, pickKey('tokens'))
+  const pageIPRules = (p: PageParams, tunnelId?: string) => reqPage<IPAllowlistRule>('/ip-allowlist', p, pickKey('rules'), { tunnel_id: tunnelId })
+  const pageMail = (p: PageParams, box = 'inbox') => reqPage<MailMessage>('/mail/messages', p, asArr, { box })
+  const pageMailAppPasswords = (p: PageParams, mailbox?: string) => reqPage<MailAppPassword>('/mail/app-passwords', p, asArr, { mailbox })
+  const pageInvitations = (p: PageParams) => reqPage<TeamInvitation>('/invitations', p, pickKey('invitations'))
+  const pageSecrets = (p: PageParams) => reqPage<Secret>('/secrets', p, pickKey('secrets'))
+  const pageCaptchaSites = (p: PageParams) => reqPage<CaptchaSite>('/captcha/sites', p, pickKey('sites'))
+  const pagePolicies = (p: PageParams) => reqPage<Policy>('/policies', p, pickKey('policies'))
+  const pageMemberTokens = (memberId: string, p: PageParams) => reqPage<Client>(`/team/members/${memberId}/tokens`, p, asArr)
+
+  /** Ekip uyeleri: TeamOverview (plan/limit alanlari) + sayfali uyeler. */
+  async function pageTeamMembers(p: PageParams): Promise<PagedResult<TeamMember> & { overview: TeamOverview }> {
+    const { data, headers } = await reqWithHeaders<TeamOverview>('/team/members', { query: { limit: p.limit, offset: p.offset } })
+    const all = data?.members ?? []
+    const tc = headers.get('X-Total-Count')
+    if (tc !== null && tc !== '' && !Number.isNaN(Number(tc))) {
+      const total = Number(tc)
+      return { items: all, total, hasMore: p.offset + all.length < total, overview: data }
+    }
+    return { items: all.slice(p.offset, p.offset + p.limit), total: all.length, hasMore: false, overview: data }
+  }
+
+  /**
+   * Istek loglari: toplam pahali -> X-Has-More. Her zaman limit+1 istenir (eski
+   * sunucuda baslik yoktur); fazla satir hasMore sayilir.
+   */
+  async function pageRequests(p: PageParams, f: LogFilter = {}): Promise<PagedResult<RequestLog>> {
+    const query: Record<string, string | number> = {}
+    for (const [k, v] of Object.entries(f)) if (v !== undefined && v !== '' && v !== null) query[k] = v as string | number
+    query.limit = p.limit + 1
+    query.offset = p.offset
+    const { data, headers } = await reqWithHeaders<RequestLog[]>('/requests', { query })
+    const all = data ?? []
+    return { items: all.slice(0, p.limit), total: null, hasMore: all.length > p.limit || headers.get('X-Has-More') === 'true' }
+  }
+
   return {
     terminalWSURL,
-    listProjects, createProject, deleteProject, renameProject, deleteOrganization,
+    pageClients, pageTunnels, pageHostnames, pageDevices, pageNetworkResources, pageNetShares,
+    pageNetTunRules, pageAdminTenants, pageAdminClients,
+    pageAdminHostnames, pageAdminAbuseReports, pageAdminUpdates,
+    pageAPITokens, pageIPRules, pageMail, pageMailAppPasswords, pageInvitations,
+    pageSecrets, pageCaptchaSites, pagePolicies, pageMemberTokens,
+    pageTeamMembers, pageRequests,
+    listProjects, createProject, deleteProject, renameProject, deleteOrganization, getAccountDeletionPreview,
     listClients, createClient, deleteClient,
     listTunnels, createTunnel, updateTunnel, deleteTunnel, getTunnelAccess, setTunnelAccess, revokeVisitorSessions,
     getTunnelDoor, setTunnelDoor, listDoorGrants, revokeDoorGrant,
@@ -1308,7 +1411,7 @@ export function useApi() {
     getTunnelMTLS, setTunnelMTLS,
     getTunnelSecurity, setTunnelSecurity,
     listHostnames, createHostname, createCustomHostname, updateHostname, verifyHostname, dnsCheckHostname, deleteHostname,
-    listRequests, streamRequests, deviceApprove,
+    listRequests, streamRequests, openEventStream, deviceApprove,
     getCaptureEnabled, setCaptureEnabled, getRequestDetail, replayRequest,
     listDevices, getDevice, listNetworkResources, createNetworkResource,
     listNetShares, createNetShare, deleteNetShare, listNetNodes,

@@ -11,7 +11,7 @@ var verbRe = regexp.MustCompile(`%[-+# 0-9.]*[a-zA-Z%]`)
 func TestMessagesComplete(t *testing.T) {
 	for k, v := range messages {
 		for i, s := range v {
-			if s == "" && i != 2 { // acik surumde ja sutunu bostur
+			if s == "" && i < 2 { // acik surumde ja ve zh sutunu bostur
 				t.Errorf("%s: dil %d bos", k, i)
 			}
 		}

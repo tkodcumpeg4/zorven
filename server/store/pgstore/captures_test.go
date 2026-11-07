@@ -86,6 +86,7 @@ func TestCaptures_PutGetUsageDelete(t *testing.T) {
 }
 
 func TestCaptures_RetentionAndOrgDelete(t *testing.T) {
+	t.Setenv("ZORVEN_LOG_RETENTION_DAYS", "1")
 	ctx := context.Background()
 	s := freshStore(t)
 	k := capCodec(t)

@@ -72,11 +72,16 @@ func (s *Server) listAPITokens(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tokens, err := s.Store.ListAPITokens(r.Context(), tenantID)
+	pg, ok := pageOf(w, r)
+	if !ok {
+		return
+	}
+	tokens, total, err := s.Store.ListAPITokensPage(r.Context(), tenantID, pg)
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
+	setPageTotals(w, pg, len(tokens), total)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"tokens": tokens,

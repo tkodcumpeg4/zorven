@@ -15,16 +15,25 @@ const box = ref<string>('inbox')
 const folders = ref<string[]>([])
 const moveOpen = ref(false)
 const boxLabel = computed(() =>
-  box.value === 'inbox' ? t('mail.inbox') : box.value === 'sent' ? t('mail.sent') : box.value === 'trash' ? t('mail.trash') : box.value,
+  box.value === 'inbox' ? t('mail.inbox') : box.value === 'sent' ? t('mail.sent') : box.value === 'trash' ? t('mail.trash') : folderTitle(box.value),
 )
 function folderDepth(n: string) { return n.split('/').length - 1 }
 function folderLeaf(n: string) { return n.split('/').pop() || n }
+// Gelen posta doğrulaması (SPF/DKIM/DMARC) şüpheli iletileri sunucuda "Junk" adlı
+// (\Junk özellikli) klasöre koyar; panelde yerelleştirilmiş adıyla ve uyarı ikonuyla gösterilir.
+const JUNK_FOLDER = 'Junk'
+function folderTitle(n: string) { return n === JUNK_FOLDER ? t('mail.junk') : folderLeaf(n) }
+function folderIcon(n: string) { return n === JUNK_FOLDER ? 'lucide:mail-warning' : 'lucide:folder' }
 // 'mail' = webmail; 'apps' = "Mail uygulamalarında kullan" (IMAP/SMTP kurulum)
 const view = ref<'mail' | 'apps'>('mail')
-const messages = ref<MailMessage[]>([])
+const pager = usePagedList<MailMessage, { box: string }>(
+  (p, f) => api.pageMail(p, f.box),
+  { immediate: false, filters: () => ({ box: box.value }) },
+)
+const messages = pager.items
 const selected = ref<MailMessage | null>(null)
 const loading = ref(true)
-const loadingMsg = ref(false)
+const loadingMsg = pager.loading
 const copied = ref(false)
 
 // Yeni mesaj / yanit
@@ -156,7 +165,7 @@ async function moveTo(m: MailMessage, folder: string) {
     await api.moveMail(m.id, folder)
     messages.value = messages.value.filter(x => x.id !== m.id)
     if (selected.value?.id === m.id) selected.value = null
-    toast.info(t('mail.moved', { folder: folder === 'inbox' ? t('mail.inbox') : folder }))
+    toast.info(t('mail.moved', { folder: folder === 'inbox' ? t('mail.inbox') : folderTitle(folder) }))
   } catch (e: any) {
     toast.error(e?.data?.error?.message || (typeof e?.data?.error === 'string' ? e.data.error : '') || e?.message || t('mail.moveFailed'))
   }
@@ -164,13 +173,10 @@ async function moveTo(m: MailMessage, folder: string) {
 
 async function loadBox() {
   selected.value = null
-  loadingMsg.value = true
-  try {
-    messages.value = await api.listMail(box.value)
-  } catch (e: any) {
+  await pager.reload()
+  if (pager.error.value) {
+    const e: any = pager.error.value
     toast.error(e?.data?.error?.message || (typeof e?.data?.error === 'string' ? e.data.error : '') || e?.message || t('mail.loadFailed'))
-  } finally {
-    loadingMsg.value = false
   }
 }
 
@@ -178,7 +184,7 @@ function switchBox(b: string) {
   if (box.value === b) return
   box.value = b
   moveOpen.value = false
-  loadBox()
+  selected.value = null // liste yuklemesini sayfalayicinin filtre izleyicisi yapar
 }
 
 async function openMessage(m: MailMessage) {
@@ -370,8 +376,8 @@ async function copyAddress() {
           :title="f"
           @click="switchBox(f)"
         >
-          <Icon name="lucide:folder" class="size-3.5" />
-          <span class="max-w-[160px] truncate">{{ folderLeaf(f) }}</span>
+          <Icon :name="folderIcon(f)" class="size-3.5" />
+          <span class="max-w-[160px] truncate">{{ folderTitle(f) }}</span>
         </button>
       </div>
 
@@ -457,6 +463,7 @@ async function copyAddress() {
               <span v-if="m.text_body" class="truncate text-[11px] text-fg-subtle">{{ m.text_body }}</span>
             </button>
           </div>
+          <ListPager class="px-4 pb-3" :list="pager" />
         </PanelFrame>
 
         <!-- Okuma paneli -->
@@ -507,8 +514,8 @@ async function copyAddress() {
                           :style="{ paddingLeft: 10 + folderDepth(f) * 10 + 'px' }"
                           @click="moveTo(selected, f)"
                         >
-                          <Icon name="lucide:folder" class="size-3.5 shrink-0 text-fg-muted" />
-                          <span class="truncate">{{ folderLeaf(f) }}</span>
+                          <Icon :name="folderIcon(f)" class="size-3.5 shrink-0 text-fg-muted" />
+                          <span class="truncate">{{ folderTitle(f) }}</span>
                         </button>
                       </div>
                     </template>

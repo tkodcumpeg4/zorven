@@ -33,16 +33,29 @@ type Config struct {
 	Target string
 	// ServerAddr, Zorven sunucusu (varsayılan "zorven.app:443").
 	ServerAddr string
-	// Insecure true ise TLS doğrulaması atlanır (yalnızca yerel geliştirme).
+	// Insecure true ise TLS kullanılmaz: düz ws:// ile bağlanır (yalnızca yerel
+	// geliştirme; trafik şifresiz gider).
 	Insecure bool
 	// Logger, isteğe bağlı. nil ise loglar atılır.
 	Logger *slog.Logger
-	// NoTerminal / NoScreen, uzak kabuk / ekran paylaşımını tamamen kapatır (önerilir).
+	// EnableTerminal / EnableScreen, uzak kabuk / ekran paylaşımını AÇAR (opt-in).
+	// Varsayılan (sıfır değer) ikisi de KAPALIDIR.
+	EnableTerminal bool
+	EnableScreen   bool
+	// NoTerminal / NoScreen: kullanımdan kalkmış; özellik zaten varsayılan kapalı.
+	// true ise Enable* değerini geçersiz kılıp özelliği zorla kapatır.
+	//
+	// Deprecated: EnableTerminal / EnableScreen kullanın.
 	NoTerminal bool
 	NoScreen   bool
 	// ConnectTimeout, ilk bağlantı için beklenecek süre (varsayılan 30s).
 	ConnectTimeout time.Duration
 }
+
+// terminalOff / screenOff, agent'a verilecek "kapat" bayraklarini hesaplar:
+// ozellik yalniz acikca etkinlestirilmis ve zorla kapatilmamissa acik kalir.
+func (c Config) terminalOff() bool { return !c.EnableTerminal || c.NoTerminal }
+func (c Config) screenOff() bool   { return !c.EnableScreen || c.NoScreen }
 
 // Tunnel, açılan bir tünelin herkese açık adresleri.
 type Tunnel struct {
@@ -93,8 +106,8 @@ func Connect(ctx context.Context, cfg Config) (*Session, error) {
 		LocalURL:        target,
 		RequestedTarget: target,
 		Insecure:        cfg.Insecure,
-		NoTerminal:      cfg.NoTerminal,
-		NoScreen:        cfg.NoScreen,
+		NoTerminal:      cfg.terminalOff(),
+		NoScreen:        cfg.screenOff(),
 		NoAutoUpdate:    true, // SDK gömülü kullanımda kendini güncellemesin
 		Log:             logger,
 		OnStatus: func(st agent.Status) {

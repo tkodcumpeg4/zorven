@@ -1,6 +1,9 @@
 package rawproxy
 
 import (
+	"bytes"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 )
@@ -51,7 +54,7 @@ func TestTokenBucket(t *testing.T) {
 
 func TestUDPLimitsNormalized(t *testing.T) {
 	l := UDPLimits{MaxPacket: 999999, MaxPPS: -5}.normalized()
-	if l.IdleTimeout != defaultUDPIdle || l.MaxPacket != defaultUDPMaxPacket || l.MaxFlows != defaultUDPMaxFlows || l.MaxPPS != 0 {
+	if l.IdleTimeout != defaultUDPIdle || l.MaxPacket != defaultUDPMaxPacket || l.MaxFlows != defaultUDPMaxFlows || l.MaxPPS != 0 || l.MaxFlowPPS != DefaultUDPFlowPPS {
 		t.Fatalf("varsayilanlar uygulanmadi: %+v", l)
 	}
 }
@@ -177,5 +180,73 @@ func TestCollectUDPMinutesDeltas(t *testing.T) {
 	live, ok := m.UDPStats("t1")
 	if !ok || live.PacketsIn != 14 || live.ActiveFlows != 1 || live.Port != 5000 {
 		t.Fatalf("canli istatistik yanlis: %+v ok=%v", live, ok)
+	}
+}
+
+func TestUDPDefaultPPSApplied(t *testing.T) {
+	t.Cleanup(func() { SetUDPDefaultPPS(DefaultUDPFlowPPS, DefaultUDPTunnelPPS) })
+	l := UDPLimits{}.normalized()
+	if l.MaxFlowPPS != 2000 || l.MaxPPS != 20000 {
+		t.Fatalf("varsayilan 2000/20000 bekleniyordu: %+v", l)
+	}
+	l = UDPLimits{MaxPPS: 7, MaxFlowPPS: 3}.normalized()
+	if l.MaxFlowPPS != 3 || l.MaxPPS != 7 {
+		t.Fatalf("%+v", l)
+	}
+	// Env gecersiz kilma: 0 = sinirsiz.
+	SetUDPDefaultPPS(0, 0)
+	l = UDPLimits{}.normalized()
+	if l.MaxFlowPPS != 0 || l.MaxPPS != 0 {
+		t.Fatalf("%+v", l)
+	}
+	ul := newTestListener()
+	now := time.Unix(1, 0)
+	f := &udpFlow{}
+	for i := 0; i < 100000; i++ {
+		if !ul.admit(l, 10, f, 1, now) {
+			t.Fatal("sinirsiz kipte paket dusmemeli")
+		}
+	}
+	SetUDPDefaultPPS(50, 60)
+	l = UDPLimits{}.normalized()
+	if l.MaxFlowPPS != 50 || l.MaxPPS != 60 {
+		t.Fatalf("%+v", l)
+	}
+}
+
+func TestUDPDefaultFlowCapDropsCounted(t *testing.T) {
+	ul := newTestListener()
+	lim := UDPLimits{}.normalized()
+	now := time.Unix(1, 0)
+	f := &udpFlow{}
+	ok := 0
+	for i := 0; i < 2500; i++ {
+		if ul.admit(lim, 100, f, 1, now) {
+			ok++
+		}
+	}
+	if ok != 2000 || ul.stats.droppedRate.Load() != 500 {
+		t.Fatalf("ok=%d dropped=%d", ok, ul.stats.droppedRate.Load())
+	}
+	// Tipik oyun/VoIP hizi (100 pps) hic dusmez.
+	ul = newTestListener()
+	f = &udpFlow{}
+	for i := 0; i < 1000; i++ {
+		if !ul.admit(lim, 100, f, 1, now.Add(time.Duration(i)*10*time.Millisecond)) {
+			t.Fatal("100 pps dusmemeli")
+		}
+	}
+}
+
+func TestUDPRateLogOncePerMinute(t *testing.T) {
+	var buf bytes.Buffer
+	ul := newTestListener()
+	ul.m = &Manager{Log: slog.New(slog.NewTextHandler(&buf, nil))}
+	now := time.Unix(1, 0)
+	ul.logRateDrop("flow", 10, now)
+	ul.logRateDrop("flow", 10, now.Add(30*time.Second))
+	ul.logRateDrop("flow", 10, now.Add(61*time.Second))
+	if n := strings.Count(buf.String(), "pps siniri"); n != 2 {
+		t.Fatalf("2 log bekleniyordu, %d: %s", n, buf.String())
 	}
 }

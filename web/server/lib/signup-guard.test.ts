@@ -1,5 +1,5 @@
 // Calistirma: cd web && node --test server/lib/signup-guard.test.ts
-// Kayit CAPTCHA + gecici e-posta engeli (memory adapter; gercek DB/ag gerekmez).
+// Kayit CAPTCHA + sifre sifirlama CAPTCHA (memory adapter; gercek DB/ag gerekmez).
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import { betterAuth } from "better-auth"
@@ -50,8 +50,11 @@ function fakeFetch(calls: Call[], respond: (url: string, body: any) => unknown) 
 const SIGNUP = { email: "c@example.com", password: "password-1234", name: "C" }
 
 test("yardimcilar: dil secimi ve API tabani", () => {
-  assert.equal(pickLang("ja,en;q=0.5"), "ja")
+  assert.equal(pickLang("ja,en;q=0.5"), "tr")
   assert.equal(pickLang("en-GB"), "en")
+  assert.equal(pickLang("zh-CN,zh;q=0.9"), "tr")
+  assert.equal(pickLang("zh-TW"), "tr")
+  assert.equal(pickLang("zh-Hans"), "tr")
   assert.equal(pickLang("tr-TR"), "tr")
   assert.equal(pickLang(null), "tr")
   assert.equal(apiBase({ ZORVEN_API_INTERNAL_URL: "http://a:1/" }), "http://a:1")
@@ -108,7 +111,11 @@ test("CAPTCHA: token yok / gecersiz / servis hatasi -> 400 captcha_failed (dil: 
   r = await post(auth, "/sign-up/email", SIGNUP, { "x-zorven-captcha": "t", "accept-language": "ja" })
   assert.equal(r.status, 400, "servis ulasilamazsa kapali tutulur")
   assert.equal(r.json.code, "captcha_failed")
-  assert.match(r.json.message, /人間確認/)
+  assert.match(r.json.message, /doğrulaması başarısız/)
+
+  r = await post(auth, "/sign-up/email", SIGNUP, { "x-zorven-captcha": "t", "accept-language": "zh-CN,zh;q=0.9" })
+  assert.equal(r.json.code, "captcha_failed")
+  assert.match(r.json.message, /doğrulaması başarısız/)
 })
 
 test("CAPTCHA yalniz /sign-up/email yolunda: sign-in etkilenmez", async () => {
@@ -121,4 +128,44 @@ test("CAPTCHA yalniz /sign-up/email yolunda: sign-in etkilenmez", async () => {
   const si = await post(auth, "/sign-in/email", { email: SIGNUP.email, password: SIGNUP.password })
   assert.equal(si.status, 200, JSON.stringify(si.json))
   assert.equal(calls.length, 0)
+})
+
+test("Sifre sifirlama istegi: CAPTCHA zorunlu (gizli anahtar varsa), yoksa atlanir", async () => {
+  const mk = (env: Record<string, string>, resp: unknown) => {
+    const calls: Call[] = []
+    const auth = makeAuth(createAuthHooks({ env: () => env, fetch: fakeFetch(calls, () => resp) }))
+    return { calls, auth }
+  }
+  // anahtar yok -> atlanir
+  let t = mk({}, { success: false })
+  let r = await post(t.auth, "/request-password-reset", { email: "a@example.com", redirectTo: "/reset-password" })
+  assert.notEqual(r.json?.code, "captcha_failed")
+  assert.equal(t.calls.length, 0)
+
+  const env = { ZORVEN_CAPTCHA_PLATFORM_SECRET: "zcsec_x", ZORVEN_API_INTERNAL_URL: "http://api.internal" }
+  // token yok -> 400 (ja)
+  t = mk(env, { success: true })
+  r = await post(t.auth, "/request-password-reset", { email: "a@example.com" }, { "accept-language": "ja" })
+  assert.equal(r.status, 400)
+  assert.equal(r.json.code, "captcha_failed")
+  assert.match(r.json.message, /doğrulaması başarısız/)
+  assert.equal(t.calls.length, 0)
+
+  // gecersiz token -> 400 (en)
+  t = mk(env, { success: false })
+  r = await post(t.auth, "/request-password-reset", { email: "a@example.com" }, { "x-zorven-captcha": "bad", "accept-language": "en" })
+  assert.equal(r.status, 400)
+  assert.match(r.json.message, /Human verification failed/)
+
+  // servis hatasi -> kapali
+  t = mk(env, new Error("ECONNREFUSED"))
+  r = await post(t.auth, "/request-password-reset", { email: "a@example.com" }, { "x-zorven-captcha": "t" })
+  assert.equal(r.status, 400)
+
+  // gecerli token -> gecer, siteverify cagrilir
+  t = mk(env, { success: true })
+  r = await post(t.auth, "/request-password-reset", { email: "a@example.com" }, { "x-zorven-captcha": "ok", "x-forwarded-for": "203.0.113.9" })
+  assert.notEqual(r.json?.code, "captcha_failed")
+  assert.equal(t.calls.length, 1)
+  assert.deepEqual(t.calls[0].body, { secret: "zcsec_x", response: "ok", remoteip: "203.0.113.9" })
 })

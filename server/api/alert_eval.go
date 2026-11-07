@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/tkodcumpeg4/zorven/server/store"
@@ -35,6 +34,9 @@ func (s *Server) RunAlertEvaluator(ctx context.Context, interval time.Duration) 
 }
 
 func (s *Server) evaluateAlerts(ctx context.Context) {
+	if s.JobGate != nil && !s.JobGate() {
+		return
+	}
 	alerts, err := s.Store.ListEnabledAlerts(ctx)
 	if err != nil {
 		s.logger().Warn("uyari degerlendirici: etkin uyarilar alinamadi", "hata", err)
@@ -86,14 +88,8 @@ func (s *Server) sendAlertEmail(a store.TunnelAlert, total, errors int64, rate f
 		return false
 	}
 	from := "alerts@" + s.MailDomain
-	subject := fmt.Sprintf("[Zorven] Uyarı: %s hata oranı %%%.0f", a.TunnelID, rate)
-	body := fmt.Sprintf(
-		"Zorven metrik uyarısı tetiklendi.\r\n\r\n"+
-			"Tünel: %s\r\n"+
-			"Son %d dakika: %d istek, %d hata (5xx)\r\n"+
-			"Hata oranı: %%%.1f (eşik: %%%d)\r\n\r\n"+
-			"Panelden inceleyin: https://panel.%s\r\n",
-		a.TunnelID, a.WindowMin, total, errors, rate, a.ErrorRatePct, s.platformDomainOr("zorven.app"))
+	// Dil: uyariyi kuran kullanicinin kurulum anindaki dili (notify_lang); kayit yoksa tr.
+	subject, body := alertMail(a.NotifyLang, a.TunnelID, a.WindowMin, total, errors, rate, a.ErrorRatePct, s.platformDomainOr("zorven.app"))
 	if _, err := s.MailSender.Send(from, a.NotifyEmail, subject, body, "", "", nil); err != nil {
 		s.logger().Warn("uyari e-postasi gonderilemedi", "tunnel", a.TunnelID, "to", a.NotifyEmail, "hata", err)
 		return false

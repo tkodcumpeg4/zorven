@@ -68,9 +68,9 @@ func TestTenantRuntimeState_SelfHostUnlimited(t *testing.T) {
 	// Open-core / self-host: acik hiz siniri yok (normalMbps=0) ve enterprise =>
 	// SINIRSIZ, limiter nil olmali (throttle uygulanmaz).
 	for _, tc := range []struct {
-		name     string
-		plan     string
-		normal   int64
+		name   string
+		plan   string
+		normal int64
 	}{
 		{"self-host default (mbps=0)", "free", 0},
 		{"enterprise", bandwidth.PlanEnterprise, 1000},

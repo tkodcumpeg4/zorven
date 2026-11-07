@@ -17,7 +17,11 @@ func (s *Server) listTeamMembers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	members, err := s.Store.ListTeamMembers(r.Context(), tenantID)
+	pg, ok := pageOf(w, r)
+	if !ok {
+		return
+	}
+	members, total, err := s.Store.ListTeamMembersPage(r.Context(), tenantID, pg)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -25,6 +29,7 @@ func (s *Server) listTeamMembers(w http.ResponseWriter, r *http.Request) {
 	if members == nil {
 		members = []store.TeamMember{}
 	}
+	setPageTotals(w, pg, len(members), total)
 
 	sub, err := s.Store.GetSubscription(r.Context(), tenantID)
 	if err != nil {
@@ -113,9 +118,11 @@ func (s *Server) inviteTeamMember(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Davet e-postasi: uyelik ancak davetli linkten kabul edince olusur.
+	// E-posta daveti GONDERENIN dilinde gider (kayitli tercih > panel dili cerezi >
+	// Accept-Language > tr; bkz. mail_i18n.go).
 	sent := false
 	if inv, ierr := s.Store.GetInvitation(r.Context(), m.ID); ierr == nil {
-		sent = s.sendInvitationEmail(inv)
+		sent = s.sendInvitationEmail(inv, s.mailLangFor(r, inviterID))
 	}
 	m.EmailSent = &sent
 	s.audit(r, "team.invite", m.ID, m.Email)
@@ -264,9 +271,11 @@ func (s *Server) listMemberTokens(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	if clients == nil {
-		clients = []store.Client{}
+	pg, okPg := pageOf(w, r)
+	if !okPg {
+		return
 	}
+	clients = slicePage(w, pg, clients)
 	for i := range clients {
 		clients[i] = s.enrich(clients[i])
 	}

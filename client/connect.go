@@ -28,7 +28,7 @@ import (
 //	psql "host=db.internal port=5432" ile degil, SOCKS destekleyen istemciyle:
 //	ssh -o ProxyCommand='nc -X 5 -x 127.0.0.1:1080 %h %p' ssh.internal
 func newConnectCmd() *cobra.Command {
-	var listen, apiToken, cServer, allowFrom string
+	var listen, apiToken, apiTokenFile, cServer, allowFrom string
 	var insecureFlag, gateway bool
 
 	cmd := &cobra.Command{
@@ -37,30 +37,22 @@ func newConnectCmd() *cobra.Command {
 		Long:  i18n.T("conn2.long"),
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			token := strings.TrimSpace(apiToken)
-			if token == "" {
-				token = strings.TrimSpace(os.Getenv("ZORVEN_API_TOKEN"))
+			token, terr := resolveAPIToken(apiToken, apiTokenFile)
+			if terr != nil {
+				return terr
 			}
 			if token == "" {
 				return errors.New(i18n.T("conn2.err.token"))
 			}
 			// Istemci (ajan) token'i burada ise yaramaz: o bir cihazin kimligidir,
 			// kullanicinin degil. Erken ve acik hata, sunucudan 401 almaktan iyi.
-			if strings.HasPrefix(token, "zrv_live_") || strings.HasPrefix(token, "rpsh_live_") {
+			if isAgentToken(token) {
 				return errors.New(i18n.T("conn2.err.agenttoken"))
 			}
 
 			cfg, _ := config.Load()
-			srv := strings.TrimSpace(cServer)
-			if srv == "" {
-				srv = strings.TrimSpace(os.Getenv("ZORVEN_SERVER"))
-			}
-			if srv == "" {
-				srv = strings.TrimSpace(cfg.ServerAddr)
-			}
-			if srv == "" || srv == "localhost:8443" {
-				srv = "zorven.app:443"
-			}
+			srv := resolveServerAddr(cServer, cfg)
+			warnPlaintext(insecureFlag || cfg.Insecure)
 
 			// Loopback disina acmak LAN'daki makinelere ozel ag erisimi verir ve
 			// yerel dinleyicide kimlik dogrulama yoktur. Bu yuzden YALNIZCA acik
@@ -101,6 +93,7 @@ func newConnectCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&listen, "listen", "127.0.0.1:1080", i18n.T("conn2.flag.listen"))
 	cmd.Flags().StringVar(&apiToken, "api-token", "", i18n.T("net.flag.apitoken"))
+	cmd.Flags().StringVar(&apiTokenFile, "api-token-file", "", i18n.T("v3.flag.apitokenfile"))
 	cmd.Flags().StringVar(&cServer, "server", "", i18n.T("net.flag.server"))
 	cmd.Flags().BoolVar(&insecureFlag, "insecure", false, i18n.T("net.flag.insecure"))
 	cmd.Flags().BoolVar(&gateway, "gateway", false, i18n.T("conn2.flag.gateway"))

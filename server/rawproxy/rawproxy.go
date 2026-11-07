@@ -43,6 +43,12 @@ type TunnelInfo struct {
 	Port     int       // genel (tunel adresinde gorunen) port
 	UDP      UDPLimits // yalnizca udp (FAZ 4 / F24)
 
+	// Replicas, birincil ClientID'ye EK olarak ayni tunele hizmet eden replika
+	// istemciler (FAZ 5 / HA). Bos ise tunel yalnizca ClientID ile calisir
+	// (replikasiz yol, eskisi gibi). Doluysa TCP baglantilari / UDP flow'lari
+	// adaylar arasinda dagitilir (bkz. replicas.go).
+	Replicas []string
+
 	// K3: cok IP'li havuz. BindAddr bos ise tum arayuzler; ListenPort 0 ise Port.
 	// (docker bridge'de ikinci IP'nin portu kaydirilir: ListenPort = Port+offset.)
 	BindAddr   string
@@ -103,7 +109,22 @@ type Manager struct {
 	limits     *connLimits
 
 	// openStream nil degilse bridgeTCP ajan akisini Hub yerine buradan alir (testler).
+	// Yalnizca replikasiz tunel yolunu etkiler.
 	openStream func(ctx context.Context, ti TunnelInfo, remote string) (bridgeStream, bool, error)
+
+	// Balancer, replikali tunellerde (TunnelInfo.Replicas) aday istemci secimini
+	// yapar; ingress.Router uygular (HTTP ile ayni algoritma ve saglik tablosu).
+	// nil ise cevrimici adaylar arasinda sirali dagitim yapilir. Replikasiz
+	// tunellerde kullanilmaz. Start'tan ONCE ayarlanmali.
+	Balancer Balancer
+	// rr: tunel kimligi -> *atomic.Uint64, replika round-robin sayaci.
+	rr sync.Map
+	// streams nil degilse replikali yollar aday oturumlari Hub yerine buradan alir (testler).
+	streams clientStreams
+
+	// Remote, yerel Hub'da oturumu olmayan istemciler icin dugumler arasi akis tunelini
+	// kullanir (cluster_dial.go). nil = tek dugum; hicbir kume yoluna girilmez.
+	Remote *RemoteDialer
 }
 
 func (m *Manager) connLimits() *connLimits {
@@ -156,7 +177,7 @@ func (m *Manager) Reload() {
 	want := map[listenKey]TunnelInfo{}
 	for _, ti := range desired {
 		if ti.Port > 0 && (ti.Proto == "tcp" || ti.Proto == "udp") {
-			want[ti.key()] = ti
+			want[ti.key()] = ti.normalized()
 		}
 	}
 
@@ -241,7 +262,7 @@ func (m *Manager) handleTCP(conn net.Conn, port listenKey) {
 // conn ARAMADAN once kapatilmamalidir; bridgeTCP defer ile kapatir.
 func (m *Manager) HandleSNIConn(conn net.Conn, ti TunnelInfo) {
 	defer conn.Close()
-	m.bridgeTCP(conn, ti)
+	m.bridgeTCP(conn, ti.normalized())
 }
 
 // bridgeTCP, verilen conn'u tunelin ajan oturumuna bir ham TCP akisiyla baglar.
@@ -268,9 +289,17 @@ func (m *Manager) bridgeTCP(conn net.Conn, ti TunnelInfo) {
 	defer release()
 
 	var sess *tunnel.Session
+	var order []string // replikali tunel: bu baglanti icin aday secim sirasi (replicas.go)
 	online := true
-	if m.openStream == nil {
+	if len(ti.Replicas) > 0 {
+		order = m.pickOrder(ti, m.clients())
+		online = len(order) > 0
+	} else if m.openStream == nil {
 		sess, online = m.Hub.Get(ti.ClientID)
+		if !online && m.remoteOnline(ti.ClientID) {
+			// Oturum baska dugumde: tek adayli sira ile dugumler arasi tunelden ac (cluster_dial.go).
+			order, online = []string{ti.ClientID}, true
+		}
 	}
 	if !online {
 		st.reject(TCPRejectOffline)
@@ -301,7 +330,20 @@ func (m *Manager) bridgeTCP(conn net.Conn, ti TunnelInfo) {
 
 	var stream bridgeStream
 	var err error
-	if m.openStream != nil {
+	acked := false // replika yolunda onay failover dongusunde alinir
+	if len(order) > 0 {
+		var relClient func() // istemcinin acik-baglanti sayacini birakir (yukaridaki release baglanti sinirinindir)
+		var rej string
+		stream, relClient, rej = m.openReplicaTCP(ctx, ti, order, conn.RemoteAddr().String())
+		if stream == nil {
+			if rej != "" {
+				st.reject(rej)
+			}
+			return
+		}
+		defer relClient()
+		acked = true
+	} else if m.openStream != nil {
 		var off bool
 		stream, off, err = m.openStream(ctx, ti, conn.RemoteAddr().String())
 		if off {
@@ -319,18 +361,20 @@ func (m *Manager) bridgeTCP(conn net.Conn, ti TunnelInfo) {
 	defer stream.Close("closed")
 
 	// Baglanti sonucunu bekle.
-	select {
-	case ack := <-stream.Accept():
-		if ack.Code != "" {
+	if !acked {
+		select {
+		case ack := <-stream.Accept():
+			if ack.Code != "" {
+				st.reject(TCPRejectDial)
+				m.Log.Debug("rawproxy: yerel hedefe baglanilamadi", "tunnel", ti.TunnelID, "code", ack.Code, "msg", ack.Message)
+				return
+			}
+		case <-time.After(streamAckTimeout):
 			st.reject(TCPRejectDial)
-			m.Log.Debug("rawproxy: yerel hedefe baglanilamadi", "tunnel", ti.TunnelID, "code", ack.Code, "msg", ack.Message)
+			return
+		case <-ctx.Done():
 			return
 		}
-	case <-time.After(streamAckTimeout):
-		st.reject(TCPRejectDial)
-		return
-	case <-ctx.Done():
-		return
 	}
 
 	// Aylik kullanim + kiraci hiz siniri (HTTP ile ayni sayac/limiter). Baglanti

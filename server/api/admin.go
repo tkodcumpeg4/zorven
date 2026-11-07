@@ -408,6 +408,15 @@ func (m *Middleware) serveAuthenticated(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 
+		// 3a'. Istemci (ajan) token'i (zrv_live_...): YALNIZ `zorven access` ag
+		// oturumu ucu (GET /api/v1/net/session). Baska hicbir uc bu token'la
+		// acilmaz; plan kapisi yoktur (paylasim/erisim tum planlarda).
+		if m.Store != nil && (strings.HasPrefix(trimmed, auth.PrefixClient) || strings.HasPrefix(trimmed, auth.PrefixLegacyClient)) {
+			if m.serveClientNetSession(w, r, trimmed) {
+				return
+			}
+		}
+
 		// 3b. Better Auth oturum token'i kontrolu
 		if m.BetterAuth != nil && !strings.HasPrefix(trimmed, auth.PrefixAdmin) {
 			// Yalniz IMZALI deger (Better Auth bearer eklentisi); ham DB token'i degil.
@@ -624,5 +633,42 @@ func (m *Middleware) healthProbe(w http.ResponseWriter, r *http.Request) bool {
 	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(pw.body.Bytes())
+	return true
+}
+
+// netSessionPath, istemci token'inin acabildigi tek uc.
+const netSessionPath = "/api/v1/net/session"
+
+// serveClientNetSession: istemci token'ini yalniz ag oturumu ucu icin dogrular.
+// true donerse yanit verilmis ya da istek ilerletilmistir.
+func (m *Middleware) serveClientNetSession(w http.ResponseWriter, r *http.Request, token string) bool {
+	if r.Method != http.MethodGet || r.URL.Path != netSessionPath {
+		writeJSONError(w, http.StatusForbidden, "endpoint_not_available_for_token",
+			"istemci token'i yalnizca ag oturumu (zorven access) icin kullanilabilir")
+		return true
+	}
+	if m.Limiter != nil && !m.Limiter.Allow(clientIP(r)) {
+		writeJSONError(w, http.StatusTooManyRequests, "rate_limited",
+			"cok fazla kimlik dogrulama denemesi")
+		return true
+	}
+	id, secret, err := auth.Split(token)
+	if err != nil {
+		writeJSONError(w, http.StatusUnauthorized, "invalid_token", "gecersiz istemci token'i")
+		return true
+	}
+	c, err := m.Store.GetClientByTokenID(r.Context(), id)
+	if err != nil {
+		auth.VerifyDummy(secret)
+		writeJSONError(w, http.StatusUnauthorized, "invalid_token", "gecersiz istemci token'i")
+		return true
+	}
+	if ok, err := auth.Verify(secret, c.TokenHash); err != nil || !ok {
+		writeJSONError(w, http.StatusUnauthorized, "invalid_token", "gecersiz istemci token'i")
+		return true
+	}
+	ctx := withTenant(r.Context(), c.TenantID)
+	ctx = withClientPrincipal(ctx, clientPrincipal{ClientID: c.ID, UserID: c.UserID, Name: c.Name})
+	m.next(w, r.WithContext(ctx))
 	return true
 }

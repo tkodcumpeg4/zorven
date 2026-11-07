@@ -74,7 +74,11 @@ func (s *Server) listMail(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid_box", "gecersiz klasor adi")
 		return
 	}
-	msgs, err := s.Store.ListMailMessages(r.Context(), tenantID, folder, 200)
+	pg, okPg := pageOf(w, r)
+	if !okPg {
+		return
+	}
+	msgs, total, err := s.Store.ListMailMessagesPage(r.Context(), tenantID, folder, pg)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -82,6 +86,7 @@ func (s *Server) listMail(w http.ResponseWriter, r *http.Request) {
 	if msgs == nil {
 		msgs = []store.MailMessage{}
 	}
+	setPageTotals(w, pg, len(msgs), total)
 	writeJSON(w, http.StatusOK, msgs)
 }
 
@@ -333,7 +338,8 @@ func mailBoxFolder(box string) (string, bool) {
 }
 
 // listMailFolders (GET /api/v1/mail/folders): kiracinin kullanici klasorleri
-// (IMAP ile olusturulanlar), ada gore sirali. Sistem klasorleri dahil degildir.
+// (IMAP ile olusturulanlar ve gelen posta dogrulamasinin actigi "Junk"), ada gore
+// sirali. Sistem klasorleri dahil degildir.
 func (s *Server) listMailFolders(w http.ResponseWriter, r *http.Request) {
 	tenantID, ok := s.tenantFor(r)
 	if !ok {
@@ -345,10 +351,11 @@ func (s *Server) listMailFolders(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	if names == nil {
-		names = []string{}
+	pg, okPg := pageOf(w, r)
+	if !okPg {
+		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"folders": names})
+	writeJSON(w, http.StatusOK, map[string]any{"folders": slicePage(w, pg, names)})
 }
 
 // moveMail (POST /api/v1/mail/messages/{id}/move): {folder}. Hedef bir sistem

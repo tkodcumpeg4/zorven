@@ -24,7 +24,7 @@ import (
 // Claude Desktop, Cursor ...). Varsayilan tasima stdio'dur; araclar REST API'ye
 // kullanicinin API token'i ile gider (uzak /mcp uc noktasiyla AYNI arac kumesi).
 func newMCPCmd() *cobra.Command {
-	var apiToken, srvFlag, urlFlag, project, httpAddr string
+	var apiToken, apiTokenFile, srvFlag, urlFlag, project, httpAddr string
 	var insecureFlag bool
 
 	cmd := &cobra.Command{
@@ -34,15 +34,15 @@ func newMCPCmd() *cobra.Command {
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			token := strings.TrimSpace(apiToken)
-			if token == "" {
-				token = strings.TrimSpace(os.Getenv("ZORVEN_API_TOKEN"))
+			token, terr := resolveAPIToken(apiToken, apiTokenFile)
+			if terr != nil {
+				return terr
 			}
 			if token == "" {
 				return errors.New(i18n.T("mcp.err.token"))
 			}
 			// Istemci (ajan) token'i bir cihazin kimligidir; REST API'de gecmez.
-			if strings.HasPrefix(token, "zrv_live_") || strings.HasPrefix(token, "rpsh_live_") {
+			if isAgentToken(token) {
 				return errors.New(i18n.T("mcp.err.agenttoken"))
 			}
 			cfg, _ := config.Load()
@@ -94,6 +94,7 @@ func newMCPCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&apiToken, "api-token", "", i18n.T("net.flag.apitoken"))
+	cmd.Flags().StringVar(&apiTokenFile, "api-token-file", "", i18n.T("v3.flag.apitokenfile"))
 	cmd.Flags().StringVar(&srvFlag, "server", "", i18n.T("mcp.flag.server"))
 	cmd.Flags().StringVar(&urlFlag, "url", "", i18n.T("mcp.flag.url"))
 	cmd.Flags().StringVar(&project, "project", "", i18n.T("mcp.flag.project"))

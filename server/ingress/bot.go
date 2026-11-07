@@ -142,7 +142,7 @@ func (h *Handler) requireChallenge(w http.ResponseWriter, r *http.Request, tun s
 // baglamasi /24'tur; hiz siniri daha ince taneli tutulur ki komsular birbirini
 // etkilemesin).
 func (h *Handler) enforceRate(w http.ResponseWriter, r *http.Request, tun store.HostRoute, sec *tunsec.Compiled, started time.Time) bool {
-	if !sec.RateActive() || internalVisitorPath(r.URL.Path) || sec.RateExcluded(r.URL.Path) {
+	if !sec.RateActive() || internalVisitorPath(r.URL.Path) || sec.RateExcluded(r.URL.Path) || sec.IsTrusted(clientIP(r)) {
 		return false
 	}
 	st := h.bot()
@@ -194,7 +194,7 @@ func rateKeyIP(ip string) string {
 
 // enforceBot, B1+B3: sorgu / engelleme karari. true = istek sonlandirildi.
 func (h *Handler) enforceBot(w http.ResponseWriter, r *http.Request, tun store.HostRoute, sec *tunsec.Compiled, started time.Time) bool {
-	if !sec.BotActive() || internalVisitorPath(r.URL.Path) || reservedZorvenPath(r.URL.Path) || sec.BotExcluded(r.URL.Path) {
+	if !sec.BotActive() || internalVisitorPath(r.URL.Path) || reservedZorvenPath(r.URL.Path) || sec.BotExcluded(r.URL.Path) || sec.IsTrusted(clientIP(r)) {
 		return false
 	}
 	ua := r.UserAgent()
@@ -239,6 +239,10 @@ func (h *Handler) enforceBot(w http.ResponseWriter, r *http.Request, tun store.H
 // serveReserved, tunel host'undaki /.zorven/* yollarini ele alir; bu yollar
 // ASLA tunele iletilmez. /.zorven/challenge: PoW cozumunu dogrular.
 func (h *Handler) serveReserved(w http.ResponseWriter, r *http.Request, tun store.HostRoute, sec *tunsec.Compiled, started time.Time) {
+	if r.URL.Path == ReportPath {
+		h.serveReport(w, r)
+		return
+	}
 	if r.URL.Path != botguard.ChallengePath || !sec.ChallengeAvailable() {
 		writeError(w, r, http.StatusNotFound, protocol.CodeTunnelNotFound, "Bulunamadı.")
 		return

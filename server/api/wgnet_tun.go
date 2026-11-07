@@ -59,7 +59,11 @@ func (s *Server) listTunRules(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, v)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"rules": out, "zone": netctl.TunZone})
+	pg, okPg := pageOf(w, r)
+	if !okPg {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"rules": slicePage(w, pg, out), "zone": netctl.TunZone})
 }
 
 type createTunRuleBody struct {

@@ -20,8 +20,9 @@ function errMsg(e: any, fallback: string): string {
   return (typeof err === 'string' ? err : err?.message) || e?.message || fallback
 }
 
-const loading = ref(true)
-const secrets = ref<Secret[]>([])
+const pager = usePagedList<Secret>(p => api.pageSecrets(p), { immediate: false })
+const loading = pager.loading
+const secrets = pager.items
 
 const showCreate = ref(false)
 const newName = ref('')
@@ -36,15 +37,8 @@ const revealed = ref<{ name: string, value: string } | null>(null)
 const secretSyntax = '{{secret:ad}}'
 
 async function load() {
-  loading.value = true
-  try {
-    const res = await api.listSecrets()
-    secrets.value = res.secrets
-  } catch (e: any) {
-    toast.error(errMsg(e, t('secrets.loadError')))
-  } finally {
-    loading.value = false
-  }
+  await pager.reload()
+  if (pager.error.value) toast.error(errMsg(pager.error.value, t('secrets.loadError')))
 }
 
 async function create() {
@@ -149,6 +143,7 @@ onMounted(load)
           </tbody>
         </table>
       </div>
+      <ListPager :list="pager" />
 
       <p class="mt-3 text-xs text-fg-muted">
         {{ t('secrets.usageHint') }} <code class="rounded bg-surface-2 px-1 py-0.5 font-mono">{{ secretSyntax }}</code>

@@ -272,7 +272,7 @@ func (s *Store) ListHostRoutes(ctx context.Context) ([]store.HostRoute, error) {
 		`SELECT h.fqdn, h.tenant_id, t.id, t.client_id, t.target, t.enabled,
 		        t.proto, t.exposure,
 		        COALESCE(ap.mode,'none'), COALESCE(ap.config,'{}'::jsonb), COALESCE(ap.enabled,false),
-		        COALESCE(sub.plan,'free'), t.frozen,
+		        COALESCE(sub.plan,'free'), t.frozen, (t.expired_at IS NOT NULL),
 		        COALESCE(rep.clients, '{}') AS replica_clients,
 		        COALESCE(tp.config,'{}'::jsonb), COALESCE(tp.enabled,false),
 		        COALESCE(mc.config,'{}'::jsonb), COALESCE(mc.enabled,false),
@@ -306,7 +306,7 @@ func (s *Store) ListHostRoutes(ctx context.Context) ([]store.HostRoute, error) {
 		var r store.HostRoute
 		if err := rows.Scan(&r.FQDN, &r.TenantID, &r.TunnelID, &r.ClientID,
 			&r.Target, &r.Enabled, &r.Proto, &r.Exposure,
-			&r.AccessMode, &r.AccessConfig, &r.AccessEnabled, &r.Plan, &r.Frozen,
+			&r.AccessMode, &r.AccessConfig, &r.AccessEnabled, &r.Plan, &r.Frozen, &r.Expired,
 			&r.ReplicaClientIDs, &r.TrafficConfig, &r.TrafficEnabled,
 			&r.MCPConfig, &r.MCPEnabled, &r.MCPKeys,
 			&r.MTLSEnabled, &r.MTLSCAPem, &r.SecurityConfig); err != nil {

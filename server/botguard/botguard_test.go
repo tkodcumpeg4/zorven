@@ -438,7 +438,7 @@ func TestVerifiedBotsSlowDoesNotBlock(t *testing.T) {
 }
 
 func TestPickLang(t *testing.T) {
-	cases := map[string]string{"": "en", "tr-TR,tr;q=0.9,en;q=0.8": "tr", "ja,en;q=0.5": "ja", "de,fr": "en", "en;q=0.5,ja;q=0.9": "ja", "ja;q=0": "en"}
+	cases := map[string]string{"": "en", "tr-TR,tr;q=0.9,en;q=0.8": "tr", "ja,en;q=0.5": "ja", "de,fr": "en", "en;q=0.5,ja;q=0.9": "ja", "ja;q=0": "en", "zh-CN,zh;q=0.9": "zh", "zh-TW": "zh", "zh-HK,en;q=0.5": "zh", "zh-Hans": "zh"}
 	for in, want := range cases {
 		r := httptest.NewRequest("GET", "/", nil)
 		r.Header.Set("Accept-Language", in)
@@ -449,7 +449,7 @@ func TestPickLang(t *testing.T) {
 }
 
 func TestRenderPage(t *testing.T) {
-	for _, lang := range []string{"en", "tr", "ja"} {
+	for _, lang := range []string{"en", "tr", "ja", "zh"} {
 		r := httptest.NewRequest("GET", "https://x/p?a=1", nil)
 		r.Header.Set("Accept-Language", lang)
 		r.Header.Set("Accept", "text/html")

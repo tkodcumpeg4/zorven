@@ -1,16 +1,12 @@
 package main
 
 import (
-	"bytes"
-	"compress/gzip"
 	"embed"
 	"io/fs"
 	"mime"
 	"net/http"
 	"path"
-	"strconv"
 	"strings"
-	"sync"
 )
 
 // webdist, statik olarak derlenmis Nuxt dashboard'ini gomer.
@@ -49,7 +45,7 @@ func dashboardHandler() http.Handler {
 		// uretmesin). Bos sayfa yerine acik bir mesaj ver.
 		index = []byte("<!doctype html><meta charset=utf-8><title>Zorven</title><p style=\"font:14px system-ui;padding:2rem\">Panel derlenmemis: scripts/build-dashboard.sh calistirip sunucuyu yeniden derleyin.</p>")
 	}
-	gz := &gzipCache{m: map[string][]byte{}}
+	gz := newGzipCache()
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := strings.TrimPrefix(r.URL.Path, "/")
@@ -83,61 +79,6 @@ func dashboardHandler() http.Handler {
 			w.Header().Set("Cache-Control", "public, max-age=3600")
 		}
 
-		if compressible(ct) && len(data) > 1024 {
-			w.Header().Add("Vary", "Accept-Encoding")
-			if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
-				if z := gz.get(p, data); z != nil {
-					w.Header().Set("Content-Encoding", "gzip")
-					w.Header().Set("Content-Length", strconv.Itoa(len(z)))
-					w.WriteHeader(http.StatusOK)
-					if r.Method != http.MethodHead {
-						w.Write(z)
-					}
-					return
-				}
-			}
-		}
-		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
-		w.WriteHeader(http.StatusOK)
-		if r.Method != http.MethodHead {
-			w.Write(data)
-		}
+		serveStaticBytes(w, r, p, data, gz)
 	})
-}
-
-func compressible(ct string) bool {
-	return strings.HasPrefix(ct, "text/") || strings.Contains(ct, "javascript") ||
-		strings.Contains(ct, "json") || strings.Contains(ct, "svg")
-}
-
-// gzipCache, gomulu dosyalarin gzip halini ilk istekte uretip saklar
-// (gomulu icerik degismez; bellek kullanimi panel boyutuyla sinirli).
-type gzipCache struct {
-	mu sync.RWMutex
-	m  map[string][]byte
-}
-
-func (c *gzipCache) get(name string, data []byte) []byte {
-	c.mu.RLock()
-	z, ok := c.m[name]
-	c.mu.RUnlock()
-	if ok {
-		return z
-	}
-	var buf bytes.Buffer
-	zw, err := gzip.NewWriterLevel(&buf, gzip.BestCompression)
-	if err != nil {
-		return nil
-	}
-	if _, err := zw.Write(data); err != nil {
-		return nil
-	}
-	if err := zw.Close(); err != nil {
-		return nil
-	}
-	z = buf.Bytes()
-	c.mu.Lock()
-	c.m[name] = z
-	c.mu.Unlock()
-	return z
 }

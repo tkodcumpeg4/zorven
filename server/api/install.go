@@ -64,6 +64,7 @@ func (s *Server) serveInstallSh(w http.ResponseWriter, r *http.Request) {
 	content := strings.ReplaceAll(installShTemplate, "__INJECTED_TOKEN__", token)
 	content = strings.ReplaceAll(content, "__INJECTED_SERVER__", server)
 
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(content))
@@ -78,6 +79,7 @@ func (s *Server) serveInstallPs1(w http.ResponseWriter, r *http.Request) {
 	content := strings.ReplaceAll(installPs1Template, "__INJECTED_TOKEN__", token)
 	content = strings.ReplaceAll(content, "__INJECTED_SERVER__", server)
 
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(content))

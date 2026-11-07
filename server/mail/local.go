@@ -81,11 +81,60 @@ func (l *Local) Resolve(ctx context.Context, addr string) (tenantID string, loca
 	return "", false, nil
 }
 
+// DeliverOpts, DeliverWith icin ek teslim secenekleridir.
+type DeliverOpts struct {
+	// Junk, iletiyi her alicinin Onemsiz (\Junk) klasorune yazar. Klasor yoksa
+	// olusturulur; bulunamaz ya da olusturulamazsa ileti kaybolmasin diye
+	// Gelen Kutusu'na yazilir.
+	Junk bool
+}
+
 // Deliver, ham mesaji yerel alicilarin INBOX'una yazar: ayristirir (konu,
 // govde, ekler), her alici icin ayri kayit olusturur ve IMAP IDLE oturumlarina
 // haber verir. Tekrarlanan alicilar teke indirilir. Donen sayi teslim edilen
 // kutu sayisidir. Bir kayit basarisiz olursa hata doner (cagiran 451 verir).
 func (l *Local) Deliver(ctx context.Context, envFrom string, rcpts []string, raw []byte) (int, error) {
+	return l.DeliverWith(ctx, envFrom, rcpts, raw, DeliverOpts{})
+}
+
+// junkFolderKey, kutunun Onemsiz klasorunun mail_messages.folder anahtarini
+// doner. Sira: (1) \Junk isaretli klasor (IMAP istemcisi baska bir ad vermis
+// olabilir), (2) "Junk" adli klasor, (3) "Junk" klasorunu \Junk ile olustur.
+// Herhangi bir hatada Gelen Kutusu'na dusulur: posta kaybetmemek once gelir.
+func (l *Local) junkFolderKey(ctx context.Context, tenantID, mailbox string) string {
+	find := func() (string, bool) {
+		list, err := l.Store.ListMailFolders(ctx, tenantID, mailbox)
+		if err != nil {
+			return "", false
+		}
+		for _, f := range list {
+			if strings.EqualFold(f.SpecialUse, store.MailSpecialUseJunk) {
+				return store.MailUserFolderKey(f.Name), true
+			}
+		}
+		for _, f := range list {
+			if strings.EqualFold(f.Name, store.MailJunkFolderName) {
+				return store.MailUserFolderKey(f.Name), true
+			}
+		}
+		return "", false
+	}
+	if k, ok := find(); ok {
+		return k
+	}
+	err := l.Store.CreateMailFolder(ctx, tenantID, mailbox, store.MailJunkFolderName, store.MailSpecialUseJunk)
+	if err != nil && !errors.Is(err, store.ErrMailFolderExists) {
+		log.Printf("[mail] Onemsiz klasoru olusturulamadi, Gelen Kutusu'na teslim ediliyor (tenant=%s): %v", tenantID, err)
+		return store.MailFolderInbox
+	}
+	if k, ok := find(); ok {
+		return k
+	}
+	return store.MailFolderInbox
+}
+
+// DeliverWith, Deliver gibidir; ek olarak teslim secenekleri alir (bkz. DeliverOpts).
+func (l *Local) DeliverWith(ctx context.Context, envFrom string, rcpts []string, raw []byte, opts DeliverOpts) (int, error) {
 	subject, fromAddr, text, html, messageID, inReplyTo, attachments := parseMessage(raw)
 	if fromAddr == "" {
 		fromAddr = strings.TrimSpace(envFrom)
@@ -109,6 +158,10 @@ func (l *Local) Deliver(ctx context.Context, envFrom string, rcpts []string, raw
 		if !isLocal {
 			return n, fmt.Errorf("%s: yerel alan adi degil", to)
 		}
+		folder := store.MailFolderInbox
+		if opts.Junk {
+			folder = l.junkFolderKey(ctx, tenantID, to)
+		}
 		saved, err := l.Store.InsertMailMessage(ctx, store.MailMessage{
 			TenantID:  tenantID,
 			Direction: "inbound",
@@ -121,7 +174,7 @@ func (l *Local) Deliver(ctx context.Context, envFrom string, rcpts []string, raw
 			InReplyTo: inReplyTo,
 			Seen:      false,
 			RawBytes:  raw,
-			Folder:    store.MailFolderInbox,
+			Folder:    folder,
 			Mailbox:   to,
 		})
 		if err != nil {

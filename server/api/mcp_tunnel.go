@@ -147,7 +147,11 @@ func (s *Server) listMCPKeys(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, keys)
+	pg, okPg := pageOf(w, r)
+	if !okPg {
+		return
+	}
+	writeJSON(w, http.StatusOK, slicePage(w, pg, keys))
 }
 
 func (s *Server) createMCPKey(w http.ResponseWriter, r *http.Request) {
@@ -247,8 +251,12 @@ func (s *Server) listMCPCalls(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusUnprocessableEntity, "invalid_status", "status ok|error|denied|rate_limited olmali")
 		return
 	}
-	f.Limit, _ = strconv.Atoi(q.Get("limit"))
-	f.Offset, _ = strconv.Atoi(q.Get("offset"))
+	pg, okPg := pageOf(w, r)
+	if !okPg {
+		return
+	}
+	// Buyuk tablo: COUNT yerine limit+1 getirip X-Has-More yazilir.
+	f.Limit, f.Offset = pg.Limit+1, pg.Offset
 	if d, ok := mcpWindows[q.Get("window")]; ok {
 		f.Since = time.Now().Add(-d)
 	}
@@ -256,6 +264,14 @@ func (s *Server) listMCPCalls(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.fail(w, err)
 		return
+	}
+	more := len(calls) > pg.Limit
+	if more {
+		calls = calls[:pg.Limit]
+	}
+	setHasMore(w, more)
+	if calls == nil {
+		calls = []store.MCPCall{}
 	}
 	writeJSON(w, http.StatusOK, calls)
 }
@@ -277,6 +293,9 @@ func (s *Server) getMCPStats(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.fail(w, err)
 		return
+	}
+	if tools == nil {
+		tools = []store.MCPToolStat{}
 	}
 	var calls, errs, denied int64
 	for _, t := range tools {

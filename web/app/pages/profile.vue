@@ -216,6 +216,9 @@ async function savePassword() {
           </button>
         </div>
       </section>
+
+      <!-- Verilerim (kişisel veri dışa aktarma) + Tehlikeli bölge (hesabı sil) -->
+      <AccountPrivacy :email="currentEmail" />
     </template>
   </div>
 </template>

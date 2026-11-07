@@ -425,7 +425,7 @@ func TestSiteUnsubscribeFlow(t *testing.T) {
 			t.Fatalf("onay formu yok: %s", rec.Body.String())
 		}
 	}
-	for lang, want := range map[string]string{"tr": "Abonelikten çık", "ja": "お知らせメールの配信を停止"} {
+	for lang, want := range map[string]string{"tr": "Abonelikten çık", "ja": "お知らせメールの配信を停止", "zh": "退订"} {
 		if rec := get(h, "GET", "/u/announcements?token="+tok+"&lang="+lang); !strings.Contains(rec.Body.String(), want) {
 			t.Fatalf("%s onay metni yok", lang)
 		}
@@ -448,6 +448,30 @@ func TestSiteUnsubscribeFlow(t *testing.T) {
 	}
 }
 
+func TestNormLangZH(t *testing.T) {
+	for in, want := range map[string]string{"zh": "zh", "zh-CN": "zh", "zh-Hans": "zh", "ZH-TW": "zh", "zh-HK": "zh", "en-US": "en", "ja": "ja", "": "tr", "de": "tr"} {
+		if got := NormLang(in); got != want {
+			t.Errorf("NormLang(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestBuildEmailZHFallsBackToEN(t *testing.T) {
+	p := publishedPost()
+	p.TitleEN = "New release"
+	p.BodyEN = "English body"
+	em := BuildEmail(p, "zh-CN", "https://zorven.app", testKey, "u1")
+	if !strings.Contains(em.HTML, "English body") || !strings.Contains(em.HTML, "在网页中查看") || !strings.Contains(em.HTML, `lang="en"`) {
+		t.Fatalf("zh: en icerik + zh kabuk beklenir: %s", em.HTML)
+	}
+	if !strings.Contains(em.Text, "https://zorven.app/zh/updates/") || !strings.Contains(em.Text, "lang=zh") {
+		t.Fatalf("zh e-posta baglantilari: %s", em.Text)
+	}
+	if em.Lang != "en" {
+		t.Fatalf("kullanilan dil en olmali: %s", em.Lang)
+	}
+}
+
 func TestBuildEmailEscapesAndLocalizes(t *testing.T) {
 	p := publishedPost()
 	p.TitleJA = "新リリース"
@@ -461,5 +485,24 @@ func TestBuildEmailEscapesAndLocalizes(t *testing.T) {
 	}
 	if !strings.Contains(em.Text, "/u/announcements?token=") {
 		t.Fatal("duz metinde abonelik baglantisi yok")
+	}
+}
+
+func TestPickZHContent(t *testing.T) {
+	p := publishedPost()
+	p.TitleEN, p.BodyEN = "New release", "English body"
+	p.TitleZH, p.BodyZH = "新版本", "中文正文"
+	if title, body, used := Pick(p, "zh-CN"); title != "新版本" || body != "中文正文" || used != LangZH {
+		t.Fatalf("zh icerik secilmeli: %q %q %q", title, body, used)
+	}
+	if !Has(p, "zh") {
+		t.Fatal("Has(zh) true olmali")
+	}
+	em := BuildEmail(p, "zh", "https://zorven.app", testKey, "u1")
+	if !strings.Contains(em.HTML, "中文正文") || em.Lang != LangZH || !strings.Contains(em.Text, "https://zorven.app/zh/updates/") {
+		t.Fatalf("zh e-posta: lang=%s %s", em.Lang, em.Text)
+	}
+	if _, err := ParseImport([]byte(`{"posts":[{"slug":"a","title_tr":"x","body_tr":"y","title_zh":"z","body_zh":"w"}]}`)); err != nil {
+		t.Fatal(err)
 	}
 }

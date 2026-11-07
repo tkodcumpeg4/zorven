@@ -12,7 +12,7 @@ import (
 )
 
 // ErrNotTerminal, girdi ya da cikti bir terminal degilse doner (boru, CI).
-var ErrNotTerminal = errors.New("etkilesimli arayuz bir terminal gerektirir")
+var ErrNotTerminal = errors.New("interactive UI requires a terminal")
 
 // Terminal, ham kipteki stdin/stdout cifti.
 type Terminal struct {
@@ -23,6 +23,8 @@ type Terminal struct {
 	prev     int // son cizimde yazilan satir sayisi
 	keys     chan []Key
 	readErrs chan error
+	resize   chan struct{}
+	stopRsz  chan struct{}
 }
 
 // Open, stdin'i ham kipe alir, (Windows'ta) VT ciktisini acar ve imleci gizler.
@@ -42,8 +44,10 @@ func Open() (*Terminal, error) {
 		return nil, err
 	}
 	t := &Terminal{in: in, out: out, state: st, restore: restoreVT,
-		keys: make(chan []Key, 16), readErrs: make(chan error, 1)}
+		keys: make(chan []Key, 16), readErrs: make(chan error, 1),
+		resize: make(chan struct{}, 1), stopRsz: make(chan struct{})}
 	fmt.Fprint(out, "\x1b[?25l")
+	watchResize(t.resize, t.stopRsz)
 	go t.readLoop()
 	return t, nil
 }
@@ -65,6 +69,10 @@ func (t *Terminal) readLoop() {
 // Events, tus obekleri ve okuma hatasi kanallari (baska olaylarla birlikte
 // select edilebilsin diye).
 func (t *Terminal) Events() (<-chan []Key, <-chan error) { return t.keys, t.readErrs }
+
+// Resize, terminal boyutu degisince sinyal verir (unix: SIGWINCH, Windows:
+// periyodik yoklama); alan yeniden cizilmelidir.
+func (t *Terminal) Resize() <-chan struct{} { return t.resize }
 
 // Width, terminal genisligi (bilinmiyorsa 80).
 func (t *Terminal) Width() int {
@@ -93,6 +101,7 @@ func (t *Terminal) Draw(lines []string) {
 
 // Close, terminali eski haline getirir ve imleci gosterir.
 func (t *Terminal) Close() {
+	close(t.stopRsz)
 	fmt.Fprint(t.out, "\x1b[0m\x1b[?25h")
 	if t.state != nil {
 		_ = term.Restore(int(t.in.Fd()), t.state)
@@ -103,6 +112,8 @@ func (t *Terminal) Close() {
 }
 
 // Truncate, ANSI kacis dizilerini sayMAdan gorunur genisligi w ile sinirlar.
+// Genislik terminal sutunudur: dogu asyasi genis karakterler (CJK) 2 sayilir;
+// sigmayan genis karakter yarim birakilmaz.
 func Truncate(s string, w int) string {
 	if w <= 0 {
 		return ""
@@ -127,11 +138,15 @@ func Truncate(s string, w int) string {
 			continue
 		}
 		r, n := utf8.DecodeRuneInString(s[i:])
-		if vis >= w {
+		rw := 1
+		if IsWide(r) {
+			rw = 2
+		}
+		if vis+rw > w {
 			break
 		}
 		sb.WriteRune(r)
-		vis++
+		vis += rw
 		i += n
 	}
 	return sb.String()

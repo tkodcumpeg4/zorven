@@ -21,13 +21,28 @@ const toast = useToast()
 const { relativeTime } = useFormat()
 const { method, tenant, platformAdmin, user } = useAuth()
 
-const grants = ref<Grant[]>([])
-const loading = ref(true)
-const failed = ref(false)
 const showAll = ref(false)
+const needAccount = computed(() => method.value !== 'better-auth')
+
+// Sayfali: ?limit&offset, toplam X-Total-Count (baslik yoksa eski sunucu: tam liste istemcide dilimlenir).
+const pager = usePagedList<Grant, { all: boolean }>(async (p, f) => {
+  const query: Record<string, string | number> = { limit: p.limit, offset: p.offset }
+  if (f.all && tenant.value?.id) query.tenant = tenant.value.id
+  const res = await $fetch.raw<{ grants: Grant[] }>('/oauth/grants', { query })
+  const all = res._data?.grants ?? []
+  const tc = res.headers.get('X-Total-Count')
+  if (tc !== null && tc !== '' && !Number.isNaN(Number(tc))) {
+    const total = Number(tc)
+    return { items: all, total, hasMore: p.offset + all.length < total }
+  }
+  return { items: all.slice(p.offset, p.offset + p.limit), total: all.length, hasMore: false }
+}, { queryKey: 'gpage', immediate: false, filters: () => ({ all: showAll.value }) })
+const grants = pager.items
+const loading = pager.loading
+const failed = computed(() => !!pager.error.value)
 const revoking = ref('')
 
-const needAccount = computed(() => method.value !== 'better-auth')
+
 const privileged = computed(() => {
   if (platformAdmin.value) return true
   const r = (user.value?.role || '').toLowerCase()
@@ -39,17 +54,7 @@ async function load() {
     loading.value = false
     return
   }
-  loading.value = true
-  failed.value = false
-  try {
-    const query = showAll.value && tenant.value?.id ? { tenant: tenant.value.id } : undefined
-    const res = await $fetch<{ grants: Grant[] }>('/oauth/grants', { query })
-    grants.value = res.grants ?? []
-  } catch {
-    failed.value = true
-  } finally {
-    loading.value = false
-  }
+  await pager.reload()
 }
 
 async function revoke(g: Grant) {
@@ -58,6 +63,7 @@ async function revoke(g: Grant) {
   try {
     await $fetch(`/oauth/grants/${encodeURIComponent(g.id)}`, { method: 'DELETE' })
     grants.value = grants.value.filter(x => x.id !== g.id)
+    void pager.reload(true)
     toast.success(t('oauth.apps.revoked'))
   } catch {
     toast.error(t('oauth.apps.revokeFailed'))
@@ -70,7 +76,6 @@ function scopeLabel(id: string): string {
   return t(`oauth.scope.${id.replace(':', '_')}`)
 }
 
-watch(showAll, load)
 onMounted(load)
 </script>
 
@@ -155,5 +160,6 @@ onMounted(load)
         </li>
       </ul>
     </div>
+    <ListPager v-if="!needAccount && !loading && !failed" :list="pager" />
   </section>
 </template>

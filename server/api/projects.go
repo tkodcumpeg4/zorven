@@ -17,7 +17,11 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "no_tenant", "istek kiraci kapsami olmadan ulasti")
 		return
 	}
-	list, err := s.Store.ListProjects(r.Context(), tenantID)
+	pg, ok := pageOf(w, r)
+	if !ok {
+		return
+	}
+	list, total, err := s.Store.ListProjectsPage(r.Context(), tenantID, pg)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -25,6 +29,7 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 	if list == nil {
 		list = []store.Project{}
 	}
+	setPageTotals(w, pg, len(list), total)
 	writeJSON(w, http.StatusOK, list)
 }
 

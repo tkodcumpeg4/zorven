@@ -11,7 +11,8 @@ const toast = useToast()
 const { t } = useI18n()
 
 const nodes = ref<NetNode[]>([])
-const rules = ref<NetTunRule[]>([])
+const rulesPager = usePagedList<NetTunRule>(p => api.pageNetTunRules(p), { queryKey: 'rpage', immediate: false })
+const rules = rulesPager.items
 const network = ref<NetNetwork | null>(null)
 const canManage = ref(true)
 const loadError = ref('')
@@ -36,13 +37,13 @@ async function load() {
     loadError.value = errMsg(e, t('nettun.loadError'))
     return
   }
-  try {
-    rules.value = await api.listNetTunRules()
-    canManage.value = true
-  } catch (e: any) {
+  await rulesPager.reload()
+  if (rulesPager.error.value) {
     // 403: sahip/yönetici değil -> kural yönetimi gizlenir
     canManage.value = false
     rules.value = []
+  } else {
+    canManage.value = true
   }
 }
 
@@ -122,9 +123,9 @@ async function copy(text: string) {
   } catch { /* pano erişimi yok */ }
 }
 
-let timer: ReturnType<typeof setInterval> | undefined
-onMounted(() => { load(); timer = setInterval(() => { if (!saving.value) load() }, 15000) })
-onBeforeUnmount(() => { if (timer) clearInterval(timer) })
+onMounted(() => { load() })
+// Olay yok: 15 sn yoklama; hatada ussel bekleme, sekme gizliyken durur.
+useLiveRefresh(async () => { await load(); return !loadError.value }, { fallbackMs: 15000, skip: () => saving.value })
 </script>
 
 <template>
@@ -229,6 +230,7 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer) })
               </button>
             </div>
           </div>
+          <ListPager :list="rulesPager" />
 
           <form class="mt-3 space-y-2" @submit.prevent="addRule">
             <div class="grid gap-2 sm:grid-cols-4">

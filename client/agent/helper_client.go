@@ -6,6 +6,7 @@ import (
 	"image"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/tkodcumpeg4/zorven/client/i18n"
@@ -44,24 +45,44 @@ type helperClient struct {
 	timeout time.Duration
 
 	mu      sync.Mutex // istekleri sirala + durumu koru
+	degrade bool       // son yakalamada guvenli masaustu (mu altinda)
 	link    io.ReadWriteCloser
 	nextTry time.Time
 	backoff time.Duration
 	lastErr error
 
-	canvas     *image.RGBA
-	canvasDisp int
+	// def: oturumsuz (dogrudan helperClient) cagrilarin varsayilan oturumu.
+	def     *helperSession
+	nextKey atomic.Uint32
 
-	cmu     sync.Mutex
-	nDisp   int
-	bounds  []image.Rectangle
-	infoAt  time.Time
-	method  string
-	degrade bool
+	cmu    sync.Mutex
+	nDisp  int
+	bounds []image.Rectangle
+	infoAt time.Time
+	method string
 }
 
 func newHelperClient(conn helperConnector) *helperClient {
-	return &helperClient{conn: conn, now: time.Now, timeout: helperCallTimeout, canvasDisp: -1}
+	c := &helperClient{conn: conn, now: time.Now, timeout: helperCallTimeout}
+	c.def = &helperSession{disp: -1}
+	return c
+}
+
+// helperSession, tek bir ekran oturumunun servis tarafindaki yakalama durumu:
+// kendi tuvali ve kendi "degraded" bayragi. Birden cok oturum ayni yardimciyi
+// paylasir ama tuval/ipucu birbirine karismaz (helper tarafi anahtara gore
+// ayri birikim tutar).
+type helperSession struct {
+	key      uint32
+	canvas   *image.RGBA
+	disp     int
+	resync   bool // sonraki istekte tam kare iste
+	degraded bool
+}
+
+// newSession, yeni bir oturum durumu acar.
+func (c *helperClient) newSession() *helperSession {
+	return &helperSession{key: c.nextKey.Add(1), disp: -1, resync: true}
 }
 
 // Err, kullaniciya gosterilecek (cevrilmis) son hata; yoksa nil.
@@ -84,7 +105,6 @@ func (c *helperClient) dropLocked() {
 		_ = c.link.Close()
 		c.link = nil
 	}
-	c.canvas, c.canvasDisp = nil, -1
 }
 
 func (c *helperClient) failConnectLocked(err error) {
@@ -209,11 +229,42 @@ func (c *helperClient) Bounds(d int) image.Rectangle {
 	return c.bounds[d]
 }
 
-// CaptureHinted: hintCapturer sozlesmesi. Yardimci yalniz degisen bolgeleri
-// yollar; servis kalici tuvalde birlestirir ve cagirana KOPYA verir.
+// CaptureHinted: hintCapturer sozlesmesi (varsayilan oturum).
 func (c *helperClient) CaptureHinted(d int) (*image.RGBA, []image.Rectangle, bool, error) {
+	return c.captureSess(c.def, d)
+}
+
+// captureSess: oturumun tuvaliyle yakalama. Yardimci yalniz degisen bolgeleri
+// yollar; servis oturum tuvalinde birlestirir ve cagirana KOPYA verir.
+// Senkron bozulursa YARDIMCI OLDURULMEZ (diger oturumlari etkilerdi): yalniz
+// bu oturum tam kare ister ve bir kez yeniden dener.
+func (c *helperClient) captureSess(se *helperSession, d int) (*image.RGBA, []image.Rectangle, bool, error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		img, rects, hinted, err := c.captureOnce(se, d)
+		if !errors.Is(err, errHelperOutOfSync) {
+			return img, rects, hinted, err
+		}
+		if attempt == 1 {
+			return nil, nil, false, err
+		}
+	}
+	return nil, nil, false, errHelperOutOfSync
+}
+
+var errHelperOutOfSync = errors.New("helper frame out of sync")
+
+func (c *helperClient) captureOnce(se *helperSession, d int) (*image.RGBA, []image.Rectangle, bool, error) {
+	c.mu.Lock()
+	resync := se.resync || se.canvas == nil || se.disp != d
+	c.mu.Unlock()
 	var req wbuf
 	req.i32(d)
+	req.u32(se.key)
+	if resync {
+		req.u8(capReqResync)
+	} else {
+		req.u8(0)
+	}
 	p, err := c.call(hmCapReq, req.Bytes(), hmCapResp)
 	if err != nil {
 		return nil, nil, false, err
@@ -227,7 +278,7 @@ func (c *helperClient) CaptureHinted(d int) (*image.RGBA, []image.Rectangle, boo
 		return nil, nil, false, err
 	}
 	c.cmu.Lock()
-	c.method, c.degrade = cr.Method, cr.Flags&capFlagDegraded != 0
+	c.method = cr.Method
 	if d >= 0 && d < len(c.bounds) {
 		c.bounds[d] = cr.Bounds
 	}
@@ -239,29 +290,35 @@ func (c *helperClient) CaptureHinted(d int) (*image.RGBA, []image.Rectangle, boo
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	se.degraded = cr.Flags&capFlagDegraded != 0
+	c.degrade = se.degraded
 	unchanged := cr.Flags&capFlagUnchang != 0
 	hinted := cr.Flags&capFlagHinted != 0
-	if c.canvas == nil || c.canvasDisp != d || c.canvas.Rect.Dx() != cr.W || c.canvas.Rect.Dy() != cr.H {
+	if se.canvas == nil || se.disp != d || se.canvas.Rect.Dx() != cr.W || se.canvas.Rect.Dy() != cr.H {
 		// Taban kare yoksa yalniz tam kare kabul edilir.
 		if unchanged || hinted || len(cr.Rects) != 1 || cr.Rects[0] != image.Rect(0, 0, cr.W, cr.H) {
-			// Senkron bozuldu: yardimciyi yeniden baslat (ilk kare tam gelir).
-			c.dropLocked()
-			c.conn.Shutdown()
-			return nil, nil, false, errors.New("helper frame out of sync")
+			// Senkron bozuldu: bu oturum tam kare istesin (yardimciyi OLDURME).
+			se.canvas, se.resync = nil, true
+			return nil, nil, false, errHelperOutOfSync
 		}
-		c.canvas, c.canvasDisp = image.NewRGBA(image.Rect(0, 0, cr.W, cr.H)), d
+		se.canvas, se.disp = image.NewRGBA(image.Rect(0, 0, cr.W, cr.H)), d
 	}
+	se.resync = false
 	for i, rc := range cr.Rects {
-		pasteRect(c.canvas, rc, cr.Pix[i])
+		pasteRect(se.canvas, rc, cr.Pix[i])
 	}
-	snap := &image.RGBA{Pix: append([]byte(nil), c.canvas.Pix...), Stride: c.canvas.Stride, Rect: c.canvas.Rect}
 	if unchanged {
 		return nil, nil, true, nil
 	}
+	snap := snapshot(se.canvas)
 	if hinted {
 		return snap, cr.Rects, true, nil
 	}
 	return snap, nil, false, nil
+}
+
+func snapshot(c *image.RGBA) *image.RGBA {
+	return &image.RGBA{Pix: append([]byte(nil), c.Pix...), Stride: c.Stride, Rect: c.Rect}
 }
 
 func (c *helperClient) resetLink() {
@@ -272,18 +329,20 @@ func (c *helperClient) resetLink() {
 }
 
 // Capture: tam kare (ipucu gerekmez).
-func (c *helperClient) Capture(d int) (*image.RGBA, error) {
-	img, _, hinted, err := c.CaptureHinted(d)
+func (c *helperClient) Capture(d int) (*image.RGBA, error) { return c.captureFull(c.def, d) }
+
+func (c *helperClient) captureFull(se *helperSession, d int) (*image.RGBA, error) {
+	img, _, hinted, err := c.captureSess(se, d)
 	if err != nil {
 		return nil, err
 	}
 	if img == nil && hinted { // degisim yok: tuvalin kopyasi
 		c.mu.Lock()
 		defer c.mu.Unlock()
-		if c.canvas == nil {
+		if se.canvas == nil {
 			return nil, errors.New("no frame")
 		}
-		return &image.RGBA{Pix: append([]byte(nil), c.canvas.Pix...), Stride: c.canvas.Stride, Rect: c.canvas.Rect}, nil
+		return snapshot(se.canvas), nil
 	}
 	return img, nil
 }
@@ -298,10 +357,11 @@ func (c *helperClient) Method() string {
 	return "helper/" + c.method
 }
 
-// Degraded, son karede guvenli masaustu nedeniyle son kare tekrarlandi mi.
+// Degraded, son karede guvenli masaustu nedeniyle son kare tekrarlandi mi
+// (varsayilan oturum / son yakalayan oturum).
 func (c *helperClient) Degraded() bool {
-	c.cmu.Lock()
-	defer c.cmu.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return c.degrade
 }
 
@@ -370,12 +430,33 @@ func (c *helperClient) Close() error {
 }
 
 // helperCapturer, boru hattinin kullandigi Capturer; hepsini yardimciya devreder.
-type helperCapturer struct{ c *helperClient }
+// s, oturuma ozel tuval/durumdur (nil => istemcinin varsayilan oturumu).
+type helperCapturer struct {
+	c *helperClient
+	s *helperSession
+}
 
-func (h helperCapturer) NumDisplays() int                   { return h.c.NumDisplays() }
-func (h helperCapturer) Bounds(d int) image.Rectangle       { return h.c.Bounds(d) }
-func (h helperCapturer) Capture(d int) (*image.RGBA, error) { return h.c.Capture(d) }
-func (h helperCapturer) Method() string                     { return h.c.Method() }
+func (h helperCapturer) sess() *helperSession {
+	if h.s != nil {
+		return h.s
+	}
+	return h.c.def
+}
+
+func (h helperCapturer) NumDisplays() int             { return h.c.NumDisplays() }
+func (h helperCapturer) Bounds(d int) image.Rectangle { return h.c.Bounds(d) }
+func (h helperCapturer) Capture(d int) (*image.RGBA, error) {
+	return h.c.captureFull(h.sess(), d)
+}
+func (h helperCapturer) Method() string { return h.c.Method() }
 func (h helperCapturer) CaptureHinted(d int) (*image.RGBA, []image.Rectangle, bool, error) {
-	return h.c.CaptureHinted(d)
+	return h.c.captureSess(h.sess(), d)
+}
+
+// Degraded, bu oturumun son karesinde guvenli masaustu nedeniyle son kare
+// tekrarlandiysa true (panelde "guvenli masaustu gorunuyor" uyarisi icin).
+func (h helperCapturer) Degraded() bool {
+	h.c.mu.Lock()
+	defer h.c.mu.Unlock()
+	return h.sess().degraded
 }

@@ -163,3 +163,30 @@ func TestSecurity_CSWSH_PanelHostsConfigured(t *testing.T) {
 		}
 	}
 }
+
+// Panel WS uclari (terminal/ekran): yabanci Origin biletten ONCE 403 ile
+// reddedilir; Origin'siz (CLI) istek bu denetimi gecer (bilet yine sart).
+func TestSecurity_CSWSH_HandlersRejectForeignOrigin(t *testing.T) {
+	srv := &Server{PlatformDomain: "zorven.app"}
+	for name, h := range map[string]http.HandlerFunc{
+		"terminal": srv.terminalHandler,
+		"screen":   srv.screenHandler,
+	} {
+		req := httptest.NewRequest("GET", "https://panel.zorven.app/api/v1/clients/c1/ws?ticket=x", nil)
+		req.SetPathValue("id", "c1")
+		req.Header.Set("Origin", "https://evil-attacker.com")
+		rec := httptest.NewRecorder()
+		h(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("%s: yabanci Origin icin %d, beklenen 403", name, rec.Code)
+		}
+		// Origin yok: 403 olmamali (bilet servisi yok -> 401).
+		req2 := httptest.NewRequest("GET", "https://panel.zorven.app/api/v1/clients/c1/ws?ticket=x", nil)
+		req2.SetPathValue("id", "c1")
+		rec2 := httptest.NewRecorder()
+		h(rec2, req2)
+		if rec2.Code == http.StatusForbidden {
+			t.Errorf("%s: Origin'siz istek origin nedeniyle reddedildi", name)
+		}
+	}
+}

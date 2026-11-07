@@ -35,7 +35,7 @@ type Manager struct {
 func New() (*Manager, error) {
 	exe, err := os.Executable()
 	if err != nil {
-		return nil, fmt.Errorf("calistirilabilir dosya yolu bulunamadi: %w", err)
+		return nil, fmt.Errorf("executable path not found: %w", err)
 	}
 	// Sembolik baglantilari coz: aksi halde kayit, tasinabilir bir bagin
 	// arkasindaki gecici yola isaret edebilir.
@@ -53,6 +53,10 @@ func (m *Manager) Enable() error { return m.enable() }
 
 // Disable, otomatik baslatmayi kapatir. Zaten kapaliysa hata vermez.
 func (m *Manager) Disable() error { return m.disable() }
+
+// Refresh, otomatik baslatma aciksa kayitli komutu bu surumun yoluyla ve
+// --hidden bayragiyla gunceller (guncelleme/tasima sonrasi bayat yolu onarir).
+func (m *Manager) Refresh() error { return m.refresh() }
 
 // Set, istenen duruma getirir.
 func (m *Manager) Set(on bool) error {

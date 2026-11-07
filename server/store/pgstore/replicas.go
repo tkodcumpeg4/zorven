@@ -94,3 +94,25 @@ func (s *Store) ListTunnelReplicas(ctx context.Context, tenantID, tunnelID strin
 	}
 	return out, rows.Err()
 }
+
+// ListAllTunnelReplicas, replikasi olan tum tunellerin replika istemcilerini
+// tunel kimligine gore doner (kiracidan bagimsiz; ham TCP/UDP dinleyicileri
+// yenilemede tek sorguyla okur). Sira her tunel icin eklenme sirasidir.
+func (s *Store) ListAllTunnelReplicas(ctx context.Context) (map[string][]string, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT tunnel_id, client_id FROM tunnel_replicas ORDER BY tunnel_id, created_at, client_id`)
+	if err != nil {
+		return nil, fmt.Errorf("tum replikalar listelenemedi: %w", err)
+	}
+	defer rows.Close()
+
+	out := map[string][]string{}
+	for rows.Next() {
+		var tid, cid string
+		if err := rows.Scan(&tid, &cid); err != nil {
+			return nil, err
+		}
+		out[tid] = append(out[tid], cid)
+	}
+	return out, rows.Err()
+}

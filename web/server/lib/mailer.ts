@@ -10,6 +10,7 @@
 
 import nodemailer from "nodemailer"
 import type { Transporter } from "nodemailer"
+import { withMailRetry } from "./mail-retry.ts"
 
 const FROM = process.env.SMTP_FROM || "Zorven <no-reply@zorven.app>"
 
@@ -34,6 +35,10 @@ function getTransporter(): Transporter | null {
     secure: SMTP_SECURE,
     // Lokal Postfix genelde auth istemez; USER/PASS bos ise auth gonderme.
     auth: SMTP_USER ? { user: SMTP_USER, pass: SMTP_PASS } : undefined,
+    // Takilan relay istegi sonsuza dek tutmasin (nodemailer varsayilanlari cok uzun/yok).
+    connectionTimeout: 10_000,
+    greetingTimeout: 10_000,
+    socketTimeout: 30_000,
     tls: SMTP_ALLOW_SELF_SIGNED ? { rejectUnauthorized: false } : undefined,
   })
   return transporter
@@ -44,11 +49,31 @@ export interface MailInput {
   subject: string
   html: string
   text?: string
+  // Tanitim/toplu mailler icin List-Unsubscribe (https URL veya mailto; acili
+  // parantezli ya da parantezsiz). https ise RFC 8058 tek-tik basligi da eklenir;
+  // teslim edilebilirligi artirir.
+  listUnsubscribe?: string
+}
+
+/**
+ * List-Unsubscribe basliklari. RFC 8058 tek tik (List-Unsubscribe-Post) YALNIZCA
+ * https baglantisi varsa eklenir; mailto yalniz List-Unsubscribe olarak gider.
+ * Satir sonu iceren deger baslik enjeksiyonu sayilir ve yok sayilir.
+ */
+export function unsubscribeHeaders(listUnsubscribe?: string): Record<string, string> {
+  const raw = (listUnsubscribe || "").trim()
+  if (!raw || /[\r\n]/.test(raw)) return {}
+  const value = raw.startsWith("<") ? raw : `<${raw}>`
+  const headers: Record<string, string> = { "List-Unsubscribe": value }
+  if (/<https:\/\/[^>\s]+>/i.test(value)) {
+    headers["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
+  }
+  return headers
 }
 
 // sendMail, bir e-postayi gonderir. SMTP yoksa (dev) konsola dusurur ve sessizce
 // basarili sayar ki kayit akisi kesilmeSIN.
-export async function sendMail({ to, subject, html, text }: MailInput): Promise<void> {
+export async function sendMail({ to, subject, html, text, listUnsubscribe }: MailInput): Promise<void> {
   const tx = getTransporter()
   if (!tx) {
     // Dev fallback: gercek gonderim yok, linki gorebilmek icin logla.
@@ -59,11 +84,14 @@ export async function sendMail({ to, subject, html, text }: MailInput): Promise<
     )
     return
   }
-  await tx.sendMail({
+  const headers = unsubscribeHeaders(listUnsubscribe)
+  // Gecici hatalarda (baglanti/zaman asimi, SMTP 4xx) 3 deneme, tam jitterli bekleme.
+  await withMailRetry(() => tx.sendMail({
     from: FROM,
     to,
     subject,
     html,
     text: text || html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim(),
-  })
+    headers,
+  }))
 }

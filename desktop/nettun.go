@@ -120,6 +120,12 @@ func (a *App) tunOp(op string) NetTunView {
 	a.mu.Lock()
 	ag := a.ag
 	a.mu.Unlock()
+	// Servis TUN'u zaten aciksa ikinci bir wintun ACILMAZ: islem servise gider.
+	if svc := a.svcSnapshot(); svc.Found && svc.TunActive && !a.takeoverActive() {
+		if v, ok := a.serviceTunOp(op); ok {
+			return v
+		}
+	}
 	if ag != nil && processElevated() {
 		return a.embeddedTunOp(ag, op)
 	}
@@ -163,10 +169,8 @@ func (a *App) embeddedTunOp(ag *agent.Agent, op string) NetTunView {
 // serviceTunOp, ayni makinedeki Zorven servisine sorar. ok=false: servis yok,
 // erisilemiyor ya da sunucuya bagli degil (o zaman gomulu yol onerilir).
 func (a *App) serviceTunOp(op string) (NetTunView, bool) {
+	// Stat YOK: Windows'ta kanal adlari dosya sistemi yolu degildir.
 	ep := localctl.ServiceEndpoint()
-	if _, err := os.Stat(ep.Path); err != nil {
-		return NetTunView{}, false
-	}
 	resp, err := localctl.Call(ep, localctl.Request{Op: op})
 	if err != nil || resp.Tun == nil || (!resp.Tun.Connected && resp.Tun.Reason != "") {
 		return NetTunView{}, false
@@ -176,9 +180,6 @@ func (a *App) serviceTunOp(op string) (NetTunView, bool) {
 
 func (a *App) tunOpService(op string) NetTunView {
 	ep := localctl.ServiceEndpoint()
-	if _, err := os.Stat(ep.Path); err != nil {
-		return tunErrView(err)
-	}
 	resp, err := localctl.Call(ep, localctl.Request{Op: op})
 	if err != nil {
 		if resp.Error == "" { // aktarim hatasi (dial/izin), servis cevabi degil
@@ -212,6 +213,18 @@ func fillTunView(v *NetTunView, ti *localctl.TunInfo) {
 			v.Peers = append(v.Peers, NetTunPeer{Name: p.Name, IP: p.IP, Online: p.Online, Path: p.Path, RTTMs: p.RTTMs})
 		}
 	}
+}
+
+func (a *App) svcSnapshot() ServiceState {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.svc
+}
+
+func (a *App) takeoverActive() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.takeover
 }
 
 // NetTunStatus, tam ag katmani durumunu verir.
@@ -254,7 +267,11 @@ func (a *App) NetTunInstallService() NetTunActionResult {
 	if runtime.GOOS != "windows" {
 		return NetTunActionResult{Error: tm("net.installNotWin"), Message: tunInstallHint()}
 	}
-	cfg := a.GetConfig()
+	// Kurulu kipte servis kurulumun parcasidir: dugme yalniz onarimdir.
+	if installedMode() {
+		return a.RepairService()
+	}
+	cfg := a.cfgCopy()
 	if cfg.Token == "" {
 		return NetTunActionResult{Error: tm("net.noToken")}
 	}

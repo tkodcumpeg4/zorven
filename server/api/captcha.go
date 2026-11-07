@@ -429,6 +429,12 @@ func (s *Server) listCaptchaSites(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	pg, okPg := pageOf(w, r)
+	if !okPg {
+		return
+	}
+	// Siteler kiracida azdir; sayfa dilimi bellekte alinir, istatistikler yalniz sayfa icin okunur.
+	sites = slicePage(w, pg, sites)
 	ids := make([]string, 0, len(sites))
 	for _, c := range sites {
 		ids = append(ids, c.ID)

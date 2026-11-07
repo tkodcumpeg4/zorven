@@ -10,10 +10,15 @@ const { relativeTime } = useFormat()
 const { t } = useI18n()
 
 const stats = ref<AdminGlobalStats | null>(null)
-const tenants = ref<TenantWithCounts[]>([])
-const clients = ref<ClientWithTenant[]>([])
-const hostnames = ref<HostnameWithTenant[]>([])
-const abuseReports = ref<AbuseReport[]>([])
+// Her sekme ayri sayfalayici (50/sayfa); sayfa numarasi URL'de (?tnpage, ?clpage, ?hnpage, ?abpage).
+const tenantsPager = usePagedList<TenantWithCounts>(p => api.pageAdminTenants(p), { queryKey: 'tnpage', immediate: false })
+const clientsPager = usePagedList<ClientWithTenant>(p => api.pageAdminClients(p), { queryKey: 'clpage', immediate: false })
+const hostnamesPager = usePagedList<HostnameWithTenant>(p => api.pageAdminHostnames(p), { queryKey: 'hnpage', immediate: false })
+const abusePager = usePagedList<AbuseReport>(p => api.pageAdminAbuseReports(p), { queryKey: 'abpage', immediate: false })
+const tenants = tenantsPager.items
+const clients = clientsPager.items
+const hostnames = hostnamesPager.items
+const abuseReports = abusePager.items
 
 const pending = ref(true)
 const switching = ref<string | null>(null)
@@ -25,18 +30,16 @@ async function loadData() {
   pending.value = true
   error.value = ''
   try {
-    const [st, tn, cl, hn, ab] = await Promise.all([
+    const [st] = await Promise.all([
       api.adminGetStats(),
-      api.adminListTenants(),
-      api.adminListClients(),
-      api.adminListHostnames(),
-      api.adminListAbuseReports(),
+      tenantsPager.reload(true), clientsPager.reload(true), hostnamesPager.reload(true),
+      abusePager.reload(true),
     ])
     stats.value = st
-    tenants.value = tn
-    clients.value = cl
-    hostnames.value = hn
-    abuseReports.value = ab
+    // Ana listeler (kiracilar/istemciler/alan adlari/kotuye kullanim) basarisizsa hata goster.
+    for (const pg of [tenantsPager, clientsPager, hostnamesPager, abusePager]) {
+      if (pg.error.value) throw pg.error.value
+    }
   } catch (err: any) {
     error.value = err?.data?.error?.message || err?.message || t('platform.loadFailed')
     toast.error(error.value)
@@ -171,7 +174,7 @@ onMounted(() => {
         @click="activeTab = 'tenants'"
       >
         <Icon name="lucide:building-2" class="size-3.5" />
-        <span>{{ t('platform.tabTenants', { n: tenants.length }) }}</span>
+        <span>{{ t('platform.tabTenants', { n: tenantsPager.total.value ?? tenants.length }) }}</span>
       </button>
 
       <button
@@ -181,7 +184,7 @@ onMounted(() => {
         @click="activeTab = 'clients'"
       >
         <Icon name="lucide:monitor-smartphone" class="size-3.5" />
-        <span>{{ t('platform.tabClients', { n: clients.length }) }}</span>
+        <span>{{ t('platform.tabClients', { n: clientsPager.total.value ?? clients.length }) }}</span>
       </button>
 
       <button
@@ -191,7 +194,7 @@ onMounted(() => {
         @click="activeTab = 'hostnames'"
       >
         <Icon name="lucide:globe" class="size-3.5" />
-        <span>{{ t('platform.tabHostnames', { n: hostnames.length }) }}</span>
+        <span>{{ t('platform.tabHostnames', { n: hostnamesPager.total.value ?? hostnames.length }) }}</span>
       </button>
 
       <button
@@ -201,12 +204,12 @@ onMounted(() => {
         @click="activeTab = 'abuse'"
       >
         <Icon name="lucide:shield-alert" class="size-3.5" :class="abuseReports.length ? 'text-danger' : ''" />
-        <span>{{ t('platform.tabAbuse', { n: abuseReports.length }) }}</span>
+        <span>{{ t('platform.tabAbuse', { n: abusePager.total.value ?? abuseReports.length }) }}</span>
       </button>
     </div>
 
     <!-- 1. Kiracılar Tablosu -->
-    <PanelFrame v-if="activeTab === 'tenants'" :label="t('platform.allTenants')" :meta="`${tenants.length}`">
+    <PanelFrame v-if="activeTab === 'tenants'" :label="t('platform.allTenants')" :meta="`${tenantsPager.total.value ?? tenants.length}`">
       <p v-if="pending" class="px-4 py-6 text-sm text-fg-muted">{{ t('common.loading') }}</p>
       <div v-else class="overflow-x-auto">
         <table class="w-full text-sm">
@@ -249,10 +252,11 @@ onMounted(() => {
           </tbody>
         </table>
       </div>
+      <ListPager class="px-4 pb-3" :list="tenantsPager" />
     </PanelFrame>
 
     <!-- 2. Tüm İstemciler Tablosu -->
-    <PanelFrame v-if="activeTab === 'clients'" :label="t('platform.allClients')" :meta="`${clients.length}`">
+    <PanelFrame v-if="activeTab === 'clients'" :label="t('platform.allClients')" :meta="`${clientsPager.total.value ?? clients.length}`">
       <p v-if="pending" class="px-4 py-6 text-sm text-fg-muted">{{ t('common.loading') }}</p>
       <div v-else class="overflow-x-auto">
         <table class="w-full text-sm">
@@ -314,10 +318,11 @@ onMounted(() => {
           </tbody>
         </table>
       </div>
+      <ListPager class="px-4 pb-3" :list="clientsPager" />
     </PanelFrame>
 
     <!-- 3. Tüm Domainler Tablosu -->
-    <PanelFrame v-if="activeTab === 'hostnames'" :label="t('platform.allHostnames')" :meta="`${hostnames.length}`">
+    <PanelFrame v-if="activeTab === 'hostnames'" :label="t('platform.allHostnames')" :meta="`${hostnamesPager.total.value ?? hostnames.length}`">
       <p v-if="pending" class="px-4 py-6 text-sm text-fg-muted">{{ t('common.loading') }}</p>
       <div v-else class="overflow-x-auto">
         <table class="w-full text-sm">
@@ -357,10 +362,11 @@ onMounted(() => {
           </tbody>
         </table>
       </div>
+      <ListPager class="px-4 pb-3" :list="hostnamesPager" />
     </PanelFrame>
 
     <!-- 4. Kötüye Kullanım Bildirimleri -->
-    <PanelFrame v-if="activeTab === 'abuse'" :label="t('platform.allAbuse')" :meta="`${abuseReports.length}`">
+    <PanelFrame v-if="activeTab === 'abuse'" :label="t('platform.allAbuse')" :meta="`${abusePager.total.value ?? abuseReports.length}`">
       <p v-if="pending" class="px-4 py-6 text-sm text-fg-muted">{{ t('common.loading') }}</p>
       <p v-else-if="!abuseReports.length" class="px-4 py-8 text-center text-sm text-fg-muted">
         {{ t('platform.abuseEmpty') }}
@@ -386,7 +392,11 @@ onMounted(() => {
               <td class="px-4 py-2.5 text-xs text-fg-muted max-w-md">
                 <span class="line-clamp-2">{{ rep.reason || '—' }}</span>
               </td>
-              <td class="px-4 py-2.5 font-mono text-xs text-fg-subtle">{{ rep.reporter_ip || '—' }}</td>
+              <td class="px-4 py-2.5 text-xs text-fg-subtle">
+                <div class="font-mono">{{ rep.reporter_ip || '—' }}</div>
+                <div v-if="rep.reporter_id" class="font-mono text-[10px]" :title="t('platform.reporterIdHint')">{{ t('platform.reporterId') }}: {{ rep.reporter_id.slice(0, 12) }}</div>
+                <div v-if="rep.reporter_ua" class="max-w-[220px] truncate text-[10px]" :title="rep.reporter_ua + (rep.reporter_lang ? ' · ' + rep.reporter_lang : '') + (rep.reporter_tls ? ' · TLS ' + rep.reporter_tls : '')">{{ rep.reporter_ua }}</div>
+              </td>
               <td class="px-4 py-2.5 text-xs text-fg-muted">{{ relativeTime(rep.created_at) }}</td>
               <td class="px-4 py-2.5 text-right">
                 <div class="flex items-center justify-end gap-1.5">
@@ -415,6 +425,7 @@ onMounted(() => {
           </tbody>
         </table>
       </div>
+      <ListPager class="px-4 pb-3" :list="abusePager" />
     </PanelFrame>
   </div>
 </template>

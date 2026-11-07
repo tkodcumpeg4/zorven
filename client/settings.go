@@ -60,10 +60,15 @@ type settingsModel struct {
 	version string
 	done    bool
 
+	// confirming: tehlikeli bir ayar (duz metin insecure) acilmadan once onay bekleniyor.
+	confirming bool
+
 	// Testler icin degistirilebilir.
 	userPath   func() (string, error)
 	systemPath func() string
 	probe      func() string
+	setCaps    func(t, s *bool, system bool) (liveResult, error)
+	reload     func(system bool) (liveResult, error)
 }
 
 func newSettingsModel(version string) *settingsModel {
@@ -72,6 +77,8 @@ func newSettingsModel(version string) *settingsModel {
 		userPath:   config.Path,
 		systemPath: config.SystemPath,
 		probe:      probeRunningClient,
+		setCaps:    setCapsLive,
+		reload:     reloadAgent,
 	}
 	m.init()
 	return m
@@ -126,9 +133,44 @@ func (m *settingsModel) save(okMsg string) {
 		return
 	}
 	if m.running != "" && m.running != i18n.T("set.notrunning") && m.cursor != siLanguage {
-		okMsg += i18n.T("set.saved.suffix")
+		okMsg += m.applyLive()
 	}
 	m.setOK(okMsg)
+}
+
+// applyLive, kaydedilen ayari calisan istemciye uygular. Terminal/ekran
+// anahtarlari `zorven enable/disable` ile ayni "set" islemini kullanir;
+// sunucu/token icin "reload" gonderilir. insecure ve CA yolunu ajan yalniz
+// baglanti kurarken okur (configLive: canli uygulanmaz): bunlarda ve ajan eski
+// ya da kapsam eslesmiyorsa yeniden baslatma gerektigi soylenir.
+func (m *settingsModel) applyLive() string {
+	var res liveResult
+	var err error
+	if m.setCaps == nil || m.reload == nil {
+		return i18n.T("set.saved.suffix")
+	}
+	switch m.cursor {
+	case siTerminal:
+		v := m.cfg.EnableTerminal
+		res, err = m.setCaps(&v, nil, m.system)
+	case siScreen:
+		v := m.cfg.EnableScreen
+		res, err = m.setCaps(nil, &v, m.system)
+	case siServer, siToken:
+		res, err = m.reload(m.system)
+	case siInsecure, siCACert:
+		return i18n.T("set.saved.suffix")
+	default:
+		return ""
+	}
+	switch res {
+	case liveApplied:
+		m.running = m.probe()
+		return i18n.T("v3.set.live.ok")
+	case liveFailed:
+		return i18n.T("v3.set.live.fail", err) + i18n.T("set.saved.suffix")
+	}
+	return i18n.T("set.saved.suffix")
 }
 
 func (m *settingsModel) setOK(s string)  { m.msg, m.msgErr = s, false }
@@ -138,6 +180,16 @@ func (m *settingsModel) setErr(s string) { m.msg, m.msgErr = s, true }
 func (m *settingsModel) handle(k tui.Key) {
 	if k.Kind == tui.KeyCtrlC {
 		m.done = true
+		return
+	}
+	if m.confirming {
+		m.confirming = false
+		if k.Kind == tui.KeyRune && (k.Text == "y" || k.Text == "Y" || k.Text == "e" || k.Text == "E") {
+			m.cfg.Insecure = true
+			m.save(i18n.T("set.ok.insecure", onOffText(true)))
+		} else {
+			m.setOK(i18n.T("set.cancelled"))
+		}
 		return
 	}
 	if m.editing {
@@ -212,8 +264,14 @@ func (m *settingsModel) activate(d int) {
 		m.running = m.probe() // ozet metni yeni dilde
 		m.save(i18n.T("set.ok.language", i18n.Name(m.cfg.Language)))
 	case siInsecure:
-		m.cfg.Insecure = !m.cfg.Insecure
-		m.save(i18n.T("set.ok.insecure", onOffText(m.cfg.Insecure)))
+		if !m.cfg.Insecure {
+			// Duz metin (ws://) token'i aciktan gonderir: acmadan once onay iste.
+			m.confirming = true
+			m.setErr(i18n.T("v3.set.confirm.insecure"))
+			return
+		}
+		m.cfg.Insecure = false
+		m.save(i18n.T("set.ok.insecure", onOffText(false)))
 	case siTerminal:
 		m.cfg.EnableTerminal = !m.cfg.EnableTerminal
 		m.save(i18n.T("set.ok.terminal", onOffText(m.cfg.EnableTerminal)))
@@ -314,6 +372,7 @@ func (m *settingsModel) commitEdit() {
 			return
 		}
 		m.cfg.ServerAddr = v
+		m.cfg.ServerPinned = true // acik tercih
 		m.editing, m.buf = false, nil
 		m.save(i18n.T("set.ok.server", v))
 	case siToken:
@@ -471,7 +530,9 @@ func (m *settingsModel) lines() []string {
 	} else {
 		out = append(out, stDim+" "+m.hint()+stReset)
 	}
-	if m.editing {
+	if m.confirming {
+		out = append(out, stDim+" "+i18n.T("v3.set.help.confirm")+stReset)
+	} else if m.editing {
 		out = append(out, stDim+" "+i18n.T("set.help.edit")+stReset)
 	} else {
 		out = append(out, stDim+" "+i18n.T("set.help.nav")+stReset)
@@ -540,6 +601,7 @@ func runSettingsUI(ctx context.Context, version string) error {
 	m.applyLanguage()
 	results := make(chan updateResult, 1)
 	keys, errs := t.Events()
+	resize := t.Resize()
 	t.Draw(m.lines())
 	for !m.done {
 		select {
@@ -552,6 +614,8 @@ func runSettingsUI(ctx context.Context, version string) error {
 			}
 		case err := <-errs:
 			return err
+		case <-resize:
+			// Boyut degisti: asagidaki Draw yeni genislikle yeniden cizer.
 		case r := <-results:
 			m.updateDone(r.lines, r.err)
 		}

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"os"
 	"runtime"
@@ -31,13 +32,25 @@ const (
 
 type Agent struct {
 	ServerAddr string // "zorven.app:443"
-	Token      string
-	LocalURL   string
-	Insecure   bool   // ws:// kullan (lokal gelistirme)
-	CACertPath string // self-signed sunucu sertifikasini guven havuzuna ekle
-	Log        *slog.Logger
-	NoTerminal bool // true ise uzak kabuk (PTY) erisimi tamamen reddedilir
-	NoScreen   bool // true ise uzak ekran paylasimi tamamen reddedilir
+	// Servers (Faz 0C-4): ek sunucu adresleri; ServerAddr ile birlikte yuk devri
+	// adaylari. ServerPinned true ise (kullanici sunucuyu sabitledi) dugum
+	// listesi hic kullanilmaz. NodeCachePath, son gecerli dugum listesinin
+	// dosyasi (bos: yalniz bellekte).
+	Servers       []string
+	ServerPinned  bool
+	NodeCachePath string
+	Token         string
+	LocalURL      string
+	Insecure      bool   // ws:// kullan (lokal gelistirme)
+	CACertPath    string // self-signed sunucu sertifikasini guven havuzuna ekle
+	Log           *slog.Logger
+	NoTerminal    bool // true ise uzak kabuk (PTY) erisimi tamamen reddedilir
+	NoScreen      bool // true ise uzak ekran paylasimi tamamen reddedilir
+	// EnableDeploy true ise Zorven Apps (Docker ile uygulama calistirma) yerel
+	// izin tavani ACIK demektir (--enable-deploy / config enable_deploy).
+	// Varsayilan kapali; acik olsa bile Docker'a erisilemezse FeatureDeploy
+	// ilan edilmez.
+	EnableDeploy bool
 	// NoClipboard true ise ekran paylasiminda pano esitleme ilan edilmez ve
 	// gelen pano mesajlari yok sayilir (--no-clipboard).
 	NoClipboard bool
@@ -69,7 +82,9 @@ type Agent struct {
 	// forceUpdate: elle `zorven update` (sunucu ayarindan bagimsiz); lastUpdateErr sonucunu tasir.
 	forceUpdate atomic.Bool
 	// updateKeys: test icin acik anahtar listesi gecersiz kilma (nil = updatesig.PublicKeys).
-	updateKeys    []string
+	updateKeys []string
+	// updMu, lastUpdateErr / lastUpdateMsg'yi korur (arka plan + elle guncelleme yarisi).
+	updMu         sync.Mutex
 	lastUpdateErr error
 	// lastUpdateMsg / quietUpdate: elle guncellemenin sonuc metni ve stdout'a
 	// yazilmamasi istegi (CheckUpdateQuiet).
@@ -138,6 +153,13 @@ type Agent struct {
 	screenInputStatus bool
 	// udpProbe, sunucu hello_ack ile udp_probe'u etkinlestirdiyse true.
 	udpProbe bool
+	// httpTrailers, sunucu hello_ack ile http_trailers'i (yanit trailer'i / gRPC)
+	// etkinlestirdiyse true; eski sunucuda false ve gRPC icin h2 kullanilmaz.
+	httpTrailers bool
+
+	// OriginProtocol, yerel servise HTTP surumu: "" / auto (gRPC istegi h2/h2c,
+	// digerleri HTTP/1.1), http1, h2, h2c. Bkz. origin.go.
+	OriginProtocol string
 	// posture, sunucu hello_ack ile posture'u etkinlestirdiyse true (Z1).
 	posture bool
 	// deviceCert (Z4): sunucu device_cert'i etkinlestirdiyse true; deviceChallenge
@@ -155,6 +177,8 @@ type Agent struct {
 	screen2Video bool
 	// screen2Feedback, sunucu hello_ack ile izleyici geri bildirimini etkinlestirdiyse true.
 	screen2Feedback bool
+	// screen2FPS60, sunucu hello_ack ile 30 fps ustu yakalamayi (60'a kadar) etkinlestirdiyse true.
+	screen2FPS60 bool
 	// screenCursor / screenClipboard: sunucu hello_ack ile etkinlestirdiyse true.
 	screenCursor    bool
 	screenClipboard bool
@@ -172,6 +196,53 @@ type Agent struct {
 	terminal   *terminalManager
 	screen     *screenManager
 	shells     shellSet // son el sikismada kesfedilen kabuklar
+
+	// zapp, zapp:// tunel hedeflerini cozer; apps, Zorven Apps yoneticisi
+	// (EnableDeploy kapaliysa nil). Run() basinda kurulur.
+	zapp *zappTable
+	apps *AppManager
+
+	// ConfigPath (opsiyonel): "reload" islemi bu ayar dosyasini yeniden okur.
+	// Bos ise: servis -> sistem dosyasi, aksi halde config.Load() (kullanici, sonra sistem).
+	ConfigPath string
+
+	// cfgMu, canli degisebilen ServerAddr/Token'i korur (reload).
+	cfgMu sync.RWMutex
+
+	// runCtx, Run'in (baglantidan bagimsiz) baglami: guncelleme gibi baglanti
+	// kopsa da surmesi gereken isler icin.
+	runCtx atomic.Pointer[context.Context]
+
+	// Gozlemlenebilirlik (bkz. obs.go) ve ag degisimi sinyalleri.
+	obsOnce    sync.Once
+	obsV       *agentObs
+	wakeCh     chan struct{} // geri cekilme beklemesini kesen sinyal
+	netChanged atomic.Bool   // uyku/ag degisimi: backoff sifirlansin
+	curConn    *websocket.Conn
+	curCS      *clientSession
+	curFM      *fileManager
+	// deviceUpdate: sunucu device_update'i onayladi (handshake).
+	deviceUpdate bool
+
+	// Dugum listesi (bkz. nodes.go).
+	nodesOnce  sync.Once
+	nodes      *nodeBook
+	probeRoots *x509.CertPool
+	attemptMu  sync.Mutex
+	attemptAdr string // su an baglanilan/baglanilmaya calisilan adres
+}
+
+// serverAddr / token, reload ile canli degisebilen alanlarin guvenli okuyuculari.
+func (a *Agent) serverAddr() string {
+	a.cfgMu.RLock()
+	defer a.cfgMu.RUnlock()
+	return a.ServerAddr
+}
+
+func (a *Agent) token() string {
+	a.cfgMu.RLock()
+	defer a.cfgMu.RUnlock()
+	return a.Token
 }
 
 // setupTLS, --ca-cert verilmisse o sertifikayi guven havuzuna ekler.
@@ -192,11 +263,12 @@ func (a *Agent) setupTLS() error {
 	if !pool.AppendCertsFromPEM(pem) {
 		return fmt.Errorf("%s gecerli bir PEM sertifikasi icermiyor", a.CACertPath)
 	}
+	a.probeRoots = pool
 	a.httpClient = &http.Client{
-		Transport: &http.Transport{TLSClientConfig: &tls.Config{
+		Transport: NewHTTPTransport(&tls.Config{
 			RootCAs:    pool,
 			MinVersion: tls.VersionTLS12,
-		}},
+		}),
 	}
 	a.Log.Info("CA sertifikasi guven havuzuna eklendi", "yol", a.CACertPath)
 	return nil
@@ -242,12 +314,37 @@ func HTTPClientWithCA(path string) (*http.Client, error) {
 	if !pool.AppendCertsFromPEM(pem) {
 		return nil, fmt.Errorf("%s gecerli bir PEM sertifikasi icermiyor", path)
 	}
-	return &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}}}, nil
+	return &http.Client{Transport: NewHTTPTransport(&tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12})}, nil
+}
+
+// NewHTTPTransport, makul zaman asimli bir tasiyici kurur: baglanti 10 sn, TLS el
+// sikisma 10 sn, yanit basliklari 30 sn. Govde suresine SINIR KOYMAZ (buyuk ikili
+// indirmeleri istek ctx'iyle sinirlanir). Ortam vekili (HTTP(S)_PROXY) korunur.
+// tlsCfg nil ise varsayilan TLS ayari kullanilir.
+func NewHTTPTransport(tlsCfg *tls.Config) *http.Transport {
+	d := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	return &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           d.DialContext,
+		TLSClientConfig:       tlsCfg,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+		IdleConnTimeout:       90 * time.Second,
+		ForceAttemptHTTP2:     tlsCfg == nil,
+	}
+}
+
+// NewHTTPClient, NewHTTPTransport kullanan varsayilan istemcidir (genel Timeout yok).
+func NewHTTPClient() *http.Client {
+	return &http.Client{Transport: NewHTTPTransport(nil)}
 }
 
 // Run, baglanti kopsa da surekli yeniden dener; yalnizca ctx iptal edilince
 // veya token kalici olarak gecersizse (401/409/426) durur.
 func (a *Agent) Run(ctx context.Context) error {
+	a.runCtx.Store(&ctx)
+	a.observ().markStarted()
+	a.wakeCh = make(chan struct{}, 1)
 	captureInit(a.clientVersion())
 	defer captureShutdown()
 	// Yerel bayraklar TAVANDIR: sunucu bunlarin uzerine cikamaz (F15).
@@ -256,24 +353,51 @@ func (a *Agent) Run(ctx context.Context) error {
 		screen:   !a.NoScreen,
 	}, !a.NoAutoUpdate)
 	a.settings.levelVar = a.LogLevel
+	a.zapp = newZappTable()
+	if a.EnableDeploy {
+		a.apps = newAppManager(a.Log, a.zapp)
+		go a.apps.Run(ctx)
+	}
 	if a.OnReady != nil {
 		a.OnReady(ctx)
 	}
 
 	if err := a.setupTLS(); err != nil {
 		a.emit(Status{State: StateFatal, Message: err.Error()})
-		return &FatalError{err.Error()}
+		return &FatalError{Msg: err.Error()}
 	}
 	a.emit(Status{State: StateConnecting, Message: "sunucuya baglaniliyor"})
 
 	// Oto-update: acilis + periyodik kontrol (baglanti dongusune paralel).
 	go a.runUpdater(ctx)
+	a.startUpdateWatch(ctx)
+
+	// Uyku/ag degisimi ve IP degisimi izleyicisi (baglanti dongusune paralel).
+	go a.watchNetwork(ctx)
 
 	backoff := backoffMin
+	var conflictSince time.Time
 
 	for {
 		started := time.Now()
 		err := a.connectOnce(ctx)
+		if ctx.Err() == nil {
+			a.observ().recordDisconnect(err)
+		}
+		if a.netChanged.CompareAndSwap(true, false) {
+			backoff = backoffMin // uyku/ag degisimi: hemen, kisa beklemeyle yeniden dene
+		}
+		if errors.Is(err, ErrAlreadyConnected) {
+			if conflictSince.IsZero() {
+				conflictSince = time.Now()
+			}
+			if time.Since(conflictSince) > conflictGrace {
+				a.emit(Status{State: StateFatal, Message: msgAlreadyConnected})
+				return &FatalError{Msg: msgAlreadyConnected, Cause: ErrAlreadyConnected}
+			}
+		} else {
+			conflictSince = time.Time{}
+		}
 
 		// Yeterince uzun suren (saglikli) bir baglanti koptuysa bekleme suresini
 		// sifirla; aksi halde birkac kopmadan sonra her yeniden baglanma 60 sn'ye
@@ -299,6 +423,8 @@ func (a *Agent) Run(ctx context.Context) error {
 			errStr := err.Error()
 			if strings.Contains(errStr, "first record does not look like a TLS handshake") || strings.Contains(errStr, "oversized record received") {
 				reconnectMsg = "Sunucu şifresiz (HTTP) çalışıyor — Ayarlar'dan 'Şifrelemeyi kapat'ı seçin"
+			} else if errors.Is(err, ErrAlreadyConnected) {
+				reconnectMsg = fmt.Sprintf("%s; %s sonra yeniden denenecek", msgAlreadyConnected, backoff.Round(time.Second))
 			} else if errors.Is(err, errTooManyAttempts) {
 				reconnectMsg = fmt.Sprintf("sunucu çok fazla bağlantı denemesi nedeniyle bekletiyor (429), %s sonra yeniden denenecek", backoff.Round(time.Second))
 			} else if strings.Contains(errStr, "certificate signed by unknown authority") {
@@ -316,10 +442,18 @@ func (a *Agent) Run(ctx context.Context) error {
 		// Jitter: cok sayida istemci ayni anda kopunca sunucuya es zamanli
 		// yuklenmesinler diye bekleme suresine %0-25 rastgele ekleniyor.
 		wait := backoff + time.Duration(rand.Int64N(int64(backoff/4)+1))
+		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
+			a.emit(Status{State: StateStopped, Message: "durduruldu"})
 			return nil
-		case <-time.After(wait):
+		case <-a.wakeCh:
+			// Uyanma / ag degisimi / reload: beklemeyi kes, geri cekilmeyi sifirla.
+			timer.Stop()
+			backoff = backoffMin
+			continue
+		case <-timer.C:
 		}
 
 		// Tavan panelden ayarlanabilir (reconnect_max_backoff_sec, F15).
@@ -338,12 +472,31 @@ func (a *Agent) Run(ctx context.Context) error {
 // calisan 'zorven' ya da Windows servisi.
 const msgAlreadyConnected = "bu cihaz anahtarıyla başka bir Zorven istemcisi (terminaldeki 'zorven' ya da sistem servisi) şu an bağlı (409); onu kapatıp yeniden bağlanın"
 
+// ErrAlreadyConnected, sunucu ayni cihaz kimligi icin zaten bir oturum tuttugunda
+// (409, ya da yaris sonucu "already connected" kapanisi) doner. Gecici sayilir:
+// uyku/ag degisimi sonrasi sunucu eski oturumu dusurene kadar sinirli sure
+// (conflictGrace) yeniden denenir; sure dolarsa Run FatalError{Cause: ErrAlreadyConnected}
+// ile cikar. Cagirici errors.Is(err, agent.ErrAlreadyConnected) ile ayirt eder.
+var ErrAlreadyConnected = errors.New("cihaz anahtari baska bir istemcide bagli (409)")
+
+// conflictGrace, 409 durumunda vazgecmeden once yeniden deneme suresi.
+const conflictGrace = 2 * time.Minute
+
+// errReplaced, sunucunun bu oturumu ayni cihazin yeni baglantisiyla degistirdigini bildirir.
+var errReplaced = errors.New("oturum baska bir baglantiyla degistirildi")
+
 // errTooManyAttempts, sunucunun kimlik dogrulama hiz siniri (429): kalici
 // degil, backoff ile yeniden denenir.
 var errTooManyAttempts = errors.New("sunucu deneme siniri (429)")
 
 // fatalError, yeniden denenmemesi gereken hatalari isaretler.
-type FatalError struct{ Msg string }
+type FatalError struct {
+	Msg string
+	// Cause (opsiyonel): errors.Is ile eslesebilen kok neden (or. ErrAlreadyConnected).
+	Cause error
+}
+
+func (e *FatalError) Unwrap() error { return e.Cause }
 
 // State, baglantinin o anki durumu.
 type State string
@@ -394,7 +547,11 @@ func (a *Agent) connectOnce(ctx context.Context) error {
 	if a.Insecure {
 		scheme = "ws"
 	}
-	url := fmt.Sprintf("%s://%s/_tunnel/v1/connect", scheme, a.ServerAddr)
+	addr := a.pickAddr(ctx)
+	a.attemptMu.Lock()
+	a.attemptAdr = addr
+	a.attemptMu.Unlock()
+	url := fmt.Sprintf("%s://%s/_tunnel/v1/connect", scheme, addr)
 
 	dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
@@ -404,7 +561,7 @@ func (a *Agent) connectOnce(ctx context.Context) error {
 		HTTPHeader: http.Header{
 			// Token query string'e DEGIL basliga konur: query string sunucu
 			// erisim loglarina ve ara proxy loglarina sizar.
-			"Authorization":           {"Bearer " + a.Token},
+			"Authorization":           {"Bearer " + a.token()},
 			"X-Tunnel-Client-Version": {protocol.Version},
 		},
 	})
@@ -412,15 +569,16 @@ func (a *Agent) connectOnce(ctx context.Context) error {
 		if resp != nil {
 			switch resp.StatusCode {
 			case http.StatusUnauthorized:
-				return &FatalError{"token gecersiz — sunucu 401 dondu"}
+				return &FatalError{Msg: "token gecersiz — sunucu 401 dondu"}
 			case http.StatusUpgradeRequired:
-				return &FatalError{"istemci surumu sunucuyla uyumsuz (sunucu 426 dondu), guncelleyin"}
+				return &FatalError{Msg: "istemci surumu sunucuyla uyumsuz (sunucu 426 dondu), guncelleyin"}
 			case http.StatusConflict:
-				return &FatalError{msgAlreadyConnected}
+				return ErrAlreadyConnected
 			case http.StatusTooManyRequests:
 				return errTooManyAttempts
 			}
 		}
+		a.noteAddrFail(addr)
 		return fmt.Errorf("baglanilamadi: %w", err)
 	}
 	defer conn.CloseNow()
@@ -429,6 +587,7 @@ func (a *Agent) connectOnce(ctx context.Context) error {
 	conn.SetReadLimit(protocol.WSReadLimit)
 
 	if err := a.handshake(ctx, conn); err != nil {
+		a.noteAddrFail(addr)
 		return fmt.Errorf("el sikismasi basarisiz: %w", err)
 	}
 
@@ -450,6 +609,11 @@ func (a *Agent) handshake(ctx context.Context, conn *websocket.Conn) error {
 	a.shells = shells
 	a.mu.Unlock()
 
+	// Zorven Apps: Docker erisimini her baglantida tazele; FeatureDeploy buna gore ilan edilir.
+	if a.apps != nil {
+		_ = a.apps.Check(ctx)
+	}
+
 	hello, err := protocol.Marshal(protocol.Hello{
 		Type:            protocol.TypeHello,
 		ClientVersion:   a.clientVersion(),
@@ -458,7 +622,7 @@ func (a *Agent) handshake(ctx context.Context, conn *websocket.Conn) error {
 		Platform:        runtime.GOOS + "/" + runtime.GOARCH,
 		// Akis kontrolunu destekledigimizi bildir. Sunucu desteklemiyorsa
 		// hello_ack'te geri onaylamaz ve eski davranis surer.
-		Features:        a.helloFeatures(),
+		Features:        append(a.helloFeatures(), protocol.FeatureDeviceUpdate),
 		RequestedTarget: a.RequestedTarget,
 		RequestedTTLSec: a.RequestedTTLSec,
 		IsService:       a.IsService,
@@ -467,6 +631,7 @@ func (a *Agent) handshake(ctx context.Context, conn *websocket.Conn) error {
 		Metrics:         metrics.Collect(),
 		Shells:          shells.List,
 		DefaultShell:    shells.Default,
+		PrevNode:        a.prevNodeHint(),
 	}, protocol.TypeHello)
 	if err != nil {
 		return err
@@ -493,11 +658,14 @@ func (a *Agent) handshake(ctx context.Context, conn *websocket.Conn) error {
 		return fmt.Errorf("hello_ack bekleniyordu, alinan: %s", ack.Type)
 	}
 
+	a.noteConnected(ack)
+
 	// Sunucunun ETKINLESTIRDIGI yetenekler. Eski sunucular Features gondermez
 	// -> flowControl false kalir ve govde kredisiz gonderilir (eski davranis).
 	a.flowControl = false
 	a.screenInputStatus = false
 	a.udpProbe = false
+	a.httpTrailers = false
 	a.posture = false
 	a.deviceCert = false
 	a.deviceChallenge = ack.DeviceChallenge
@@ -507,9 +675,11 @@ func (a *Agent) handshake(ctx context.Context, conn *websocket.Conn) error {
 	a.screen2Stats = false
 	a.screen2Video = false
 	a.screen2Feedback = false
+	a.screen2FPS60 = false
 	a.screenCursor = false
 	a.screenClipboard = false
 	a.screenFiles = false
+	a.deviceUpdate = false
 	var wgNet, wgRelay bool
 	for _, f := range ack.Features {
 		wgNet = wgNet || f == protocol.FeatureWGNet
@@ -522,6 +692,9 @@ func (a *Agent) handshake(ctx context.Context, conn *websocket.Conn) error {
 		}
 		if f == protocol.FeatureUDPProbe {
 			a.udpProbe = true
+		}
+		if f == protocol.FeatureHTTPTrailers {
+			a.httpTrailers = true
 		}
 		if f == protocol.FeaturePosture {
 			a.posture = !a.NoPosture
@@ -544,6 +717,9 @@ func (a *Agent) handshake(ctx context.Context, conn *websocket.Conn) error {
 		if f == protocol.FeatureScreen2Video {
 			a.screen2Video = true
 		}
+		if f == protocol.FeatureScreen2FPS60 {
+			a.screen2FPS60 = true
+		}
 		if f == protocol.FeatureScreenCursor {
 			a.screenCursor = true
 		}
@@ -552,6 +728,9 @@ func (a *Agent) handshake(ctx context.Context, conn *websocket.Conn) error {
 		}
 		if f == protocol.FeatureScreenFiles {
 			a.screenFiles = true
+		}
+		if f == protocol.FeatureDeviceUpdate {
+			a.deviceUpdate = true
 		}
 	}
 
@@ -563,6 +742,8 @@ func (a *Agent) handshake(ctx context.Context, conn *websocket.Conn) error {
 
 	a.heartbeatS = ack.HeartbeatIntervalS
 	a.tunnels = ack.Tunnels
+	a.observ().onConnected(ack.Tunnels)
+	a.confirmUpdate() // yeni surum sunucuya baglandi: geri alma isaretcisini sil
 	tunnels := make([]Tunnel, 0, len(ack.Tunnels))
 	for _, tn := range ack.Tunnels {
 		tunnels = append(tunnels, Tunnel{Hostnames: tn.Hostnames, Target: tn.Target})
@@ -587,21 +768,40 @@ func (a *Agent) handshake(ctx context.Context, conn *websocket.Conn) error {
 	return nil
 }
 
-func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) error {
+func (a *Agent) readLoop(parent context.Context, conn *websocket.Conn) error {
+	// Baglanti basina baglam: readLoop donunce (kopma/yeniden baglanma) bu
+	// baglantiya ait TUM goroutine'ler (udp istatistik, cihaz sertifikasi, durus,
+	// keepalive, wg dugumu...) durur. Run'in baglami kullanilsaydi her yeniden
+	// baglanmada bir takim goroutine birikirdi.
+	ctx, cancelConn := context.WithCancel(parent)
+	defer cancelConn()
+	runCtx := parent
+	if p := a.runCtx.Load(); p != nil {
+		runCtx = *p
+	}
 	cs := newClientSession(conn, a.LocalURL, a.Log)
+	cs.tm = a.observ().tm
 	cs.flowControl = a.flowControl // el sikismada pazarlandi
 	cs.screenInputStatus = a.screenInputStatus
 	cs.udpProbe = a.udpProbe
+	cs.httpTrailers = a.httpTrailers
+	cs.originProto = NormalizeOriginProtocol(a.OriginProtocol)
 	cs.screen2 = a.screen2
 	cs.screen2Layers = a.screen2 && a.screen2Layers
 	cs.screen2Stats = a.screen2 && a.screen2Stats
 	cs.screen2Feedback = a.screen2 && a.screen2Feedback
+	cs.screen2FPS60 = a.screen2 && a.screen2FPS60
 	cs.screen2Video = a.screen2 && a.screen2Video
 	cs.screenCursor = a.screenCursor
 	cs.screenClipboard = a.screenClipboard && !a.NoClipboard
 	cs.screenFiles = a.screenFiles && !a.NoFileTransfer
 	cs.onRequest = a.OnRequest
+	cs.zapp = a.zapp
 	cs.SetTargets(a.tunnels)
+	if a.apps != nil {
+		a.apps.attachSender(func(v any, t protocol.MessageType) error { return cs.sendControl(ctx, v, t) })
+		defer a.apps.detachSender()
+	}
 	a.mu.Lock()
 	shells := a.shells
 	a.mu.Unlock()
@@ -612,7 +812,9 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) error {
 	a.mu.Lock()
 	a.terminal = tm
 	a.screen = sm
+	a.curConn, a.curCS, a.curFM = conn, cs, fm
 	a.mu.Unlock()
+	go a.keepalive(ctx, conn)
 
 	// refreshSessions, terminal/ekran oturumu acilip kapandiginda son emiti
 	// guncel sayilarla tekrarlar; boylece masaustu arayuzu anlik gorur.
@@ -660,6 +862,9 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) error {
 		a.mu.Lock()
 		a.terminal = nil
 		a.screen = nil
+		if a.curConn == conn {
+			a.curConn, a.curCS, a.curFM = nil, nil, nil
+		}
 		a.mu.Unlock()
 		tm.closeAll()
 		sm.closeAll()
@@ -692,7 +897,7 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) error {
 			var ce websocket.CloseError
 			if errors.As(err, &ce) && ce.Code == websocket.StatusPolicyViolation &&
 				strings.Contains(ce.Reason, "already connected") {
-				return &FatalError{msgAlreadyConnected}
+				return ErrAlreadyConnected
 			}
 			status := websocket.CloseStatus(err)
 			if status == websocket.StatusNormalClosure || errors.Is(err, context.Canceled) {
@@ -745,7 +950,7 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) error {
 			// Sunucu yeni surum yayinladi: manifest'i kontrol et (arka planda,
 			// okuma dongusunu bloklamadan). maybeUpdate kendi icinde serilesir.
 			a.Log.Info("sunucu guncelleme sinyali gonderdi")
-			go a.maybeUpdate(ctx, "sunucu-push")
+			go a.maybeUpdate(runCtx, "sunucu-push")
 
 		case protocol.TypePing:
 			// metrics_interval_sec (F15): aralik dolmadan yeniden toplanmaz.
@@ -1023,7 +1228,10 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) error {
 			}
 			// Ayar degisikligi de ayni mesajla gelir (F15).
 			a.settings.apply(cu.Settings, a.Log)
-			cs.SetTargets(cu.Tunnels)
+			// Kaldirilan / hedefi degisen tunellerin acik WS ve ham akis
+			// baglantilari eski hedefte acik kalmasin.
+			cs.closeTunnelConns(cs.SetTargets(cu.Tunnels))
+			a.observ().setTunnels(cu.Tunnels)
 			// Guncel tunel listesini arayuze YENIDEN YAY: masaustu app panelde
 			// tunel eklenince/silinince listeyi anlik tazelesin (aksi halde
 			// yalnizca ilk baglantidaki tuneller gorunurdu).
@@ -1042,12 +1250,49 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) error {
 				a.Log.Info("tunel aktif", "adlar", strings.Join(tn.Hostnames, ", "), "hedef", tn.Target)
 			}
 
+		case protocol.TypeDeployApply:
+			var m protocol.DeployApply
+			if err := json.Unmarshal(data, &m); err != nil {
+				a.Log.Warn("deploy_apply cozulemedi", "hata", err)
+				continue
+			}
+			if a.apps == nil {
+				a.rejectDeployDisabled(ctx, cs, m.AppID, m.DeploymentID)
+				continue
+			}
+			go a.apps.Apply(runCtx, m)
+
+		case protocol.TypeDeployAction:
+			var m protocol.DeployAction
+			if err := json.Unmarshal(data, &m); err != nil {
+				continue
+			}
+			if a.apps == nil {
+				a.rejectDeployDisabled(ctx, cs, m.AppID, m.DeploymentID)
+				continue
+			}
+			go a.apps.Action(runCtx, m)
+
+		case protocol.TypeDeployLogsSub:
+			var m protocol.DeployLogsSub
+			if err := json.Unmarshal(data, &m); err != nil {
+				continue
+			}
+			if a.apps != nil {
+				a.apps.logs.handle(ctx, m)
+			}
+
 		case protocol.TypeBye:
 			var b protocol.Bye
 			json.Unmarshal(data, &b)
 			a.Log.Info("sunucu baglantiyi sonlandirdi", "sebep", b.Reason)
-			if strings.Contains(b.Reason, "token") {
-				return &FatalError{"sunucu token'i gecersiz kildi: " + b.Reason}
+			// Kalici hata yalniz yapisal kodla (ya da eski sunucularin acik
+			// "token ..." on ekiyle) anlasilir; serbest metinde "token" gecmesi yetmez.
+			if b.Code == protocol.ByeCodeAuthRevoked || strings.HasPrefix(strings.ToLower(b.Reason), "token ") {
+				return &FatalError{Msg: "sunucu token'i gecersiz kildi: " + b.Reason}
+			}
+			if b.Code == protocol.ByeCodeReplaced {
+				return errReplaced
 			}
 			return nil
 
@@ -1089,4 +1334,31 @@ func (a *Agent) CloseSessions() {
 	if sm != nil {
 		sm.closeAll()
 	}
+}
+
+// noteAddrFail / noteConnected / prevNodeHint: dugum defteri kancalari
+// (sabit sunucuda defter yoktur, hepsi etkisizdir).
+func (a *Agent) noteAddrFail(addr string) {
+	if b := a.book(); b != nil {
+		b.markFail(addr)
+	}
+}
+
+func (a *Agent) curAttempt() string {
+	a.attemptMu.Lock()
+	defer a.attemptMu.Unlock()
+	return a.attemptAdr
+}
+
+func (a *Agent) noteConnected(ack protocol.HelloAck) {
+	if b := a.book(); b != nil {
+		b.connected(a.curAttempt(), ack)
+	}
+}
+
+func (a *Agent) prevNodeHint() string {
+	if b := a.book(); b != nil {
+		return b.prevNodeFor(a.curAttempt())
+	}
+	return ""
 }

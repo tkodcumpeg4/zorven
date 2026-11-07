@@ -232,6 +232,8 @@ type Client struct {
 	// canli istemci; eski istemcilerde yok). Panel kabuk secicisi icin.
 	Shells       []protocol.ShellInfo `json:"shells,omitempty"`
 	DefaultShell string               `json:"default_shell,omitempty"`
+	// Features: canli oturumun pazarladigi yetenekler (or. deploy_v1); cevrimdisi iken bos.
+	Features []string `json:"features"`
 	// UpdateAvailable/LatestVersion: bagli istemcinin surumu yayinlanan
 	// manifest'ten eskiyse doldurulur (DB'de tutulmaz).
 	UpdateAvailable bool              `json:"update_available,omitempty"`
@@ -264,8 +266,8 @@ type TunnelUDP struct {
 	TenantID       string `json:"-"`
 	IdleTimeoutSec int    `json:"idle_timeout_sec"`
 	MaxPacketBytes int    `json:"max_packet_bytes"`
-	MaxPPS         int    `json:"max_pps"`      // 0 = sinirsiz
-	MaxFlowPPS     int    `json:"max_flow_pps"` // 0 = sinirsiz
+	MaxPPS         int    `json:"max_pps"`      // 0 = sunucu varsayilani (ZORVEN_UDP_TUNNEL_PPS, vars. 20000)
+	MaxFlowPPS     int    `json:"max_flow_pps"` // 0 = sunucu varsayilani (ZORVEN_UDP_FLOW_PPS, vars. 2000)
 	MaxFlows       int    `json:"max_flows"`
 }
 
@@ -544,6 +546,11 @@ type Tunnel struct {
 	// kaldirir. nil = suresiz (kalici tunel).
 	Ephemeral bool       `json:"ephemeral,omitempty"`
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	// ExpiredAt: suresi dolup trafige kapandigi an (saklama penceresi basladi).
+	// DeleteAt = ExpiredAt + EphemeralRetain: supurucunun silecegi an (okuma
+	// aninda hesaplanir, DB'de tutulmaz).
+	ExpiredAt *time.Time `json:"expired_at,omitempty"`
+	DeleteAt  *time.Time `json:"delete_at,omitempty"`
 
 	// PrivateName (FAZ 3 / F17), ozel kaynagin adi (or. "db.internal").
 	// Yalnizca Exposure == ExposurePrivate iken dolu.
@@ -598,6 +605,10 @@ const (
 	HostTypeCustom = "custom" // musterinin kendi domaini (or. api.musteri.com)
 )
 
+// EphemeralRetain, suresi dolan gecici tunelin silinmeden once saklanma suresi.
+// main.go ZORVEN_EPHEMERAL_RETAIN ile degistirebilir (varsayilan 24 saat).
+var EphemeralRetain = 24 * time.Hour
+
 // HostRoute, ingress'in bir istegi yonlendirmek icin ihtiyac duydugu her sey.
 //
 // hostnames + tunnels birlesimidir ve TEK sorguda gelir; sicak yol ikinci bir
@@ -622,6 +633,9 @@ type HostRoute struct {
 
 	// Frozen (FAZ 4): tunel platform admin tarafindan askiya alindi mi.
 	Frozen bool
+
+	// Expired: gecici tunelin suresi doldu (saklama penceresinde, trafige kapali).
+	Expired bool
 
 	// PathPrefix (FAZ 6.5): yol-tabanli yonlendirme kurali ise dolu. Bos ise bu
 	// hostname'in VARSAYILAN (birincil) route'udur. Router, ayni fqdn icin en uzun
@@ -837,6 +851,7 @@ type TunnelAlert struct {
 	WindowMin      int        `json:"window_min"`
 	MinRequests    int        `json:"min_requests"`
 	NotifyEmail    string     `json:"notify_email"`
+	NotifyLang     string     `json:"-"`     // e-posta dili tr|en|ja|zh (uyariyi kuranin dili); bos = tr; API'de yok
 	State          string     `json:"state"` // ok | firing
 	LastChangedAt  *time.Time `json:"last_changed_at,omitempty"`
 	LastNotifiedAt *time.Time `json:"last_notified_at,omitempty"`
@@ -856,12 +871,19 @@ type TunnelPatch struct {
 
 // AbuseReport, bir hostname icin ziyaretci kotuye-kullanim bildirimi (FAZ 4).
 type AbuseReport struct {
-	ID         string    `json:"id"`
-	FQDN       string    `json:"fqdn"`
-	Reason     string    `json:"reason"`
-	ReporterIP string    `json:"reporter_ip,omitempty"`
-	Handled    bool      `json:"handled"`
-	CreatedAt  time.Time `json:"created_at"`
+	ID         string `json:"id"`
+	FQDN       string `json:"fqdn"`
+	Reason     string `json:"reason"`
+	ReporterIP string `json:"reporter_ip,omitempty"`
+	// Bildirenin kimligi (spam onlemi): kategori, tarayici, kalici bildiren
+	// kimligi (tunel host'una yazilan cerez), TLS parmak izi, tarayici dili.
+	Category     string    `json:"category,omitempty"`
+	ReporterUA   string    `json:"reporter_ua,omitempty"`
+	ReporterID   string    `json:"reporter_id,omitempty"`
+	ReporterTLS  string    `json:"reporter_tls,omitempty"`
+	ReporterLang string    `json:"reporter_lang,omitempty"`
+	Handled      bool      `json:"handled"`
+	CreatedAt    time.Time `json:"created_at"`
 }
 
 // TenantWithCounts, kiraci ve ona ait kaynak sayilarini tutar (admin paneli icin).
@@ -898,6 +920,22 @@ type AdminGlobalStats struct {
 }
 
 type Store interface {
+	// --- Sayfali listeler (sayfalama sozlesmesi; sayfa + toplam doner) ---
+	ListTunnelsPage(ctx context.Context, tenantID, projectID string, pg Page) ([]Tunnel, int, error)
+	ListHostnamesPage(ctx context.Context, tenantID, projectID string, pg Page) ([]Hostname, int, error)
+	ListProjectsPage(ctx context.Context, tenantID string, pg Page) ([]Project, int, error)
+	ListSecretsPage(ctx context.Context, tenantID, projectID string, pg Page) ([]Secret, int, error)
+	ListPoliciesPage(ctx context.Context, tenantID, projectID string, pg Page) ([]Policy, int, error)
+	ListAPITokensPage(ctx context.Context, tenantID string, pg Page) ([]APIToken, int, error)
+	ListIPRulesPage(ctx context.Context, tenantID string, tunnelID *string, pg Page) ([]IPAllowlistRule, int, error)
+	ListTeamMembersPage(ctx context.Context, tenantID string, pg Page) ([]TeamMember, int, error)
+	AdminListTenantsWithCountsPage(ctx context.Context, pg Page) ([]TenantWithCounts, int, error)
+	AdminListAllClientsPage(ctx context.Context, pg Page) ([]ClientWithTenant, int, error)
+	AdminListAllHostnamesPage(ctx context.Context, pg Page) ([]HostnameWithTenant, int, error)
+	ListAbuseReportsPage(ctx context.Context, pg Page) ([]AbuseReport, int, error)
+	ListMailMessagesPage(ctx context.Context, tenantID, folder string, pg Page) ([]MailMessage, int, error)
+	ListDoorGrantsPage(ctx context.Context, tenantID, tunnelID string, activeOnly bool, pg Page) ([]DoorGrant, int, error)
+
 	// --- Tenants ---
 	CreateTenant(ctx context.Context, slug string) (Tenant, error)
 	GetTenant(ctx context.Context, id string) (Tenant, error)
@@ -917,6 +955,13 @@ type Store interface {
 	// islemde siler; baglantisi kesilecek istemci kimliklerini doner.
 	CountOtherOrganizations(ctx context.Context, userID, exceptOrgID string) (int, error)
 	DeleteOrganization(ctx context.Context, tenantID string) ([]string, error)
+
+	// Hesap silme (kisisel veri). PlanAccountDeletion salt okunurdur: tek uyeli
+	// organizasyonlar (silinecek), baska uyeli olanlar (uyelik kalkacak) ve silmeyi
+	// engelleyenler. PurgeAccount plani tek islemde uygular (engel varsa
+	// *AccountBlockedError); kullanici satirini Better Auth siler.
+	PlanAccountDeletion(ctx context.Context, userID string) (AccountDeletionPlan, error)
+	PurgeAccount(ctx context.Context, userID string) (AccountPurgeResult, error)
 
 	// --- Secrets (FAZ 1 / F06) ---
 	CreateSecret(ctx context.Context, tenantID, projectID, name, plaintext string) (Secret, error)
@@ -969,9 +1014,15 @@ type Store interface {
 	DeleteTunnel(ctx context.Context, tenantID, id string) error
 
 	// Gecici tuneller (FAZ 2 / F07). CreateEphemeralTunnel TTL'li tunel acar;
-	// DeleteExpiredTunnels suresi dolmuslari temizler ve sayiyi doner.
+	// DeleteExpiredTunnels suresi dolmuslari temizler ve silinen tunellerin
+	// satirlarini doner (cagiran kiraci olayini ve istemci config_update'ini
+	// bu kayitlardan yayar; bos liste = silinecek bir sey yoktu).
 	CreateEphemeralTunnel(ctx context.Context, tenantID, clientID, target, projectID string, expiresAt time.Time) (Tunnel, error)
-	DeleteExpiredTunnels(ctx context.Context) (int, error)
+	DeleteExpiredTunnels(ctx context.Context) ([]Tunnel, error)
+	// ExpireEphemeralTunnels, suresi dolan (henuz isaretlenmemis) gecici
+	// tuneli trafige kapatir (enabled=false, expired_at=now) ve satirlarini
+	// doner. Silme DeleteExpiredTunnels'te saklama suresi sonra olur.
+	ExpireEphemeralTunnels(ctx context.Context) ([]Tunnel, error)
 
 	// Ozel ag (FAZ 3 / F17). MakeTunnelPrivate tuneli TCP + private yapar ve
 	// adini atar; GetPrivateTunnel adla (kiraci icinde, buyuk/kucuk duyarsiz) bulur.
@@ -1047,6 +1098,11 @@ type Store interface {
 	AdminFreezeByFQDN(ctx context.Context, fqdn string, frozen bool) error
 	// CreateAbuseReport, bir kotuye-kullanim bildirimi kaydeder.
 	CreateAbuseReport(ctx context.Context, fqdn, reason, reporterIP string) (AbuseReport, error)
+	// CreateAbuseReportFull, bildireni tanitan alanlarla birlikte kaydeder.
+	CreateAbuseReportFull(ctx context.Context, r AbuseReport) (AbuseReport, error)
+	// AbuseReportCounts, since'ten bu yana: ayni IP'den, ayni bildiren
+	// kimligiyle ve ayni IP'den ayni host icin yapilan bildirim sayilari.
+	AbuseReportCounts(ctx context.Context, since time.Time, ip, reporterID, fqdn string) (byIP, byID, sameHost int, err error)
 	// ListAbuseReports, en yeni bildirimleri doner (admin paneli).
 	ListAbuseReports(ctx context.Context, limit int) ([]AbuseReport, error)
 
@@ -1062,6 +1118,11 @@ type Store interface {
 	RemoveTunnelReplica(ctx context.Context, tenantID, tunnelID, clientID string) error
 	// ListTunnelReplicas, bir tunelin replika istemci ID'lerini doner.
 	ListTunnelReplicas(ctx context.Context, tenantID, tunnelID string) ([]string, error)
+	// ListAllTunnelReplicas, replikasi olan TUM tunellerin (kiracidan bagimsiz)
+	// replika istemci ID'lerini tunel kimligine gore doner. Yalniz replikasi olan
+	// tunel haritada yer alir. Ham TCP/UDP dinleyicileri (rawproxy) yenilemede
+	// tek sorguyla okur.
+	ListAllTunnelReplicas(ctx context.Context) (map[string][]string, error)
 
 	// --- Tünel erişim denetimi (FAZ 1a) ---
 	// GetTunnelAccessPolicy, tunelin politikasini doner (yoksa mode=none/enabled=false).

@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"strings"
+	"time"
 
 	"github.com/kardianos/service"
 	"github.com/spf13/cobra"
@@ -32,28 +33,53 @@ func (p *serviceProgram) Start(s service.Service) error {
 	return nil
 }
 
+// exitProcess test icin degistirilebilir.
+var exitProcess = os.Exit
+
+// exitConfig (EX_CONFIG): kalici yapilandirma hatasi (token yok). systemd
+// biriminde RestartPreventExitStatus=78 ile yeniden baslatma denenmez; servis
+// "failed" gorunur.
+const exitConfig = 78
+
+// run, ajani calistirir. Basarisiz bitiste (token yok / FatalError) sureci
+// sifirdan farkli kodla SONLANDIRIR: aksi halde servis yoneticisi servisi
+// "calisiyor" gosterir ama hicbir sey calismaz (zombi servis) ve yeniden
+// baslatma devreye girmezdi.
 func (p *serviceProgram) run(ctx context.Context) {
-	cfg, err := config.Load()
-	if err != nil || cfg.Token == "" {
-		slog.Error("servis baslatilamadi: gecerli token bulunamadi", "hata", err)
-		return
-	}
-
-	serverAddr := cfg.ServerAddr
-	if serverAddr == "" || serverAddr == "localhost:8443" {
-		serverAddr = "zorven.app:443"
-	}
-
-	// Servis HICBIR yerel hedef varsaymaz: yalnizca sunucuda tanimli
-	// tunelleri (hello_ack / config_update) isler. RequestedTarget de bos
-	// kalir; boylece sunucu bu istemci icin kendiliginden tunel acmaz.
-
 	// Servis modunda stderr hicbir yere gitmez (Windows servisi): kayitlar ayrica
 	// dosyaya yazilir ve Go cokme ciktisi (panic/fatal yigini) ayni dosyaya duser.
 	logOut := openServiceLog()
 	logger := slog.New(slog.NewJSONHandler(logOut, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	}))
+	if code := p.runOnce(ctx, logger); code != 0 {
+		exitProcess(code)
+	}
+}
+
+// runOnce ajani calistirir ve cikis kodunu doner (0 = normal durdurma).
+func (p *serviceProgram) runOnce(ctx context.Context, logger *slog.Logger) int {
+	cfg, err := config.Load()
+	if err != nil {
+		logger.Warn("ayar dosyasi okunurken sorun", "hata", err)
+	}
+	if cfg.Token == "" && runtime.GOOS == "windows" {
+		// Masaustu kurulumu kimliksiz kurar: token gelene kadar bekle.
+		cfg = waitForToken(ctx, logger, tokenPollEvery)
+	}
+	if cfg.Token == "" {
+		logger.Error("servis baslatilamadi: gecerli token bulunamadi (zorven authtoken / service install --token)")
+		return exitConfig
+	}
+
+	serverAddr := cfg.ServerAddr
+	if serverAddr == "" || serverAddr == "localhost:8443" {
+		serverAddr = defaultServer
+	}
+
+	// Servis HICBIR yerel hedef varsaymaz: yalnizca sunucuda tanimli
+	// tunelleri (hello_ack / config_update) isler. RequestedTarget de bos
+	// kalir; boylece sunucu bu istemci icin kendiliginden tunel acmaz.
 
 	// Izin tavani yalnizca sistem ayar dosyasindaki kalici alanlardan gelir
 	// (varsayilan kapali); calisirken `zorven enable ...` ile de degisebilir.
@@ -70,14 +96,19 @@ func (p *serviceProgram) run(ctx context.Context) {
 		// Servis modunda varsayilan guvenlik: uzaktan shell ve ekran kapali
 		NoTerminal: !sysCfg.EnableTerminal,
 		NoScreen:   !sysCfg.EnableScreen,
+		// Zorven Apps: yalniz kalici yerel izin (--enable-deploy) ve Docker varsa.
+		EnableDeploy: sysCfg.EnableDeploy,
 		// Mod B (TUN) servis modunda acilabilir; ZORVEN_NO_TUN=1 ile kapatilir.
 		NoTUN: os.Getenv("ZORVEN_NO_TUN") == "1",
 	}
+	applyNodeConfig(ag, cfg, "", true)
 	ag.OnReady = func(c context.Context) { startLocalCtl(c, ag, localctl.ServiceEndpoint()) }
 
-	if err := ag.Run(ctx); err != nil {
-		slog.Error("ajan calismasi durdu", "hata", err)
+	if err := ag.Run(ctx); err != nil && ctx.Err() == nil {
+		logger.Error("ajan calismasi durdu", "hata", err)
+		return 1
 	}
+	return 0
 }
 
 func (p *serviceProgram) Stop(s service.Service) error {
@@ -89,9 +120,10 @@ func (p *serviceProgram) Stop(s service.Service) error {
 
 func getService() (service.Service, error) {
 	svcConfig := &service.Config{
-		Name:        "zorven",
+		Name: "zorven",
+		// Servis yoneticisi metinleri kurulum aninda sabitlenir (dil bagimsiz).
 		DisplayName: "Zorven Tunnel Service",
-		Description: "Zorven ters proxy ve guvenli tunel arka plan servisi.",
+		Description: "Zorven reverse proxy and secure tunnel background service.",
 		Arguments:   []string{"service", "run"},
 		// Oto-update sonrasi/beklenmedik cikista servis yoneticisi ajani
 		// yeniden baslatsin: systemd (Restart), launchd (KeepAlive), Windows SCM
@@ -119,10 +151,12 @@ func newServiceCmd() *cobra.Command {
 	}
 
 	var (
-		tokenFlag  string
-		serverFlag string
-		instTerm   bool
-		instScreen bool
+		tokenFlag   string
+		serverFlag  string
+		instTerm    bool
+		instScreen  bool
+		instDeploy  bool
+		instNoToken bool
 	)
 
 	var tokenFileFlag string
@@ -131,23 +165,38 @@ func newServiceCmd() *cobra.Command {
 		Use:     "install",
 		Short:   i18n.T("svc.cmd.install"),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// --token-file: dosya yalniz kurulum BASARILI olunca silinir (hata
+			// halinde kullanici yeniden deneyebilsin).
+			removeTok := func() {}
 			if tokenFileFlag != "" {
-				t, err := readTokenFile(tokenFileFlag)
+				t, rm, err := readTokenFileKeep(tokenFileFlag)
 				if err != nil {
 					return err
 				}
-				tokenFlag = t
+				tokenFlag, removeTok = t, rm
 			}
-			o := installOpts{token: tokenFlag, server: serverFlag, terminal: instTerm, screen: instScreen}
+			o := installOpts{token: tokenFlag, server: serverFlag, terminal: instTerm, screen: instScreen, deploy: instDeploy, noToken: instNoToken}
 			if lu, ok := detectLegacyUnit(); ok {
 				if err := migrateLegacyUnit(lu, o, true); err != nil {
 					return err
 				}
+				removeTok()
+				return nil
+			}
+			// Idempotent: kayitliysa guncelle (birimi yeniden yaz, onceki calisma
+			// durumunu koru); "already exists" hatasi vermez.
+			if s, gerr := getService(); gerr == nil && serviceInstalled(s) {
+				if err := reinstallService(o, true); err != nil {
+					return err
+				}
+				removeTok()
+				fmt.Println(i18n.T("v3.svc.updated"))
 				return nil
 			}
 			if err := installService(o); err != nil {
 				return err
 			}
+			removeTok()
 			fmt.Println(i18n.T("svc.installed"))
 			fmt.Println(i18n.T("svc.installed.hint"))
 			return nil
@@ -158,7 +207,11 @@ func newServiceCmd() *cobra.Command {
 	installCmd.Flags().BoolVar(&instTerm, "enable-terminal", false, i18n.T("svc.flag.terminal.p"))
 	installCmd.Flags().BoolVar(&instScreen, "enable-screen", false, i18n.T("svc.flag.screen.p"))
 	installCmd.Flags().StringVarP(&serverFlag, "server", "s", "", i18n.T("svc.flag.server"))
+	// Gizli: masaustu kurucusu icin; token olmadan kurar, servis kimlik bekler.
+	installCmd.Flags().BoolVar(&instNoToken, "allow-no-token", false, "install without a token (service waits for credentials)")
+	_ = installCmd.Flags().MarkHidden("allow-no-token")
 
+	var purgeUninstall bool
 	uninstallCmd := &cobra.Command{
 		PreRunE: requireAdmin,
 		Use:     "uninstall",
@@ -173,9 +226,11 @@ func newServiceCmd() *cobra.Command {
 				return fmt.Errorf("%s: %w", i18n.T("svc.err.uninstall"), err)
 			}
 			fmt.Println(i18n.T("svc.uninstalled"))
+			afterRemove(purgeUninstall)
 			return nil
 		},
 	}
+	uninstallCmd.Flags().BoolVar(&purgeUninstall, "purge", false, i18n.T("v3.svc.flag.purge"))
 
 	startCmd := &cobra.Command{
 		PreRunE: requireAdmin,
@@ -239,20 +294,31 @@ func newServiceCmd() *cobra.Command {
 			st, err := s.Status()
 			if err != nil {
 				fmt.Println(i18n.T("svc.st.unknown", err))
-				return nil
+				if errors.Is(err, service.ErrNotInstalled) {
+					return &exitError{4}
+				}
+				return &exitError{1}
 			}
+			code := 0
 			switch st {
 			case service.StatusRunning:
 				fmt.Println(i18n.T("svc.st.running"))
 			case service.StatusStopped:
 				fmt.Println(i18n.T("svc.st.stopped"))
+				code = 3 // systemctl is-active konvansiyonu: etkin degil
 			default:
 				fmt.Println(i18n.T("svc.st.other", int(st)))
+				code = 1
 			}
 			printLegacyHint()
+			if code != 0 {
+				return &exitError{code}
+			}
 			return nil
 		},
 	}
+	statusCmd.SilenceErrors = true
+	statusCmd.SilenceUsage = true
 
 	runCmd := &cobra.Command{
 		Use:    "run",
@@ -274,6 +340,10 @@ func newServiceCmd() *cobra.Command {
 type installOpts struct {
 	token, server    string
 	terminal, screen bool
+	deploy           bool
+	// noToken: token yokken de kurulur (Windows masaustu kurulumu); servis
+	// kimlik gelene kadar bekler (waitForToken).
+	noToken bool
 }
 
 // installService, kalici ayarlari sistem dosyasina yazar ve servisi kaydeder.
@@ -283,7 +353,7 @@ func installService(o installOpts) error {
 		return err
 	}
 	cfg, _ := config.Load()
-	if cfg.Token == "" {
+	if cfg.Token == "" && !o.noToken {
 		return errors.New(i18n.T("svc.err.notoken"))
 	}
 	s, err := getService()
@@ -317,13 +387,20 @@ func ensureWintunBestEffort(cfg config.Config) {
 
 // saveServiceOpts, verilen kalici ayarlari sistem ayar dosyasina yazar.
 func saveServiceOpts(o installOpts) error {
-	if o.token != "" || o.server != "" || o.terminal || o.screen {
+	// Gecersiz bicimli token'i diske yazmadan reddet.
+	if o.token != "" && !isAgentToken(strings.TrimSpace(o.token)) {
+		return errors.New(i18n.T("main.err.bad_token_format"))
+	}
+	if o.token != "" || o.server != "" || o.terminal || o.screen || o.deploy {
 		sysCfg, _ := config.LoadFile(config.SystemPath())
 		if o.terminal {
 			sysCfg.EnableTerminal = true
 		}
 		if o.screen {
 			sysCfg.EnableScreen = true
+		}
+		if o.deploy {
+			sysCfg.EnableDeploy = true
 		}
 		if o.token != "" {
 			sysCfg.Token = strings.TrimSpace(o.token)
@@ -384,12 +461,21 @@ func setAutostart(on bool) error {
 // zorven up / zorven down / zorven autostart on|off.
 func newShortcutCmds() []*cobra.Command {
 	var o installOpts
+	var upTokenFile string
 	up := &cobra.Command{
 		Use:     "up",
 		PreRunE: requireAdmin,
 		Short:   i18n.T("svc.cmd.up"),
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			removeTok := func() {}
+			if upTokenFile != "" {
+				t, rm, terr := readTokenFileKeep(upTokenFile)
+				if terr != nil {
+					return terr
+				}
+				o.token, removeTok = t, rm
+			}
 			s, err := getService()
 			if err != nil {
 				return err
@@ -404,9 +490,14 @@ func newShortcutCmds() []*cobra.Command {
 				if err := saveServiceOpts(o); err != nil {
 					return err
 				}
+				// Token'siz servis zombi olurdu: baslatmadan once dogrula.
+				if cfg, _ := config.Load(); cfg.Token == "" {
+					return errors.New(i18n.T("svc.err.notoken"))
+				}
 			} else if err := installService(o); err != nil {
 				return err
 			}
+			removeTok()
 			if err := setAutostart(true); err != nil {
 				fmt.Println(i18n.T("svc.warn.autostart"), err)
 			}
@@ -426,11 +517,12 @@ func newShortcutCmds() []*cobra.Command {
 		},
 	}
 	up.Flags().StringVarP(&o.token, "token", "t", "", i18n.T("svc.flag.token"))
+	up.Flags().StringVar(&upTokenFile, "token-file", "", i18n.T("svc.flag.tokenfile"))
 	up.Flags().StringVarP(&o.server, "server", "s", "", i18n.T("svc.flag.server443"))
 	up.Flags().BoolVar(&o.terminal, "enable-terminal", false, i18n.T("svc.flag.terminal"))
 	up.Flags().BoolVar(&o.screen, "enable-screen", false, i18n.T("svc.flag.screen"))
 
-	var remove bool
+	var remove, purgeDown bool
 	down := &cobra.Command{
 		Use:     "down",
 		PreRunE: requireAdmin,
@@ -447,6 +539,7 @@ func newShortcutCmds() []*cobra.Command {
 					return fmt.Errorf("%s: %w", i18n.T("svc.err.uninstall"), err)
 				}
 				fmt.Println(i18n.T("svc.down.removed"))
+				afterRemove(purgeDown)
 				return nil
 			}
 			fmt.Println(i18n.T("svc.down.stopped"))
@@ -454,6 +547,7 @@ func newShortcutCmds() []*cobra.Command {
 		},
 	}
 	down.Flags().BoolVar(&remove, "remove", false, i18n.T("svc.flag.remove"))
+	down.Flags().BoolVar(&purgeDown, "purge", false, i18n.T("v3.svc.flag.purge"))
 
 	autostart := &cobra.Command{
 		Use:       "autostart on|off",
@@ -477,20 +571,38 @@ func newShortcutCmds() []*cobra.Command {
 	return []*cobra.Command{up, down, autostart}
 }
 
-// readTokenFile, --token-file ile verilen dosyadan token'i okur ve dosyayi
-// siler (tek kullanimlik). Token komut satirina hic yazilmaz: diger yerel
-// islemler komut satirlarini gorebilir.
-func readTokenFile(path string) (string, error) {
+// readTokenFileKeep, --token-file ile verilen dosyadan token'i okur ve dosyayi
+// SILMEZ; basarili islemden sonra cagrilacak remove fonksiyonunu doner (tek
+// kullanimlik: token komut satirina hic yazilmaz, diger yerel islemler komut
+// satirlarini gorebilir).
+func readTokenFileKeep(path string) (string, func(), error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return "", fmt.Errorf("%s: %w", i18n.T("svc.err.tokenfile.read"), err)
+		return "", nil, fmt.Errorf("%s: %w", i18n.T("svc.err.tokenfile.read"), err)
 	}
-	_ = os.Remove(path)
 	t := strings.TrimSpace(string(b))
 	if t == "" || len(t) > 512 || strings.ContainsAny(t, " \t\r\n") {
-		return "", errors.New(i18n.T("svc.err.tokenfile.invalid"))
+		return "", nil, errors.New(i18n.T("svc.err.tokenfile.invalid"))
 	}
-	return t, nil
+	return t, func() { _ = os.Remove(path) }, nil
+}
+
+// afterRemove, servis kaldirildiktan sonra ayar dosyasinin akibetini bildirir;
+// purge ise sistem ayar dosyasini siler.
+func afterRemove(purge bool) {
+	p := config.SystemPath()
+	if _, err := os.Stat(p); err != nil {
+		return
+	}
+	if purge {
+		if err := os.Remove(p); err != nil {
+			fmt.Fprintln(os.Stderr, i18n.T("v3.svc.purge.err", p, err))
+			return
+		}
+		fmt.Println(i18n.T("v3.svc.purged", p))
+		return
+	}
+	fmt.Println(i18n.T("v3.svc.config.remains", p))
 }
 
 // openServiceLog, <sistem ayar dizini>/logs/agent.log dosyasini acar (5 MB'i
@@ -527,11 +639,22 @@ func printLegacyHint() {
 func migrateLegacyUnit(lu legacyUnit, o installOpts, startAfter bool) error {
 	o.terminal = o.terminal || lu.terminal
 	o.screen = o.screen || lu.screen
+	if err := reinstallService(o, startAfter); err != nil {
+		return err
+	}
+	fmt.Println(i18n.T("svc.legacy.upgraded"))
+	return nil
+}
+
+// reinstallService, kurulu servisi guncel biçimle yeniden kurar (idempotent
+// `service install` ve eski birim gocu icin): kalici ayarlar yazilir, acilis
+// durumu korunur, startAfter true ise servis eskiden calisiyorsa yeniden baslatilir.
+func reinstallService(o installOpts, startAfter bool) error {
 	if err := saveServiceOpts(o); err != nil {
 		return err
 	}
 	// Kaldirmadan once token'in bulundugundan emin ol: yoksa mevcut birime dokunma.
-	if cfg, _ := config.Load(); cfg.Token == "" {
+	if cfg, _ := config.Load(); cfg.Token == "" && !o.noToken {
 		return errors.New(i18n.T("svc.err.notoken"))
 	}
 	s, err := getService()
@@ -551,7 +674,6 @@ func migrateLegacyUnit(lu legacyUnit, o installOpts, startAfter bool) error {
 	if err := setAutostart(wasEnabled); err != nil {
 		fmt.Println(i18n.T("svc.warn.autostart"), err)
 	}
-	fmt.Println(i18n.T("svc.legacy.upgraded"))
 	if startAfter && wasRunning {
 		if err := s.Start(); err != nil {
 			return fmt.Errorf("%s: %w", i18n.T("svc.err.start"), err)
@@ -559,4 +681,26 @@ func migrateLegacyUnit(lu legacyUnit, o installOpts, startAfter bool) error {
 		fmt.Println(i18n.T("svc.started"))
 	}
 	return nil
+}
+
+// tokenPollEvery, kimliksiz servis bekleme dongusunun yoklama araligi.
+const tokenPollEvery = 3 * time.Second
+
+// waitForToken, ayar dosyasinda token belirene ya da ctx bitene kadar bekler
+// (kimliksiz kurulan Windows servisi). ctx biterse bos token'li ayar doner.
+func waitForToken(ctx context.Context, logger *slog.Logger, every time.Duration) config.Config {
+	logger.Info("token yok: kimlik verilene kadar bekleniyor")
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return config.Config{}
+		case <-t.C:
+			if cfg, _ := config.Load(); cfg.Token != "" {
+				logger.Info("token alindi, baglaniliyor")
+				return cfg
+			}
+		}
+	}
 }

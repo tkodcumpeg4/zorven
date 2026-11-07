@@ -79,10 +79,11 @@ func (s *Server) listMailAppPasswords(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	if list == nil {
-		list = []store.MailAppPassword{}
+	pg, okPg := pageOf(w, r)
+	if !okPg {
+		return
 	}
-	writeJSON(w, http.StatusOK, list)
+	writeJSON(w, http.StatusOK, slicePage(w, pg, list))
 }
 
 // createMailAppPassword (POST /api/v1/mail/app-passwords): {label, mailbox?}.

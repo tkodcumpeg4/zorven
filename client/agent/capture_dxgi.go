@@ -23,7 +23,14 @@ const (
 	dxgiRetryBase   = 30 * time.Second // yedekte ilk bekleme
 	dxgiRetryMax    = 4 * time.Minute  // ussel artisin tavani
 	dxgiNextTimeout = 10 * time.Millisecond
-	dxgiMaxRects    = 32 // bundan fazla dikdortgen bir sinirlayici kutuya birlestirilir
+
+	// ACCESS_LOST / cihaz kaybi (masaustu degisimi, UAC, cozunurluk degisimi)
+	// gecicidir ve genelde bir sonraki turda duplication yeniden kurulabilir.
+	// 30 sn'lik yedek beklemesi yerine kisa araliklarla (yedek GDI ile doldurulur)
+	// yeniden dene; ancak dxgiLostLimit ardisik kayiptan sonra ussel bekleme.
+	dxgiLostRetry = 250 * time.Millisecond
+	dxgiLostLimit = 20
+	dxgiMaxRects  = 32 // bundan fazla dikdortgen bir sinirlayici kutuya birlestirilir
 )
 
 // Hata siniflari: kaynak bunlari sarar (errors.Is).
@@ -67,6 +74,8 @@ type dxgiCapturer struct {
 	display int
 	primed  bool // acildiktan sonra en az bir gercek kare alindi
 	fails   int
+	lost    int  // ardisik ACCESS_LOST sayisi
+	began   bool // bu yakalayici guard.Begin cagirdi (Close'ta Clear)
 	fbUntil time.Time
 	delay   time.Duration
 
@@ -116,8 +125,11 @@ func (c *dxgiCapturer) LastError() error {
 // Close, DXGI kaynaklarini serbest birakir.
 func (c *dxgiCapturer) Close() error {
 	c.closeSrc()
-	if c.guard != nil {
+	if c.guard != nil && c.began {
+		// Yalniz kendi Begin'imizi geri al: ayni surecteki DIGER DXGI
+		// oturumlari hala calisirken sentinel silinmesin (sayac guard'da).
 		c.guard.Clear()
+		c.began = false
 	}
 	return nil
 }
@@ -148,6 +160,19 @@ func (c *dxgiCapturer) noteFail(err error) {
 	c.mu.Lock()
 	c.lastErr = err
 	c.mu.Unlock()
+	if errors.Is(err, errDXGILost) {
+		// Gecici kayip: hizli yeniden deneme (bkz. dxgiLostRetry).
+		if c.lost++; c.lost < dxgiLostLimit {
+			if c.lost >= 3 {
+				// Ilk birkac kayipta aninda yeniden dene; surerse kisa aralik
+				// (her deneme D3D cihazi kurar: pahali).
+				c.fbUntil = c.now().Add(dxgiLostRetry)
+			}
+			return
+		}
+	} else {
+		c.lost = 0
+	}
 	c.fails++
 	if c.fails >= dxgiFailLimit || errors.Is(err, errDXGIUnsupported) {
 		c.fails = 0
@@ -165,8 +190,9 @@ func (c *dxgiCapturer) CaptureHinted(display int) (*image.RGBA, []image.Rectangl
 		c.closeSrc()
 	}
 	if !c.opened {
-		if c.guard != nil {
+		if c.guard != nil && !c.began {
 			_ = c.guard.Begin() // surec ilk DXGI cagrisinda olurse sonraki acilis atlar
+			c.began = true
 		}
 		if err := c.src.Open(display, c.fb.Bounds(display)); err != nil {
 			c.src.Close()
@@ -187,6 +213,12 @@ func (c *dxgiCapturer) CaptureHinted(display int) (*image.RGBA, []image.Rectangl
 			// Henuz DXGI karesi yok (ilk kare gecikti): bu turu yedekle doldur.
 			return c.viaFallback(display)
 		}
+		// Basarili Acquire (yalniz zaman asimi): bosta ekranda da saglikli say,
+		// aksi halde hareketsiz bir ekranda sentinel hic silinmez.
+		c.lost = 0
+		if c.guard != nil {
+			c.guard.FrameOK()
+		}
 		c.setUsedFB(false)
 		return nil, nil, true, nil
 	}
@@ -196,11 +228,17 @@ func (c *dxgiCapturer) CaptureHinted(display int) (*image.RGBA, []image.Rectangl
 		return c.viaFallback(display)
 	}
 	// Basari: sayaclari sifirla.
-	c.fails, c.delay, c.primed = 0, dxgiRetryBase, true
+	c.fails, c.lost, c.delay, c.primed = 0, 0, dxgiRetryBase, true
 	if c.guard != nil {
 		c.guard.FrameOK()
 	}
 	c.setUsedFB(false)
+	// SAHIPLIK: Capturer sozlesmesi donen goruntunun cagirana ait olmasini ve
+	// sonraki cagrilarda yeniden kullanilmamasini ister; boru hatti karenin
+	// referansini sonraki turlara (lastSrc, onceki kare) tasir. Cift tampon /
+	// yalniz-kirli-bolge kopyasi bu sozlesme degismeden guvenli degildir, bu
+	// yuzden degisen karede tam kopya bilincli korunur (sunucu tarafi olcekleme
+	// ve fark hesabi bundan cok daha pahali).
 	snap := &image.RGBA{Pix: make([]byte, len(res.Img.Pix)), Stride: res.Img.Stride, Rect: res.Img.Rect}
 	copy(snap.Pix, res.Img.Pix)
 	return snap, res.Dirty, true, nil

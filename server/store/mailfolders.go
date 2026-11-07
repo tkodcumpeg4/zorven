@@ -14,6 +14,11 @@ const (
 	// MailUserFolderPrefix, mail_messages.folder icinde kullanici klasorlerini
 	// sistem klasorlerinden ('inbox', 'sent'...) ayirir: 'u:' + IMAP adi.
 	MailUserFolderPrefix = "u:"
+	// MailJunkFolderName / MailSpecialUseJunk: gelen posta dogrulamasinin (SPF/DKIM/
+	// DMARC) Onemsiz'e ayirdigi iletiler icin kullanici klasoru adi ve SPECIAL-USE
+	// niteligi. Klasor ilk Onemsiz teslimde kutu basina olusturulur (migration yok).
+	MailJunkFolderName = "Junk"
+	MailSpecialUseJunk = `\Junk`
 )
 
 var (

@@ -21,6 +21,17 @@ const wsAcceptTimeout = 20 * time.Second
 // Cagrilmadan once ServeHTTP tum kontrolleri (tunel aktif mi, IP izin listesi,
 // hiz siniri, istemci cevrimici mi) yapmis olmalidir.
 func (h *Handler) serveWebSocket(w http.ResponseWriter, r *http.Request, sess *tunnel.Session, tunnelID, tenantID string) {
+	h.serveWebSocketLog(w, r, sess, tunnelID, tenantID, true)
+}
+
+// ServeClusterWS, baska bir kume dugumunden aktarilan WebSocket'i yerel oturuma kopruler
+// (cluster.Manager.ServeWS). Istek logunu ZIYARETCIYI KARSILAYAN dugum yazar (bkz.
+// serveViaCluster); burada yazilmaz.
+func (h *Handler) ServeClusterWS(w http.ResponseWriter, r *http.Request, sess *tunnel.Session, tunnelID, tenantID string) {
+	h.serveWebSocketLog(w, r, sess, tunnelID, tenantID, false)
+}
+
+func (h *Handler) serveWebSocketLog(w http.ResponseWriter, r *http.Request, sess *tunnel.Session, tunnelID, tenantID string, doLog bool) {
 	// El sikismasi istek loguna yazilir (panel "Canli Istekler"): durum 101 ya da
 	// yerel servisin/aginin hata durumu. Baglanti suresince akan veri loglanmaz.
 	started := time.Now()
@@ -29,7 +40,10 @@ func (h *Handler) serveWebSocket(w http.ResponseWriter, r *http.Request, sess *t
 	logOnce := func() {
 		if !logged {
 			logged = true
-			h.recordWithID(tunnelID, tenantID, r, logRec, started, "")
+			if !doLog {
+				return
+			}
+			h.recordWithID(tunnelID, tenantID, false, r, logRec, started, "")
 		}
 	}
 	defer logOnce() // hata yollari; basarili el sikismasi asagida hemen yazilir

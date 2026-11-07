@@ -36,10 +36,19 @@ info:
     `full` scope".
 
     ## Pagination
-    List endpoints accept `?limit=` (default 50, max 200) and `?cursor=`. The
-    response body is a plain array; continuation is returned in headers:
-    `X-Next-Cursor`, `X-Has-More` and the RFC5988 `Link: <...>; rel="next"`.
-    If neither limit nor cursor is given, the full list is returned.
+    Most list endpoints accept `?limit=` (1-500, default 500) and `?offset=` (default 0).
+    The response body is a plain array (or the object described for that endpoint); the
+    total number of matching records is returned in `X-Total-Count`, and `X-Has-More`
+    says whether more records follow. A non-numeric or out-of-range `limit`/`offset`
+    returns `400 invalid_request`, except that a `limit` above 500 is capped at 500.
+    A few endpoints with their own limits (for example `GET /requests`, the tunnel
+    access events and `GET /admin/users`) state `limit` on the operation itself.
+
+    Clients, tunnels, hostnames and devices also keep the older opt-in cursor mode: when
+    `?cursor=` is given, items are ordered by id, `limit` defaults to 50 (max 200) and
+    continuation is returned in headers: `X-Next-Cursor`, `X-Has-More` and the RFC5988
+    `Link: <...>; rel="next"` (no `X-Total-Count`). The tunnel access-events list is
+    always cursor-based (newest first).
 
     ## Errors
     All errors share one shape:
@@ -153,7 +162,6 @@ tags:
     description: CIDR-based access rules
   - name: Analytics
     description: Request logs, subscription and usage
-
   - name: Projects
     description: "Projects and organization"
   - name: Policies
@@ -210,15 +218,26 @@ paths:
     get:
       tags: [Meta]
       summary: Available plans
-      security: []
+      description: "Authentication required (not public). Scope / access: open to API tokens; no extra scope needed."
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
       responses:
         "200":
           description: Plan list
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema:
-                type: array
-                items: { $ref: "#/components/schemas/Plan" }
+                type: object
+                required: [plans]
+                properties:
+                  plans:
+                    type: array
+                    items: { $ref: "#/components/schemas/Plan" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 
   /clients:
     get:
@@ -227,11 +246,13 @@ paths:
       description: "Scope: `clients:read`"
       parameters:
         - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
         - $ref: "#/components/parameters/Cursor"
       responses:
         "200":
           description: Client list
           headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
             X-Next-Cursor: { $ref: "#/components/headers/XNextCursor" }
             X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
@@ -318,11 +339,13 @@ paths:
       description: "Scope: `tunnels:read`"
       parameters:
         - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
         - $ref: "#/components/parameters/Cursor"
       responses:
         "200":
           description: Tunnel list
           headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
             X-Next-Cursor: { $ref: "#/components/headers/XNextCursor" }
             X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
@@ -332,6 +355,8 @@ paths:
                 items: { $ref: "#/components/schemas/Tunnel" }
         "403": { $ref: "#/components/responses/Forbidden" }
     post:
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
       tags: [Tunnels]
       summary: Create tunnel
       description: "Scope: `tunnels:write`"
@@ -347,6 +372,8 @@ paths:
                 client_id: { type: string, example: "cli_a1b2c3" }
                 target: { type: string, example: "http://localhost:8000" }
                 hostname_id: { type: string, description: "Optionally bind to an existing hostname" }
+                no_domain: { type: boolean, default: false, description: "If true, no hostname is assigned automatically: the tunnel has no address of its own and is meant only as a path-route target. Has no effect when `hostname_id` is given." }
+                ttl_sec: { type: integer, example: 3600, description: "Makes the tunnel temporary: it is removed in the background once this many seconds have passed (60-86400, otherwise `422 invalid_ttl`). 0, a negative value or omitted = permanent. The response carries `ephemeral: true` and `expires_at`." }
       responses:
         "201":
           description: Created
@@ -410,11 +437,13 @@ paths:
       description: "Scope: `hostnames:read`"
       parameters:
         - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
         - $ref: "#/components/parameters/Cursor"
       responses:
         "200":
           description: Hostname list
           headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
             X-Next-Cursor: { $ref: "#/components/headers/XNextCursor" }
             X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
@@ -424,6 +453,8 @@ paths:
                 items: { $ref: "#/components/schemas/Hostname" }
         "403": { $ref: "#/components/responses/Forbidden" }
     post:
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
       tags: [Hostnames]
       summary: Create platform hostname
       description: |
@@ -466,6 +497,8 @@ paths:
 
   /hostnames/custom:
     post:
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
       tags: [Hostnames]
       summary: Attach a custom (customer) domain
       description: "Scope: `hostnames:write`. Returns DNS verification instructions."
@@ -548,14 +581,28 @@ paths:
       tags: [IP Allowlist]
       summary: List IP rules
       description: "Scope: `ip_allowlist:read`"
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+        - { name: tunnel_id, in: query, schema: { type: string }, description: "Only the rules that apply to this tunnel: its own rules plus the tenant-wide ones (`tunnel_id` null)" }
       responses:
         "200":
           description: Rule list
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema:
-                type: array
-                items: { $ref: "#/components/schemas/IPRule" }
+                type: object
+                required: [rules, count]
+                properties:
+                  rules:
+                    type: array
+                    items: { $ref: "#/components/schemas/IPRule" }
+                  count:
+                    type: integer
+                    description: "Number of rules in this response (page); the total is in the `X-Total-Count` header"
         "403": { $ref: "#/components/responses/Forbidden" }
     post:
       tags: [IP Allowlist]
@@ -634,6 +681,8 @@ paths:
       responses:
         "200":
           description: Log list
+          headers:
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema:
@@ -730,14 +779,14 @@ paths:
       summary: MCP call log
       description: "Scope: `analytics:read`. Metadata only (method, tool, status, duration); arguments and results are never stored."
       parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
         - { name: id, in: path, required: true, schema: { type: string } }
         - { name: tool, in: query, schema: { type: string } }
         - { name: status, in: query, schema: { type: string, enum: [ok, error, denied, rate_limited] } }
         - { name: window, in: query, schema: { type: string, enum: ["1h", "24h", "7d", "30d"] } }
-        - { name: limit, in: query, schema: { type: integer, maximum: 200 } }
-        - { name: offset, in: query, schema: { type: integer } }
       responses:
-        "200": { description: "Calls, newest first" }
+        "200": { description: "Calls, newest first", headers: { X-Has-More: { $ref: "#/components/headers/XHasMore" } } }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /tunnels/{id}/mcp/stats:
@@ -799,10 +848,15 @@ paths:
       summary: Active door grants (IPs)
       description: "Scope: `tunnels:read`. Grants that are neither expired nor revoked."
       parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
         - { name: id, in: path, required: true, schema: { type: string } }
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema:
@@ -898,9 +952,15 @@ paths:
       tags: [Projects]
       summary: "List projects"
       description: "Scope / access: open to API tokens."
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema: { type: array, items: { $ref: "#/components/schemas/Project" } }
@@ -1016,7 +1076,15 @@ paths:
           description: OK
           content:
             application/json:
-              schema: { type: object, additionalProperties: true }
+              schema:
+                type: object
+                required: [ticket, expires_in, max_fps, max_resolution, control_allowed]
+                properties:
+                  ticket: { type: string, description: "Single-use opaque ticket; pass it as `?ticket=` when opening the `GET /clients/{id}/screen` WebSocket" }
+                  expires_in: { type: integer, description: "Seconds until the ticket expires" }
+                  max_fps: { type: integer, maximum: 60, description: "Frame-rate ceiling the server enforces for this ticket: the plan value (30; 60 on Team and Enterprise), or 30 when the plan value is 0 or unknown. The agent may lower it further; the effective value is reported as `caps.max_fps` on the WebSocket" }
+                  max_resolution: { type: string, description: "Maximum stream resolution for the plan: `720p` or `1080p`" }
+                  control_allowed: { type: boolean, description: "Whether the caller may control the remote screen (mouse and keyboard, clipboard, file transfer, shortcuts). Only tenant owners/admins and platform admins can; members and service accounts are view-only" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "422": { $ref: "#/components/responses/ValidationError" }
@@ -1415,13 +1483,13 @@ paths:
         required: true
         content:
           application/json:
-            schema: { type: object, properties: { waf: { type: object, additionalProperties: true }, geo: { type: object, additionalProperties: true }, bot: { $ref: "#/components/schemas/TunnelSecurity/properties/bot" }, rate: { $ref: "#/components/schemas/TunnelSecurity/properties/rate" } } }
+            schema: { type: object, properties: { waf: { type: object, additionalProperties: true }, geo: { type: object, additionalProperties: true }, bot: { $ref: "#/components/schemas/TunnelSecurity/properties/bot" }, rate: { $ref: "#/components/schemas/TunnelSecurity/properties/rate" }, trusted: { $ref: "#/components/schemas/TunnelSecurity/properties/trusted" } } }
       responses:
         "200":
           description: OK
           content:
             application/json:
-              schema: { type: object, properties: { ok: { type: boolean }, waf: { type: object, additionalProperties: true }, geo: { type: object, additionalProperties: true }, bot: { $ref: "#/components/schemas/TunnelSecurity/properties/bot" }, rate: { $ref: "#/components/schemas/TunnelSecurity/properties/rate" } } }
+              schema: { type: object, properties: { ok: { type: boolean }, waf: { type: object, additionalProperties: true }, geo: { type: object, additionalProperties: true }, bot: { $ref: "#/components/schemas/TunnelSecurity/properties/bot" }, rate: { $ref: "#/components/schemas/TunnelSecurity/properties/rate" }, trusted: { $ref: "#/components/schemas/TunnelSecurity/properties/trusted" } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -1504,9 +1572,15 @@ paths:
       tags: [Tunnels]
       summary: "MCP API keys"
       description: "Scope / access: dashboard session only. Also closed to the OAuth `full` scope (`403 full_scope_excluded`)."
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema: { type: object, additionalProperties: true }
@@ -1571,9 +1645,15 @@ paths:
       tags: [Hostnames]
       summary: "Path routes"
       description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens)."
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema: { type: object, properties: { fqdn: { type: string }, routes: { type: array, items: { $ref: "#/components/schemas/PathRoute" } } } }
@@ -1695,9 +1775,15 @@ paths:
       tags: [Policies]
       summary: "List policies"
       description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens)."
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema: { type: object, properties: { policies: { type: array, items: { $ref: "#/components/schemas/Policy" } }, count: { type: integer } } }
@@ -1819,11 +1905,15 @@ paths:
       summary: "Device inventory"
       description: "Scope / access: open to API tokens."
       parameters:
-        - { $ref: "#/components/parameters/Limit" }
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
         - { $ref: "#/components/parameters/Cursor" }
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema: { type: array, items: { $ref: "#/components/schemas/Device" } }
@@ -1888,9 +1978,15 @@ paths:
       tags: [Network]
       summary: "Private network resources"
       description: "Scope / access: open to API tokens."
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema: { type: object, properties: { resources: { type: array, items: { type: object, additionalProperties: true } } } }
@@ -1932,9 +2028,15 @@ paths:
       tags: [Network]
       summary: "Zorven Net nodes"
       description: "Scope / access: open to API tokens."
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema: { type: object, properties: { nodes: { type: array, items: { type: object, additionalProperties: true } } } }
@@ -1959,9 +2061,15 @@ paths:
       tags: [Network]
       summary: "Port shares"
       description: "Scope / access: open to API tokens."
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema: { type: object, properties: { shares: { type: array, items: { $ref: "#/components/schemas/NetShare" } }, count: { type: integer } } }
@@ -2037,9 +2145,15 @@ paths:
       tags: [Network]
       summary: "TUN zone rules"
       description: "Scope / access: open to API tokens. Requires the owner/admin role."
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema: { type: object, properties: { rules: { type: array, items: { $ref: "#/components/schemas/TunRule" } }, zone: { type: string } } }
@@ -2210,9 +2324,15 @@ paths:
       tags: [Captcha]
       summary: "List CAPTCHA sites"
       description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens). Writes need owner/admin; reads are open to members. Returns today and last-7-days counters (`stats`) per site; the secret is never returned."
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema: { type: object, properties: { sites: { type: array, items: { type: object, properties: { id: { type: string }, name: { type: string }, site_key: { type: string }, secret: { type: string, description: "zcsec_..., only on create/rotate" }, domains: { type: array, items: { type: string } }, difficulty: { type: integer, minimum: 14, maximum: 22 }, pass_cookie: { type: object, properties: { enabled: { type: boolean }, ttl_minutes: { type: integer, minimum: 5, maximum: 43200 } } }, created_at: { type: string, format: date-time }, updated_at: { type: string, format: date-time }, stats: { type: object, properties: { today: { $ref: "#/components/schemas/CaptchaTotals" }, last_7_days: { $ref: "#/components/schemas/CaptchaTotals" } } } } } } } }
@@ -2291,9 +2411,15 @@ paths:
       tags: [Secrets]
       summary: "List secrets (no values)"
       description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens)."
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema: { type: object, properties: { secrets: { type: array, items: { $ref: "#/components/schemas/Secret" } }, count: { type: integer } } }
@@ -2336,15 +2462,23 @@ paths:
       tags: [Tokens]
       summary: "List API tokens"
       description: "Scope / access: dashboard session only. Also closed to the OAuth `full` scope (`403 full_scope_excluded`)."
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema: { type: object, properties: { tokens: { type: array, items: { $ref: "#/components/schemas/APIToken" } }, count: { type: integer } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
     post:
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
       tags: [Tokens]
       summary: "Create an API token"
       description: "The token plaintext is returned once, in this response only. Requires a Pro+ plan. Scope / access: dashboard session only. Also closed to the OAuth `full` scope (`403 full_scope_excluded`)."
@@ -2398,9 +2532,15 @@ paths:
       tags: [Tokens]
       summary: "List API tokens (alias)"
       description: "Scope / access: dashboard session only. Also closed to the OAuth `full` scope (`403 full_scope_excluded`)."
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema: { type: object, properties: { tokens: { type: array, items: { $ref: "#/components/schemas/APIToken" } }, count: { type: integer } } }
@@ -2460,9 +2600,15 @@ paths:
       tags: [Team]
       summary: "Team members"
       description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens)."
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema: { type: object, properties: { members: { type: array, items: { $ref: "#/components/schemas/TeamMember" } }, count: { type: integer } } }
@@ -2471,6 +2617,8 @@ paths:
 
   /team/members/invite:
     post:
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
       tags: [Team]
       summary: "Invite a member"
       description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens). Requires the owner/admin role."
@@ -2553,9 +2701,15 @@ paths:
       tags: [Team]
       summary: "Member's client tokens"
       description: "Scope / access: dashboard session only. Also closed to the OAuth `full` scope (`403 full_scope_excluded`). Requires the owner/admin role."
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema: { type: array, items: { $ref: "#/components/schemas/Client" } }
@@ -2685,10 +2839,15 @@ paths:
       summary: "List messages"
       description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens)."
       parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
         - { name: box, in: query, schema: { type: string }, description: "folder" }
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema: { type: array, items: { $ref: "#/components/schemas/MailMessage" } }
@@ -2753,9 +2912,15 @@ paths:
       tags: [Mail]
       summary: "Folders"
       description: "Scope / access: dashboard session or OAuth `full` scope (closed to API tokens)."
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema: { type: object, properties: { folders: { type: array, items: { type: string } } } }
@@ -2805,10 +2970,15 @@ paths:
       summary: "Mail app passwords"
       description: "Scope / access: dashboard session only. Also closed to the OAuth `full` scope (`403 full_scope_excluded`)."
       parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
         - { name: mailbox, in: query, schema: { type: string } }
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema: { type: object, additionalProperties: true }
@@ -2899,9 +3069,15 @@ paths:
       tags: ["Platform admin"]
       summary: "List tenants"
       description: "Scope / access: real platform admins only (dashboard session or OAuth `full`); otherwise `403 forbidden`."
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema: { type: array, items: { type: object, additionalProperties: true } }
@@ -2913,9 +3089,15 @@ paths:
       tags: ["Platform admin"]
       summary: "All clients"
       description: "Scope / access: real platform admins only (dashboard session or OAuth `full`); otherwise `403 forbidden`."
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema: { type: array, items: { type: object, additionalProperties: true } }
@@ -2927,9 +3109,15 @@ paths:
       tags: ["Platform admin"]
       summary: "All hostnames"
       description: "Scope / access: real platform admins only (dashboard session or OAuth `full`); otherwise `403 forbidden`."
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema: { type: array, items: { type: object, additionalProperties: true } }
@@ -2941,9 +3129,15 @@ paths:
       tags: ["Platform admin"]
       summary: "Abuse reports"
       description: "Scope / access: real platform admins only (dashboard session or OAuth `full`); otherwise `403 forbidden`."
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
       responses:
         "200":
           description: OK
+          headers:
+            X-Total-Count: { $ref: "#/components/headers/XTotalCount" }
+            X-Has-More: { $ref: "#/components/headers/XHasMore" }
           content:
             application/json:
               schema: { type: object, properties: { reports: { type: array, items: { type: object, additionalProperties: true } } } }
@@ -3188,6 +3382,12 @@ components:
             full: "Full access: same authority as the dashboard session (step-up required)"
 
   parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9_:.-]+$' }
+      description: "Retry safety for critical POSTs. 1-128 chars ([A-Za-z0-9_-:.]), valid for 24 hours per tenant. Same key + same request: the first response is replayed with `Idempotent-Replayed: true`. Same key + different request: `422 idempotency_key_mismatch`. First request still running: `409 idempotency_in_progress`. 5xx and 401/403/408/409/425/429 responses are not stored (the key can be retried)."
     PathID:
       name: id
       in: path
@@ -3197,8 +3397,14 @@ components:
       name: limit
       in: query
       required: false
-      schema: { type: integer, default: 50, maximum: 200 }
-      description: Page size (opt-in pagination)
+      schema: { type: integer, minimum: 1, maximum: 500, default: 500 }
+      description: "Page size (1-500, default 500)"
+    Offset:
+      name: offset
+      in: query
+      required: false
+      schema: { type: integer, minimum: 0, default: 0 }
+      description: "Number of records to skip (pagination)"
     Cursor:
       name: cursor
       in: query
@@ -3207,6 +3413,9 @@ components:
       description: The X-Next-Cursor value from the previous response
 
   headers:
+    XTotalCount:
+      description: "Total number of records matching the filter"
+      schema: { type: integer }
     XNextCursor:
       description: Next page cursor (if any)
       schema: { type: string }
@@ -3277,10 +3486,23 @@ components:
       type: object
       properties:
         id: { type: string, example: "tun_x9y8z7" }
+        project_id: { type: string, description: "Project the tunnel belongs to (omitted when empty)" }
         client_id: { type: string, example: "cli_a1b2c3" }
         target: { type: string, example: "http://localhost:8000" }
         enabled: { type: boolean }
         created_at: { type: string, format: date-time }
+        proto: { type: string, enum: [http, tcp, udp], description: "Protocol the tunnel carries" }
+        exposure: { type: string, enum: [auto, port, sni, private], description: "How the tunnel is reached: `auto` (HTTP), `port` (reserved TCP/UDP port), `sni` (port 443 SNI) or `private` (private resource, never exposed to the internet)" }
+        public_port: { type: integer, description: "Assigned public port in reserved-port mode (omitted when none)" }
+        public_host: { type: string, description: "Public host name; the tunnel address is `public_host:public_port` (omitted when none)" }
+        frozen: { type: boolean, description: "true while a platform admin has suspended the tunnel (omitted when false)" }
+        ephemeral: { type: boolean, description: "true for a temporary tunnel created with `ttl_sec` (omitted when false)" }
+        expires_at: { type: string, format: date-time, description: "When a temporary tunnel is removed (omitted for permanent tunnels)" }
+        expired_at: { type: string, format: date-time, description: "When a temporary tunnel expired and stopped serving traffic; it is kept (24 hours by default) and visitors get `410 tunnel_expired` meanwhile (omitted until it expires)" }
+        delete_at: { type: string, format: date-time, description: "When the expired temporary tunnel and its automatic platform name are deleted (`expired_at` plus the retention period)" }
+        private_name: { type: string, description: "Name of a private resource, e.g. `db.internal` (only when `exposure` is `private`)" }
+        app_id: { type: string, description: "Owning app of an app-managed tunnel (`zapp://` target; omitted otherwise)" }
+        app_service: { type: string, description: "Service of that app the tunnel points to (omitted otherwise)" }
         hostnames:
           type: array
           items: { $ref: "#/components/schemas/Hostname" }
@@ -3387,9 +3609,18 @@ components:
         bandwidth_limit_bytes: { type: [integer, "null"] }
         bandwidth_normal_mbps: { type: integer }
         bandwidth_throttled_mbps: { type: integer }
+        max_screen_streams: { type: [integer, "null"], description: "Concurrent remote-screen streams; null = unlimited" }
+        screen_max_fps: { type: integer, description: "Maximum frame rate of remote-screen streams (frames per second)" }
+        log_retention_days: { type: integer, description: "Days request logs and tunnel sign-in events are kept" }
         max_members: { type: [integer, "null"] }
         has_api_access: { type: boolean }
         has_ip_allowlist: { type: boolean }
+        extra_device_price: { type: integer, description: "USD cents per extra device per month (Team add-on; 0 = not offered)" }
+        extra_gb_price: { type: integer, description: "USD cents per extra GB of monthly traffic (Team add-on; 0 = not offered)" }
+        max_projects: { type: [integer, "null"], description: "Projects per organization, default project included; null = unlimited" }
+        max_owned_orgs: { type: [integer, "null"], description: "Organizations one user can own; null = unlimited" }
+        max_short_names: { type: [integer, "null"], description: "Global short names (`<name>.<platform>`) per tenant; 0 = none; null = unlimited" }
+        max_reserved_ports: { type: [integer, "null"], description: "Reserved TCP/UDP ports per tenant; 0 = none; null = unlimited" }
 
     Subscription:
       type: object
@@ -3540,10 +3771,16 @@ components:
           description: "Rate limit (per tunnel+IP, per window). Pro+."
           properties:
             enabled: { type: boolean }
-            requests: { type: integer, minimum: 1, maximum: 100000, default: 120, description: "Requests per window (1-100000, default 120)" }
+            requests: { type: integer, minimum: 1, maximum: 1000000, default: 120, description: "Requests per window (1-1000000, default 120)" }
             window_seconds: { type: integer, minimum: 1, maximum: 3600, default: 60, description: "Window length in seconds (1-3600, default 60)" }
             action: { type: string, enum: [block, challenge], default: block, description: "Action when exceeded (default block)" }
             exclude_paths: { type: array, maxItems: 32, items: { type: string }, description: "Excluded paths (max 32, `*` only at the end)" }
+        trusted:
+          type: object
+          description: "Trusted IPs: requests from these addresses skip the WAF, bot verification and rate limit (access rules still apply). All plans."
+          properties:
+            cidrs: { type: array, maxItems: 100, items: { type: string }, description: "Single IP (normalized to /32 or /128) or CIDR; max 100. Ranges broader than /8 (IPv4) or /32 (IPv6) are rejected with 422." }
+            skip_geo: { type: boolean, default: false, description: "Also skip the Geo (country) rule (default false)" }
 
     PathRoute:
       type: object

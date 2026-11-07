@@ -1,6 +1,6 @@
 // Arayuz sozluklerinin tutarliligini denetler:  node frontend/i18n_check.js
 //  - tr/en anahtar kumeleri ayni, hicbir deger bos degil
-//  - {param} yer tutucular uc dilde ayni
+//  - {param} yer tutucular dort dilde ayni
 //  - index.html'deki data-i18n* ve app.js'teki t('...') anahtarlari tanimli
 const fs = require('fs');
 const path = require('path');
@@ -27,7 +27,7 @@ for (const k of base) {
 const html = fs.readFileSync(path.join(dist, 'index.html'), 'utf8');
 const js = fs.readFileSync(path.join(dist, 'app.js'), 'utf8');
 const used = new Set();
-for (const m of html.matchAll(/data-i18n(?:-html|-placeholder|-title)?="([^"]+)"/g)) used.add(m[1]);
+for (const m of html.matchAll(/data-i18n(?:-html|-placeholder|-title|-aria)?="([^"]+)"/g)) used.add(m[1]);
 for (const m of js.matchAll(/\bt\(\s*'([^']+)'/g)) used.add(m[1]);
 for (const m of js.matchAll(/key:\s*'([^']+)'/g)) used.add(m[1]);
 for (const m of js.matchAll(/t\(\s*\w+(?:\.\w+)?\s*\?\s*'([^']+)'\s*:\s*'([^']+)'/g)) { used.add(m[1]); used.add(m[2]); }

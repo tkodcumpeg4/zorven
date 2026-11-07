@@ -19,22 +19,29 @@ import (
 // karsiliklari icerir. Pencere kapatilinca uygulama NORMAL sekilde kapanir.
 type tray struct{}
 
+// isReady: macOS'ta tepsi yok (trayEnabled=false), gizleme yolu kullanilmaz.
+func (t *tray) isReady() bool { return false }
+
 func (a *App) startTray()             {}
 func (t *tray) update(_ agent.Status) {}
 func (t *tray) stop()                 {}
 func (t *tray) relabel()              {}
+func (t *tray) refreshShare()         {}
+func (t *tray) setUpdate(_ string)    {}
 
 // trayEnabled, main.go'nun kapatma davranisini platforma gore ayarlamasi icin.
 const trayEnabled = false
 
 func (a *App) ShowWindow() {
 	if a.ctx != nil {
+		a.visible.Store(true)
 		wailsrt.WindowShow(a.ctx)
 	}
 }
 
 func (a *App) HideWindow() {
 	if a.ctx != nil {
+		a.visible.Store(false)
 		wailsrt.WindowHide(a.ctx)
 	}
 }

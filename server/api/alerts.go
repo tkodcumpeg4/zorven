@@ -95,6 +95,9 @@ func (s *Server) setTunnelAlert(w http.ResponseWriter, r *http.Request) {
 		WindowMin:    body.WindowMin,
 		MinRequests:  body.MinRequests,
 		NotifyEmail:  email,
+		// Uyari e-postasi, uyariyi kuran kullanicinin dilinde gider (kayitli tercih > panel
+		// dili cerezi > Accept-Language). Sinyal yoksa "" -> mevcut dil korunur.
+		NotifyLang: s.mailLangHint(r, actingUserID(r)),
 	}); err != nil {
 		s.fail(w, err)
 		return

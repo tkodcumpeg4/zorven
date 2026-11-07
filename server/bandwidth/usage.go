@@ -19,10 +19,13 @@ const (
 
 // UsageEvent, veri duzleminde olusan bir bant genisligi tuketim olayi.
 type UsageEvent struct {
-	TenantID  string
-	Type      UsageType
-	BytesIn   int64
-	BytesOut  int64
+	TenantID string
+	Type     UsageType
+	BytesIn  int64
+	BytesOut int64
+	// App, olayin uygulama tunelinden (zapp://) geldigini belirtir; trafik
+	// toplam sayaca ek olarak uygulama sayacina da yazilir (0106).
+	App       bool
 	Timestamp time.Time
 }
 
@@ -33,4 +36,13 @@ type UsageEvent struct {
 type UsageRecorder interface {
 	Record(ctx context.Context, event UsageEvent) error
 	Close() error
+}
+
+// AppTargetPrefix, Zorven Apps tunel hedef onegi (apps.TargetScheme ile ayni;
+// import dongusu olmasin diye burada tekrarlanir).
+const AppTargetPrefix = "zapp://"
+
+// IsAppTarget, tunel hedefinin uygulama yonetimli (zapp://) olup olmadigi.
+func IsAppTarget(target string) bool {
+	return len(target) >= len(AppTargetPrefix) && target[:len(AppTargetPrefix)] == AppTargetPrefix
 }

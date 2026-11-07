@@ -14,7 +14,7 @@ const plistLabel = "com.rpshell.client"
 func (m *Manager) plistPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", fmt.Errorf("ev dizini bulunamadi: %w", err)
+		return "", fmt.Errorf("home directory not found: %w", err)
 	}
 	return filepath.Join(home, "Library", "LaunchAgents", plistLabel+".plist"), nil
 }
@@ -29,7 +29,7 @@ func (m *Manager) enabled() (bool, error) {
 		return false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("LaunchAgent okunamadi: %w", err)
+		return false, fmt.Errorf("could not read LaunchAgent: %w", err)
 	}
 	return true, nil
 }
@@ -40,7 +40,7 @@ func (m *Manager) enable() error {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("LaunchAgents dizini olusturulamadi: %w", err)
+		return fmt.Errorf("could not create LaunchAgents directory: %w", err)
 	}
 
 	// RunAtLoad: oturum acilisinda baslat.
@@ -54,6 +54,7 @@ func (m *Manager) enable() error {
 	<key>ProgramArguments</key>
 	<array>
 		<string>` + m.ExecPath + `</string>
+		<string>--hidden</string>
 	</array>
 	<key>RunAtLoad</key>
 	<true/>
@@ -61,7 +62,7 @@ func (m *Manager) enable() error {
 </plist>
 `
 	if err := os.WriteFile(path, []byte(plist), 0o644); err != nil {
-		return fmt.Errorf("LaunchAgent yazilamadi: %w", err)
+		return fmt.Errorf("could not write LaunchAgent: %w", err)
 	}
 	return nil
 }
@@ -72,7 +73,7 @@ func (m *Manager) disable() error {
 		return err
 	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("LaunchAgent silinemedi: %w", err)
+		return fmt.Errorf("could not remove LaunchAgent: %w", err)
 	}
 	return nil
 }

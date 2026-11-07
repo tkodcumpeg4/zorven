@@ -21,6 +21,9 @@ const (
 	keyPurposeOAuth     = "zorven-oauth-as-v1"
 	keyPurposeBot       = "zorven-bot-v1"
 	keyPurposeCaptcha   = "zorven-captcha-v1"
+	// Hesap silme: web servisi (Better Auth beforeDelete) -> Go ic ucunun HMAC anahtari
+	// (api/account.go; web tarafi web/server/lib/account-internal.ts ayni turetimi yapar).
+	keyPurposeAccount = "zorven-account-internal-v1"
 )
 
 // devVisitorSecret yalniz yerel gelistirmede (platform domain yok/localhost) ve

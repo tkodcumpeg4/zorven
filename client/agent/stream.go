@@ -78,7 +78,12 @@ func resolveStreamAddr(target, dest string) (string, error) {
 
 // handleStreamOpen, yerel TCP/UDP hedefe baglanip akisi kopruler.
 func (cs *clientSession) handleStreamOpen(m protocol.StreamOpen) {
-	addr, err := resolveStreamAddr(cs.targetFor(m.TunnelID), m.Dest)
+	tgt := cs.targetFor(m.TunnelID)
+	if tgt == zappUnavailable {
+		cs.sendStreamAck(m.ReqID, protocol.CodeLocalUnreachable, "uygulama calismiyor")
+		return
+	}
+	addr, err := resolveStreamAddr(tgt, m.Dest)
 	if err != nil {
 		cs.sendStreamAck(m.ReqID, protocol.CodeLocalUnreachable, err.Error())
 		return
@@ -94,9 +99,17 @@ func (cs *clientSession) handleStreamOpen(m protocol.StreamOpen) {
 		network = "udp"
 	}
 
-	conn, err := streamDialContext(context.Background(), network, addr, streamDialTimeout)
+	// Dial iptal edilebilir: dial surerken stream_close gelirse bosuna beklenmez
+	// ve acilmis baglanti sizmaz.
+	dctx, endDial := cs.beginDial(m.ReqID, context.Background())
+	defer endDial()
+	conn, err := streamDialContext(dctx, network, addr, streamDialTimeout)
 	if err != nil {
 		cs.sendStreamAck(m.ReqID, protocol.CodeLocalUnreachable, "yerel hedefe baglanilamadi: "+err.Error())
+		return
+	}
+	if dctx.Err() != nil { // dial sirasinda stream_close geldi
+		conn.Close()
 		return
 	}
 
@@ -104,6 +117,8 @@ func (cs *clientSession) handleStreamOpen(m protocol.StreamOpen) {
 	// yollar; akis kayitli degilse routeStreamData o baytlari sessizce dusurur
 	// (eszamanli baglantilarda aralikli 19/20 hatasinin kok nedeni).
 	cs.registerStream(m.ReqID, conn)
+	cs.noteConn(m.ReqID, m.TunnelID)
+	cs.tm.request(m.TunnelID)
 	if m.Proto == protocol.ProtoUDP {
 		cs.streamMu.Lock()
 		cs.streamTunnels[m.ReqID] = m.TunnelID
@@ -133,6 +148,7 @@ func (cs *clientSession) handleStreamOpen(m protocol.StreamOpen) {
 					}
 					break
 				}
+				cs.tm.addOut(m.TunnelID, n)
 			}
 			if rerr != nil {
 				break
@@ -146,8 +162,9 @@ func (cs *clientSession) handleStreamOpen(m protocol.StreamOpen) {
 }
 
 // routeStreamData, sunucudan gelen (ziyaretci -> yerel) baytlari/datagrami yerel
-// baglantiya yazar. FrameStreamData ve FrameDatagram ayni yolu kullanir (bagli
-// UDP soketinde Write bir datagram uretir).
+// baglantiya iletir. UDP: tek datagram, yazim bloklamaz (kisa son tarih, hata =
+// dusurme). TCP: SINIRLI yazma kuyrugu + yazim zaman asimi; okuma dongusu bir
+// akisin yavasligi yuzunden bloklanmaz, tasmada yalniz o akis kapatilir.
 func (cs *clientSession) routeStreamData(_ uint8, reqID uint64, payload []byte) {
 	cs.streamMu.Lock()
 	conn, ok := cs.streamConns[reqID]
@@ -156,16 +173,53 @@ func (cs *clientSession) routeStreamData(_ uint8, reqID uint64, payload []byte) 
 	if !ok {
 		return
 	}
-	if _, err := conn.Write(payload); err != nil {
-		if tunnelID != "" {
+	cs.tm.addIn(cs.tunnelOfConn(reqID), len(payload))
+	if tunnelID != "" { // UDP akisi
+		_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+		if _, err := conn.Write(payload); err != nil {
 			cs.udpDrops.add(tunnelID, 1) // UDP datagrami yerel servise yazilamadi
+			cs.closeStream(reqID)
 		}
-		cs.closeStream(reqID)
+		return
 	}
+	cs.streamMu.Lock()
+	q := cs.streamQ[reqID]
+	if q == nil {
+		if cs.streamQ == nil {
+			cs.streamQ = make(map[uint64]*writeQueue)
+		}
+		q = newConnWriteQueue(conn, func(err error) {
+			cs.log.Warn("akis yazma kuyrugu basarisiz, akis kapatiliyor", "req_id", reqID, "hata", err)
+			_ = cs.sendControl(context.Background(), protocol.StreamClose{Type: protocol.TypeStreamClose, ReqID: reqID}, protocol.TypeStreamClose)
+			cs.closeStream(reqID)
+		})
+		cs.streamQ[reqID] = q
+	}
+	cs.streamMu.Unlock()
+	_ = q.push(payload)
 }
 
+// streamCloseLinger, ziyaretci tarafi kapatinca (stream_close) yerel hedefe
+// kalan baytlar yazilip yazma yonu kapatildiktan sonra, yerel servisin son
+// yanitini okumasi icin taninan sure (TCP yarim kapama).
+const streamCloseLinger = 3 * time.Second
+
+// handleStreamClose, sunucu akisi kapattiginda: bekleyen dial'i iptal eder; TCP'de
+// kuyrugu bosaltip yazma yonunu kapatir (CloseWrite) ve kisa sure yerel yanitin
+// akmasina izin verir, sonra tam kapatir. UDP ve kuyrugu olmayan akis aninda kapanir.
 func (cs *clientSession) handleStreamClose(reqID uint64) {
-	cs.closeStream(reqID)
+	cs.cancelDial(reqID)
+	cs.streamMu.Lock()
+	q := cs.streamQ[reqID]
+	_, isUDP := cs.streamTunnels[reqID]
+	_, exists := cs.streamConns[reqID]
+	cs.streamMu.Unlock()
+	if q == nil || isUDP || !exists {
+		cs.closeStream(reqID)
+		return
+	}
+	q.finish() // kalan yazimlar bitince CloseWrite
+	time.AfterFunc(streamCloseLinger, func() { cs.closeStream(reqID) })
 }
 
 func (cs *clientSession) sendStreamAck(reqID uint64, code, msg string) {
@@ -185,8 +239,14 @@ func (cs *clientSession) closeStream(reqID uint64) {
 	conn, ok := cs.streamConns[reqID]
 	delete(cs.streamConns, reqID)
 	delete(cs.streamTunnels, reqID)
+	q := cs.streamQ[reqID]
+	delete(cs.streamQ, reqID)
 	cs.streamMu.Unlock()
+	if q != nil {
+		q.stop()
+	}
 	if ok {
+		cs.forgetConn(reqID)
 		conn.Close()
 	}
 }
@@ -200,7 +260,12 @@ func (cs *clientSession) closeAllStreams() {
 	}
 	cs.streamConns = make(map[uint64]net.Conn)
 	cs.streamTunnels = make(map[uint64]string)
+	qs := cs.streamQ
+	cs.streamQ = nil
 	cs.streamMu.Unlock()
+	for _, q := range qs {
+		q.stop()
+	}
 	for _, c := range conns {
 		c.Close()
 	}

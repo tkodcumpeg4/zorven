@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tkodcumpeg4/zorven/client/i18n"
 	"github.com/tkodcumpeg4/zorven/shared/protocol"
 )
 
@@ -164,6 +165,12 @@ func (s *screen2Session) captureLoop(ctx context.Context, slot *s2Slot) error {
 	next := time.Now()
 	timer := time.NewTimer(0)
 	defer timer.Stop()
+	var (
+		retry     captureRetry
+		bw        boundsWatch
+		idle      idlePacer
+		degDetail string // viewer'a son bildirilen kisitlama kodu ("" => yok)
+	)
 	if s.vid != nil {
 		go s.vid.encodeLoop(ctx) // H.264 modu (screen2_video.go)
 	}
@@ -175,6 +182,8 @@ func (s *screen2Session) captureLoop(ctx context.Context, slot *s2Slot) error {
 			case <-ctx.Done():
 				return nil
 			case <-timer.C:
+			case <-s.wake:
+				idle.Active() // girdi/anahtar kare: bosta yavaslamayi bitir
 			}
 		} else if ctx.Err() != nil {
 			return nil
@@ -224,8 +233,58 @@ func (s *screen2Session) captureLoop(ctx context.Context, slot *s2Slot) error {
 			if s.onAttach != nil {
 				s.onAttach()
 			}
-			if img, hint, err = s.captureOnce(); err != nil {
-				return fmt.Errorf("ekran yakalanamadi: %w", err)
+			img, hint, err = s.captureOnce()
+		}
+		if err != nil {
+			// Gecici hata (masaustu degisimi, cozunurluk degisimi, surucu
+			// sifirlama, UAC): oturumu oldurmek yerine ussel geri cekilmeyle
+			// yeniden dene; son kare izleyicide kalir.
+			wait, giveUp := retry.Fail(time.Now())
+			s.logWarn("ekran yakalanamadi, yeniden denenecek", "hata", err, "bekleme", wait, "giveUp", giveUp)
+			if giveUp {
+				return fmt.Errorf("%s", i18n.T("scr.err.capture_gave_up", err.Error()))
+			}
+			detail := protocol.DegradedCaptureRetry
+			if secureDesktopActive() {
+				detail = protocol.DegradedSecureDesktop // UAC / kilit ekrani
+			}
+			if detail != degDetail {
+				degDetail = detail
+				s.status(protocol.InputStateDegraded, detail)
+			}
+			// Gecersiz kalan monitor indeksi: birinciye dus.
+			if n := s.cap.NumDisplays(); n > 0 && (s.display < 0 || s.display >= n) {
+				s.display = 0
+				s.notifyDisplay()
+				bw.Reset()
+			}
+			for _, st := range layers {
+				st.prev, st.needKey = nil, true
+			}
+			next = time.Now().Add(wait)
+			continue
+		}
+		if retry.Succeed() {
+			// Toparlandi: yakalayici yeniden kuruldu, hicbir eski ipucuna guvenme.
+			for _, st := range layers {
+				st.prev, st.needKey = nil, true
+				st.acc = hintAccum{full: true}
+			}
+			if degDetail != "" {
+				degDetail = ""
+				s.status(protocol.InputStateDegraded, "")
+			}
+		}
+		// Servis modu: yardimci guvenli masaustu nedeniyle son kareyi tekrar
+		// ediyorsa izleyiciye bildir (goruntu donuk gorunmesin).
+		if dg, ok := s.cap.(interface{ Degraded() bool }); ok {
+			want := ""
+			if dg.Degraded() {
+				want = protocol.DegradedSecureDesktop
+			}
+			if want != degDetail {
+				degDetail = want
+				s.status(protocol.InputStateDegraded, want)
 			}
 		}
 		s.met.observe(stCapture, time.Since(t0))
@@ -243,7 +302,8 @@ func (s *screen2Session) captureLoop(ctx context.Context, slot *s2Slot) error {
 			}
 			if !needKey || s.lastSrc == nil {
 				s.met.addIdle()
-				next = start.Add(s.pace(layers, time.Now()))
+				idle.Idle()
+				next = start.Add(idle.Interval(s.pace(layers, time.Now())))
 				if now := time.Now(); next.Before(now) {
 					next = now
 				}
@@ -252,6 +312,23 @@ func (s *screen2Session) captureLoop(ctx context.Context, slot *s2Slot) error {
 			img = s.lastSrc // anahtar kare: son goruntuyle (ipucu bos => fark yok)
 		}
 		s.lastSrc = img
+		if hint.ok && len(hint.rects) == 0 {
+			// anahtar kare turu: degisim yok
+		} else {
+			idle.Active()
+		}
+
+		// Cozunurluk/DPI/yerlesim degisimi: girdi eslemesi ve imlec katmani
+		// icin sinirlari yenile.
+		if _, changed := bw.Check(time.Now(), img.Rect.Dx(), img.Rect.Dy(),
+			func() image.Rectangle { return s.cap.Bounds(s.display) }); changed {
+			s.notifyDisplay()
+		}
+
+		// Ipucunu TUM katmanlara biriktir (vadesi gelmeyenler dahil).
+		for _, st := range layers {
+			st.acc.Add(hint)
+		}
 
 		job := &s2Job{}
 		var included []*layerState
@@ -266,8 +343,9 @@ func (s *screen2Session) captureLoop(ctx context.Context, slot *s2Slot) error {
 			if !s.layered {
 				width = s.maxWidth
 			}
+			lh := st.acc.Take() // bu katmanin son isleminden beri BIRIKMIS ipucu
 			t1 := time.Now()
-			frame := st.scaler.ScaleHinted(img, width, hint)
+			frame := st.scaler.ScaleHinted(img, width, lh)
 			s.met.observe(stScale, time.Since(t1))
 			if frame.Rect.Dx() > 65535 || frame.Rect.Dy() > 65535 {
 				return errors.New("ekran cozunurlugu screen2 icin cok buyuk")
@@ -279,7 +357,7 @@ func (s *screen2Session) captureLoop(ctx context.Context, slot *s2Slot) error {
 				st.prev = nil
 			}
 			t2 := time.Now()
-			dirty, tx, ty := diffFrame(st.prev, frame, hint, img.Rect.Dx(), img.Rect.Dy()) // prev nil => hepsi kirli
+			dirty, tx, ty := diffFrame(st.prev, frame, lh, img.Rect.Dx(), img.Rect.Dy()) // prev nil => hepsi kirli
 			s.met.observe(stDiff, time.Since(t2))
 			st.prev = frame
 			st.nextDue = advanceDue(st.nextDue, start, s.ctl.LayerInterval(st.spec.ID, start))

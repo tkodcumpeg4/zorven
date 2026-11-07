@@ -8,6 +8,12 @@ import (
 	"github.com/tkodcumpeg4/zorven/server/ipfilter"
 )
 
+// PLAN KAPISI (karar 2026-10-30, Ek 1 madde 3): kapi olusturmada (createIPRule) ve kurali yeniden
+// etkinlestirmede (updateIPRule enabled=true) uygulanir. Plan dusunce MEVCUT kurallar uygulanmaya
+// DEVAM eder (ipfilter.CheckAllowed plan sormaz; kapatmak tuneli sessizce acardi); yeni kural ve
+// yeniden etkinlestirme kapali kalir (pasife alma ve aciklama duzenleme plansiz serbesttir);
+// SILME (deleteIPRule) HER ZAMAN acik kalir. Test: plan_gate_test.go.
+
 // listIPRules, kiraciya ait IP izin listesi kurallarini listeler.
 func (s *Server) listIPRules(w http.ResponseWriter, r *http.Request) {
 	if !requireScope(w, r, ScopeIPAllowRead) {
@@ -24,11 +30,16 @@ func (s *Server) listIPRules(w http.ResponseWriter, r *http.Request) {
 		tunnelID = &q
 	}
 
-	rules, err := s.Store.ListIPRules(r.Context(), tenantID, tunnelID)
+	pg, ok := pageOf(w, r)
+	if !ok {
+		return
+	}
+	rules, total, err := s.Store.ListIPRulesPage(r.Context(), tenantID, tunnelID, pg)
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
+	setPageTotals(w, pg, len(rules), total)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"rules": rules,
@@ -156,7 +167,8 @@ func (s *Server) updateIPRule(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, rule)
 }
 
-// deleteIPRule, IP izin kuralini siler.
+// deleteIPRule, IP izin kuralini siler. Plan ozelligi KONTROL EDILMEZ: plani dusen kiraci
+// kurallarini her zaman silebilmeli (aksi halde artik duzenleyemedigi kuralda takili kalir).
 func (s *Server) deleteIPRule(w http.ResponseWriter, r *http.Request) {
 	if !requireScope(w, r, ScopeIPAllowWrite) {
 		return

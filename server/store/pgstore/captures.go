@@ -83,7 +83,7 @@ func (s *Store) GetCapture(ctx context.Context, tenantID, id string) (*reqlog.Ca
 
 // DeleteTenantCaptures, kiracinin tum yakalamalarini siler.
 func (s *Store) DeleteTenantCaptures(ctx context.Context, tenantID string) error {
-	_, err := s.pool.Exec(ctx, `DELETE FROM request_captures WHERE tenant_id = $1`, tenantID)
+	_, err := s.execLong(ctx, `DELETE FROM request_captures WHERE tenant_id = $1`, tenantID)
 	return err
 }
 

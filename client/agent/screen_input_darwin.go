@@ -119,8 +119,35 @@ func applyInput(msg protocol.ScreenInput, rect displayRect) inputResult {
 		return macKey(msg, true)
 	case "keyup":
 		return macKey(msg, false)
+	case protocol.InputKindText:
+		return macText(msg.Key)
 	}
 	return inputResult{State: protocol.InputStateOK}
+}
+
+// macText, metni CGEvent Unicode dizgisiyle yazar (IME/emoji/yapistirma).
+// UTF-16 birimleri en fazla 16'lik parcalar halinde bir tus olayina eklenir.
+func macText(text string) inputResult {
+	units := textUTF16(text, protocol.MaxScreenText)
+	res := inputResult{State: protocol.InputStateOK}
+	const chunk = 16
+	for len(units) > 0 {
+		n := min(chunk, len(units))
+		if n < len(units) && units[n-1] >= 0xD800 && units[n-1] < 0xDC00 {
+			n-- // vekil cifti bolunmesin
+		}
+		part := units[:n]
+		units = units[n:]
+		for _, down := range []bool{true, false} {
+			ev := cgEventCreateKey(0, 0, down)
+			if ev == 0 {
+				return macPost(0)
+			}
+			cgEventKeySetUnicode(ev, uint64(len(part)), &part[0])
+			res = res.merge(macPost(ev))
+		}
+	}
+	return res
 }
 
 func macPost(ev uintptr) inputResult {

@@ -47,12 +47,31 @@ type helperServer struct {
 	b          helperBackend
 	onActivity func() // her istekte (bosta kalma zamanlayicisi icin)
 
-	last     *image.RGBA
-	lastDisp int
+	// lastImg: monitor basina son TAM goruntu (tum oturumlar paylasir).
+	lastImg map[int]*image.RGBA
+	// sess: istemci oturumu basina kirli bolge birikimi. Yakalayicinin (DXGI)
+	// ipucu "onceki yakalamadan beri" anlamindadir; birden cok oturum ayni
+	// yakalayiciyi cektiginde bir oturumun tukettigi ipucu digerlerine
+	// KAYBOLMASIN diye her oturum kendi birikimini tutar.
+	sess map[uint32]*helperSessState
 }
 
+// helperSessState, bir istemci oturumunun helper tarafindaki durumu.
+type helperSessState struct {
+	disp    int
+	full    bool              // oturumun canvas'i taban gerektiriyor: tam kare gonder
+	pending []image.Rectangle // gonderilmemis degisen bolgeler (kaynak koordinati)
+}
+
+// helperPendingMax: birikim bu sayiyi asarsa tam kareye dus.
+const helperPendingMax = 2048
+
+// Cap istegi bayraklari (hmCapReq, oturum anahtarindan sonra).
+const capReqResync byte = 1 << 0 // oturumun canvas'i bozuldu: tam kare gonder
+
 func serveHelper(rw io.ReadWriter, b helperBackend, onActivity func()) error {
-	s := &helperServer{b: b, onActivity: onActivity, lastDisp: -1}
+	s := &helperServer{b: b, onActivity: onActivity,
+		lastImg: map[int]*image.RGBA{}, sess: map[uint32]*helperSessState{}}
 	for {
 		typ, p, err := readFrame(rw)
 		if err != nil {
@@ -71,7 +90,13 @@ func serveHelper(rw io.ReadWriter, b helperBackend, onActivity func()) error {
 		case hmCapReq:
 			r := rbuf{b: p}
 			d := r.i32()
-			respTyp, resp = hmCapResp, s.capture(d, r.err)
+			// Eski servis yalniz monitoru yollar: anahtar 0, bayrak yok.
+			var key uint32
+			var flags byte
+			if r.err == nil && len(r.b) >= 5 {
+				key, flags = r.u32(), r.u8()
+			}
+			respTyp, resp = hmCapResp, s.capture(d, key, flags, r.err)
 		case hmInputReq:
 			respTyp, resp = hmInputResp, s.input(p)
 		case hmClipReq:
@@ -96,10 +121,22 @@ func (s *helperServer) info() []byte {
 	return b.Bytes()
 }
 
-func (s *helperServer) capture(d int, perr error) []byte {
+func (s *helperServer) capture(d int, key uint32, flags byte, perr error) []byte {
 	if perr != nil {
 		return encodeErr("bad request")
 	}
+	st := s.sess[key]
+	if st == nil {
+		if len(s.sess) > 64 { // sizinti korumasi
+			s.sess = map[uint32]*helperSessState{}
+		}
+		st = &helperSessState{disp: d, full: true}
+		s.sess[key] = st
+	}
+	if flags&capReqResync != 0 || st.disp != d {
+		st.disp, st.full, st.pending = d, true, nil
+	}
+
 	img, hint, hinted, err := s.b.CaptureHinted(d)
 	if err != nil {
 		// Masaustu degismis olabilir (UAC, kilit): yeniden baglan ve bir kez daha dene.
@@ -107,43 +144,69 @@ func (s *helperServer) capture(d int, perr error) []byte {
 		img, hint, hinted, err = s.b.CaptureHinted(d)
 	}
 	c := capResp{Bounds: s.b.Bounds(d), Displays: s.b.NumDisplays(), Method: s.b.Method()}
-	if err != nil {
+	degraded := false
+	switch {
+	case err != nil:
 		// Guvenli masaustu (UAC/kilit ekrani) kullanici oturumundan yakalanamaz:
-		// servise son kareyi tekrar ettirir (degraded bayragi); hic kare yoksa hata.
-		if s.last != nil && s.lastDisp == d {
-			c.Flags = capFlagHinted | capFlagUnchang | capFlagDegraded
-			c.W, c.H = s.last.Rect.Dx(), s.last.Rect.Dy()
-			return encodeCapOK(c)
+		// son kare tekrarlanir (degraded bayragi); hic kare yoksa hata.
+		if s.lastImg[d] == nil {
+			return encodeErr(err.Error())
 		}
-		return encodeErr(err.Error())
-	}
-	if hinted && img == nil {
-		if s.last == nil || s.lastDisp != d {
+		degraded = true
+	case hinted && img == nil:
+		if s.lastImg[d] == nil {
 			return encodeErr("no baseline frame")
 		}
-		c.Flags = capFlagHinted | capFlagUnchang
-		c.W, c.H = s.last.Rect.Dx(), s.last.Rect.Dy()
-		return encodeCapOK(c)
-	}
-	if img == nil {
+	case img == nil:
 		return encodeErr("empty frame")
-	}
-	s.last, s.lastDisp = img, d
-	c.W, c.H = img.Rect.Dx(), img.Rect.Dy()
-	full := image.Rect(img.Rect.Min.X, img.Rect.Min.Y, img.Rect.Max.X, img.Rect.Max.Y)
-	rects := []image.Rectangle{full}
-	if hinted {
-		c.Flags |= capFlagHinted
-		rects = rects[:0]
-		for _, r := range hint {
-			if r = r.Canon().Intersect(full); !r.Empty() {
-				rects = append(rects, r)
+	default:
+		s.lastImg[d] = img
+		// Bu monitoru izleyen TUM oturumlarin birikimine ekle.
+		for _, o := range s.sess {
+			if o.disp != d || o.full {
+				continue
+			}
+			if !hinted {
+				o.full, o.pending = true, nil
+				continue
+			}
+			o.pending = append(o.pending, hint...)
+			if len(o.pending) > helperPendingMax {
+				o.full, o.pending = true, nil
 			}
 		}
+		if !hinted { // st de dahil (yukarida full oldu)
+			st.full = true
+		}
+	}
+
+	last := s.lastImg[d]
+	c.W, c.H = last.Rect.Dx(), last.Rect.Dy()
+	if degraded {
+		c.Flags |= capFlagDegraded
+	}
+	full := image.Rect(last.Rect.Min.X, last.Rect.Min.Y, last.Rect.Max.X, last.Rect.Max.Y)
+	if st.full {
+		st.full, st.pending = false, nil
+		c.Rects = []image.Rectangle{full.Sub(last.Rect.Min)}
+		c.Pix = [][]byte{copyRect(last, full)}
+		return encodeCapOK(c) // hintsiz tam kare
+	}
+	c.Flags |= capFlagHinted
+	var rects []image.Rectangle
+	for _, r := range st.pending {
+		if r = r.Canon().Intersect(full); !r.Empty() {
+			rects = append(rects, r)
+		}
+	}
+	st.pending = nil
+	if len(rects) == 0 {
+		c.Flags |= capFlagUnchang
+		return encodeCapOK(c)
 	}
 	for _, r := range rects {
-		c.Rects = append(c.Rects, r.Sub(img.Rect.Min))
-		c.Pix = append(c.Pix, copyRect(img, r))
+		c.Rects = append(c.Rects, r.Sub(last.Rect.Min))
+		c.Pix = append(c.Pix, copyRect(last, r))
 	}
 	return encodeCapOK(c)
 }

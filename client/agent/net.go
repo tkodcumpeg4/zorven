@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/tkodcumpeg4/zorven/client/wgnet"
 	"github.com/tkodcumpeg4/zorven/shared/protocol"
@@ -66,7 +67,7 @@ func (a *Agent) startNet(ctx context.Context, cs *clientSession) *wgnet.Node {
 		return nil
 	}
 	n := wgnet.NewNode(a.Log, csTransport{cs}, key, deviceHostname())
-	if h, _, err := net.SplitHostPort(a.ServerAddr); err == nil {
+	if h, _, err := net.SplitHostPort(a.serverAddr()); err == nil {
 		n.ServerHost = h
 	}
 	n.DisableDirect = n.DisableDirect || a.NoP2P
@@ -126,14 +127,14 @@ func (a *Agent) serveNetAccess(ctx context.Context, n *wgnet.Node, ac NetAccessS
 	}
 	dial := func(c context.Context) (net.Conn, error) { return n.DialShare(c, target) }
 	if proto == "udp" {
-		pc, err := net.ListenPacket("udp", ac.Local)
+		pc, err := listenPacketRetry(ctx, "udp", ac.Local)
 		if err != nil {
 			a.netEvent("dinlenemedi: " + err.Error())
 			return
 		}
 		go wgnet.ServeUDP(ctx, pc, dial, nil)
 	} else {
-		ln, err := net.Listen("tcp", ac.Local)
+		ln, err := listenRetry(ctx, "tcp", ac.Local)
 		if err != nil {
 			a.netEvent("dinlenemedi: " + err.Error())
 			return
@@ -141,4 +142,44 @@ func (a *Agent) serveNetAccess(ctx context.Context, n *wgnet.Node, ac NetAccessS
 		go wgnet.ServeTCP(ctx, ln, dial, nil)
 	}
 	a.netEvent("erisim: " + target + " -> " + ac.Local)
+}
+
+// Yeniden dinleme: yeniden baglanmada eski dinleyici henuz birakilmamis olabilir
+// (adres kullanimda). Kisa artan beklemeyle birkac kez denenir.
+var (
+	listenTries   = 5
+	listenBackoff = 100 * time.Millisecond
+	listenBackMax = time.Second
+)
+
+func retryListen[T any](ctx context.Context, f func() (T, error)) (T, error) {
+	var zero T
+	wait := listenBackoff
+	var err error
+	for i := 0; i < listenTries; i++ {
+		var v T
+		if v, err = f(); err == nil {
+			return v, nil
+		}
+		if i == listenTries-1 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return zero, ctx.Err()
+		case <-time.After(wait):
+		}
+		if wait *= 2; wait > listenBackMax {
+			wait = listenBackMax
+		}
+	}
+	return zero, err
+}
+
+func listenRetry(ctx context.Context, network, addr string) (net.Listener, error) {
+	return retryListen(ctx, func() (net.Listener, error) { return net.Listen(network, addr) })
+}
+
+func listenPacketRetry(ctx context.Context, network, addr string) (net.PacketConn, error) {
+	return retryListen(ctx, func() (net.PacketConn, error) { return net.ListenPacket(network, addr) })
 }

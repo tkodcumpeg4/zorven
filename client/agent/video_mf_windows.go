@@ -9,6 +9,8 @@ import (
 	"syscall"
 	"time"
 	"unsafe"
+
+	"golang.org/x/sys/windows"
 )
 
 // Windows Media Foundation H.264 kodlayici (COM, CGO'suz, ek kurulum yok).
@@ -50,6 +52,10 @@ const (
 	vtSampleAddBuffer     = 42
 	vtSampleSetTime       = 36
 	vtSampleSetDuration   = 38
+
+	vtAttrGetBlobSize = 14
+	vtAttrGetBlob     = 15
+	vtMftOutCurType   = 18 // IMFTransform::GetOutputCurrentType
 
 	vtBufLock      = 3
 	vtBufUnlock    = 4
@@ -115,6 +121,7 @@ var (
 	procMFCreateMemoryBuffer = modMfplat.NewProc("MFCreateMemoryBuffer")
 	procMFTEnumEx            = modMfplat.NewProc("MFTEnumEx")
 	procCoInitializeEx       = modOle32.NewProc("CoInitializeEx")
+	procCoUninitialize       = modOle32.NewProc("CoUninitialize")
 	procCoCreateInstance     = modOle32.NewProc("CoCreateInstance")
 	procCoTaskMemFree        = modOle32.NewProc("CoTaskMemFree")
 )
@@ -133,6 +140,7 @@ var (
 	mfMTFrameRate   = guid(0xc459a2e8, 0x3d2c, 0x4e44, 0xb1, 0x32, 0xfe, 0xe5, 0x15, 0x6c, 0x7b, 0xb0)
 	mfMTPixelAspect = guid(0xc6376a1e, 0x8d0a, 0x4027, 0xbe, 0x45, 0x6d, 0x9a, 0x0a, 0xd3, 0x9b, 0xb6)
 	mfMTInterlace   = guid(0xe2724bb8, 0xe676, 0x4806, 0xb4, 0xb2, 0xa8, 0xd6, 0xef, 0xb4, 0x4c, 0xcd)
+	mfMTSeqHeader   = guid(0x3c036de7, 0x3ad0, 0x4c9e, 0x92, 0x16, 0xee, 0x6d, 0x6a, 0xc2, 0x1c, 0xb3)
 	mfMTMpeg2Prof   = guid(0xad76a80b, 0x2d5c, 0x4e0b, 0xb3, 0x75, 0x64, 0xe5, 0x20, 0x13, 0x70, 0x36)
 
 	mfTransformAsync       = guid(0xf81a699a, 0x649a, 0x497d, 0x8c, 0x73, 0x29, 0xf8, 0xfe, 0xd6, 0xad, 0x7a)
@@ -205,9 +213,15 @@ var (
 	mfStartErr  error
 )
 
-// coInitMTA, bu thread icin COM'u MTA olarak baslatir (ikinci cagri S_FALSE;
-// farkli kip RPC_E_CHANGED_MODE -- ikisi de yok sayilir).
-func coInitMTA() { mfDLL(procCoInitializeEx, 0, 0) }
+// coInitMTA, bu thread icin COM'u MTA olarak baslatir. Basari (S_OK ya da
+// S_FALSE) ise true: her basari bir CoUninitialize ile eslenmelidir. Farkli
+// kip (RPC_E_CHANGED_MODE) basarisizdir ve eslenmez.
+func coInitMTA() bool {
+	return !mfFailed(mfDLL(procCoInitializeEx, 0, 0))
+}
+
+// videoCOMThreads, platVideoThreadInit'in COM'u basarili baslattigi thread'ler.
+var videoCOMThreads sync.Map
 
 func mfStartup() error {
 	mfStartOnce.Do(func() {
@@ -223,7 +237,21 @@ func mfStartup() error {
 }
 
 // platVideoThreadInit, kodlama goroutine'inin OS thread'inde COM'u baslatir.
-func platVideoThreadInit() { coInitMTA() }
+// Cagiran goroutine runtime.LockOSThread ile thread'e bagli olmali.
+func platVideoThreadInit() {
+	if coInitMTA() {
+		videoCOMThreads.Store(windows.GetCurrentThreadId(), true)
+	}
+}
+
+// platVideoThreadDone, platVideoThreadInit'i geri alir (CoUninitialize). MFShutdown
+// BILINCLI cagrilmaz: MFStartup surec basina bir kez yapilir ve baska oturumlarin
+// kodlayicilari hala kullanabilir.
+func platVideoThreadDone() {
+	if _, ok := videoCOMThreads.LoadAndDelete(windows.GetCurrentThreadId()); ok {
+		mfDLL(procCoUninitialize)
+	}
+}
 
 type mfEncoder struct {
 	name   string
@@ -240,6 +268,39 @@ type mfEncoder struct {
 	outSample   mfObj
 	outBuf      mfObj
 	needInput   int
+
+	// Girdi ornek havuzu: her karede MFCreateMemoryBuffer/Sample yerine
+	// yeniden kullanim (yalniz MFT hicbir referans tutmuyorsa).
+	inPool [3]mfInSlot
+	inIdx  int
+
+	seqHdr []byte // MF_MT_MPEG_SEQUENCE_HEADER (Annex-B SPS+PPS), bulunduysa
+}
+
+// mfInSlot, yeniden kullanilabilir bir girdi ornegi + tamponu.
+type mfInSlot struct {
+	s, buf mfObj
+	size   int
+}
+
+func (m *mfInSlot) free() {
+	m.s.release()
+	m.buf.release()
+	m.size = 0
+}
+
+// exclusive, ornegin/tamponun yalniz bizde oldugunu (MFT tutmuyor) referans
+// sayacindan anlar: AddRef donusu sample icin 2 (havuz + yoklama), tampon icin
+// 3 (havuz + ornek + yoklama) olmali. Emin degilsek false (yeni ornek acilir).
+func (m *mfInSlot) exclusive() bool {
+	if !m.s.ok() || !m.buf.ok() {
+		return false
+	}
+	ns := m.s.call(1) // AddRef
+	m.s.call(2)       // Release
+	nb := m.buf.call(1)
+	m.buf.call(2)
+	return uint32(ns) == 2 && uint32(nb) == 3
 }
 
 type mftOutputDataBuffer struct {
@@ -259,7 +320,9 @@ type mfVariant struct {
 }
 
 func platNewVideoEncoder(w, h, fps, bps int, preferSW bool) (videoEncoder, error) {
-	coInitMTA()
+	// COM, cagiran thread'de platVideoThreadInit ile zaten baslatilmistir
+	// (kodlama goroutine'i ve yetenek yoklamasi); burada tekrar baslatmak
+	// CoUninitialize dengesini bozardi.
 	if err := mfStartup(); err != nil {
 		return nil, err
 	}
@@ -468,6 +531,9 @@ func (e *mfEncoder) Close() {
 	}
 	e.outBuf.release()
 	e.outSample.release()
+	for i := range e.inPool {
+		e.inPool[i].free()
+	}
 	e.evGen.release()
 	e.codec.release()
 	e.mft.release()
@@ -477,35 +543,74 @@ func (e *mfEncoder) Close() {
 	}
 }
 
-// inputSample, NV12 verisinden MF ornegi olusturur.
+// inputSample, NV12 verisinden MF ornegi olusturur. Dondurulen ornek HAVUZA
+// aittir: cagiran Release ETMEMELIDIR (Close havuzu serbest birakir).
 func (e *mfEncoder) inputSample(nv12 []byte, ts time.Duration) (mfObj, error) {
-	var bp unsafe.Pointer
-	if r := mfDLL(procMFCreateMemoryBuffer, uintptr(len(nv12)), uintptr(unsafe.Pointer(&bp))); mfFailed(r) || bp == nil {
-		return mfObj{}, mfErr("MFCreateMemoryBuffer", r)
+	slot := &e.inPool[e.inIdx]
+	e.inIdx = (e.inIdx + 1) % len(e.inPool)
+	if !(slot.size >= len(nv12) && slot.exclusive()) {
+		slot.free()
+		var bp unsafe.Pointer
+		if r := mfDLL(procMFCreateMemoryBuffer, uintptr(len(nv12)), uintptr(unsafe.Pointer(&bp))); mfFailed(r) || bp == nil {
+			return mfObj{}, mfErr("MFCreateMemoryBuffer", r)
+		}
+		buf := mfObj{bp}
+		var sp unsafe.Pointer
+		if r := mfDLL(procMFCreateSample, uintptr(unsafe.Pointer(&sp))); mfFailed(r) || sp == nil {
+			buf.release()
+			return mfObj{}, mfErr("MFCreateSample", r)
+		}
+		smp := mfObj{sp}
+		if r := smp.call(vtSampleAddBuffer, uintptr(buf.p)); mfFailed(r) {
+			smp.release()
+			buf.release()
+			return mfObj{}, mfErr("AddBuffer", r)
+		}
+		slot.s, slot.buf, slot.size = smp, buf, len(nv12)
 	}
-	buf := mfObj{bp}
-	defer buf.release()
 	var data unsafe.Pointer
 	var mx, cur uint32
-	if r := buf.call(vtBufLock, uintptr(unsafe.Pointer(&data)), uintptr(unsafe.Pointer(&mx)), uintptr(unsafe.Pointer(&cur))); mfFailed(r) || data == nil {
+	if r := slot.buf.call(vtBufLock, uintptr(unsafe.Pointer(&data)), uintptr(unsafe.Pointer(&mx)), uintptr(unsafe.Pointer(&cur))); mfFailed(r) || data == nil {
+		slot.free()
 		return mfObj{}, mfErr("buffer.Lock", r)
 	}
 	if int(mx) < len(nv12) {
-		buf.call(vtBufUnlock)
+		slot.buf.call(vtBufUnlock)
+		slot.free()
 		return mfObj{}, errors.New("MF tamponu kucuk")
 	}
 	copy(unsafe.Slice((*byte)(data), len(nv12)), nv12)
-	buf.call(vtBufUnlock)
-	buf.call(vtBufSetCurLen, uintptr(len(nv12)))
-	var sp unsafe.Pointer
-	if r := mfDLL(procMFCreateSample, uintptr(unsafe.Pointer(&sp))); mfFailed(r) || sp == nil {
-		return mfObj{}, mfErr("MFCreateSample", r)
+	slot.buf.call(vtBufUnlock)
+	slot.buf.call(vtBufSetCurLen, uintptr(len(nv12)))
+	slot.s.call(vtSampleSetTime, uintptr(uint64(ts.Nanoseconds()/100)))
+	slot.s.call(vtSampleSetDuration, uintptr(uint64(e.frmDur)))
+	return slot.s, nil
+}
+
+// SequenceHeader, kodlayicinin cikis tipindeki MF_MT_MPEG_SEQUENCE_HEADER'i
+// (Annex-B SPS+PPS) doner; yoksa nil. Akis icinde SPS/PPS vermeyen kodlayicilar
+// icin kullanilir. Bulunursa onbelleklenir.
+func (e *mfEncoder) SequenceHeader() []byte {
+	if len(e.seqHdr) > 0 {
+		return e.seqHdr
 	}
-	s := mfObj{sp}
-	s.call(vtSampleAddBuffer, uintptr(buf.p))
-	s.call(vtSampleSetTime, uintptr(uint64(ts.Nanoseconds()/100)))
-	s.call(vtSampleSetDuration, uintptr(uint64(e.frmDur)))
-	return s, nil
+	var tp unsafe.Pointer
+	if mfFailed(e.mft.call(vtMftOutCurType, 0, uintptr(unsafe.Pointer(&tp)))) || tp == nil {
+		return nil
+	}
+	t := mfObj{tp}
+	defer t.release()
+	var n uint32
+	if mfFailed(t.call(vtAttrGetBlobSize, uintptr(unsafe.Pointer(&mfMTSeqHeader)), uintptr(unsafe.Pointer(&n)))) || n == 0 || n > 4096 {
+		return nil
+	}
+	buf := make([]byte, n)
+	var got uint32
+	if mfFailed(t.call(vtAttrGetBlob, uintptr(unsafe.Pointer(&mfMTSeqHeader)), uintptr(unsafe.Pointer(&buf[0])), uintptr(n), uintptr(unsafe.Pointer(&got)))) || got == 0 || got > n {
+		return nil
+	}
+	e.seqHdr = buf[:got]
+	return e.seqHdr
 }
 
 // readSample, ornegin icerigini Go dilimine kopyalar.
@@ -599,11 +704,10 @@ func (e *mfEncoder) Encode(nv12 []byte, ts time.Duration, forceIDR bool) ([]byte
 	if forceIDR {
 		e.setCodec(&capForceKeyFrame, 1)
 	}
-	s, err := e.inputSample(nv12, ts)
+	s, err := e.inputSample(nv12, ts) // havuz ornegi: Release edilmez
 	if err != nil {
 		return nil, err
 	}
-	defer s.release()
 	if e.async {
 		return e.encodeAsync(s)
 	}

@@ -1,5 +1,9 @@
 <script setup lang="ts">
 import { dateLocale } from '~/plugins/i18n'
+import {
+  DEFAULT_TTL_SEC, TTL_PRESETS_SEC, checkTunnelName, isExpiringSoon, isValidTtl, normalizeTarget,
+  randomEphemeralName, remainingLabel, remainingMs, tunnelUrl, usedTunnelLabels,
+} from '~/lib/ephemeral'
 import type { Tunnel, Client, Hostname, TunnelAccessMode, TunnelAccessInput, IPAllowlistRule, TunnelProto, TunnelExposure, TunnelReplica, TunnelMetricsResp, TCPLiveStats, TCPStatMinute, TunnelLBConfig, LBBackendStatus, LBStrategy, TunnelUDPConfig, UDPLiveStats, UDPStatMinute, GameStatus, TunnelDoor, DoorGrant, AccessEvent, AccessEventSummary } from '~/types/api'
 // TrafficPolicy/TrafficConfig useApi üzerinden kullanılıyor; burada form state yerel tiptir.
 
@@ -22,10 +26,11 @@ const platformHost = computed(() => {
   return host.split('.').slice(-2).join('.')
 })
 
-const tunnels = ref<Tunnel[]>([])
+const pager = usePagedList<Tunnel>(p => api.pageTunnels(p))
+const tunnels = pager.items
 const clients = ref<Client[]>([])
 const hostnames = ref<Hostname[]>([])
-const pending = ref(true)
+const pending = pager.loading
 const saving = ref(false)
 const formError = ref('')
 
@@ -48,26 +53,24 @@ const namesOf = (tn: Tunnel) => (tn.hostnames ?? []).map(h => h.fqdn)
 const unattachedHostnames = computed(() => hostnames.value.filter(h => !h.tunnel_id))
 
 onMounted(async () => {
-  let tns: Tunnel[] = []
   try {
-    const [t1, c, h] = await Promise.all([
-      api.listTunnels(),
+    // Istemci/alan adi: form acilir listeleri icin tam liste (limit=500); tunel listesi sayfali.
+    const [c, h] = await Promise.all([
       api.listClients(),
       api.listHostnames(),
     ])
-    tns = t1
-    tunnels.value = t1
     clients.value = c
     hostnames.value = h
     if (clients.value[0]) form.client_id = clients.value[0].id
   } catch (e) {
     // Başarısız yükleme sonsuz spinner bırakmasın: hata göster, spinner'ı kapat.
     toast.error(hostnameError(e, t('tunnels.loadFailed')))
-  } finally {
-    pending.value = false
   }
-  // Erişim koruması rozetlerini arka planda doldur (hata sessizce yutulur).
-  void Promise.all(tns.map(async (tn) => {
+})
+
+// Erişim koruması rozetlerini görünen sayfa için arka planda doldur (hata sessizce yutulur).
+watch(tunnels, (tns) => {
+  void Promise.all(tns.filter(tn => !(tn.id in protectedMap)).map(async (tn) => {
     try {
       const a = await api.getTunnelAccess(tn.id)
       protectedMap[tn.id] = a.mode !== 'none' && a.enabled
@@ -279,21 +282,17 @@ async function refreshUDPStats(tunnelId: string) {
     udpSeries.value = r.series || []
   } catch { /* bir sonraki turda tekrar */ }
 }
-let rawTimer: ReturnType<typeof setInterval> | undefined
-onMounted(() => {
-  rawTimer = setInterval(() => {
-    if (document.hidden || !accessTunnel.value) return
-    const tn = accessTunnel.value
-    if (tn.proto !== 'tcp' && tn.proto !== 'udp') return
-    if (settingsTab.value === 'raw') {
-      if (tn.proto === 'tcp') void loadTCP(tn.id, true)
-      else void refreshUDPStats(tn.id)
-    } else if (settingsTab.value === 'metrics') {
-      void loadMetrics(tn.id, true)
-    }
-  }, 10000)
-})
-onBeforeUnmount(() => { if (rawTimer) clearInterval(rawTimer) })
+// 10 sn yoklama (olay yok); sekme gizliyken durur, hatada ussel bekleme.
+useLiveRefresh(async () => {
+  const tn = accessTunnel.value
+  if (!tn || (tn.proto !== 'tcp' && tn.proto !== 'udp')) return
+  if (settingsTab.value === 'raw') {
+    if (tn.proto === 'tcp') await loadTCP(tn.id, true)
+    else await refreshUDPStats(tn.id)
+  } else if (settingsTab.value === 'metrics') {
+    await loadMetrics(tn.id, true)
+  }
+}, { fallbackMs: 10000 })
 
 const udpSeriesMax = computed(() => Math.max(1, ...udpSeries.value.map(p => p.packets_in + p.packets_out)))
 
@@ -1067,7 +1066,7 @@ async function submit() {
       hostname_id: form.hostname_id === '__none__' ? undefined : (form.hostname_id || undefined),
       no_domain: form.hostname_id === '__none__',
     })
-    tunnels.value.push(created)
+    void pager.reload(true)
     form.name = ''
     form.hostname_id = ''
     hostnames.value = await api.listHostnames()
@@ -1101,11 +1100,149 @@ async function remove(tn: Tunnel) {
   try {
     await api.deleteTunnel(tn.id)
     tunnels.value = tunnels.value.filter(x => x.id !== tn.id)
+    void pager.reload(true)
     hostnames.value = await api.listHostnames()
     toast.info(t('tunnels.deleted'))
   } catch (err: any) {
     toast.error(err?.data?.error?.message || err?.message || t('tunnels.deleteFailed'))
   }
+}
+
+// --- Geçici tünel (FAZ 2 / F07): süre dolunca sunucu tüneli kendiliğinden siler ---
+// REST: POST /tunnels {name, client_id, target, ttl_sec}. Süre hazır listeden gelir (60..86400 sn);
+// sunucu 0/negatif değeri sessizce KALICI tünel sayar, serbest giriş bu yüzden yok. hostname_id /
+// no_domain gönderilmez: süreli tünel silinince adı da gider; özel alan adı bu yolla silinmesin.
+const showEph = ref(false)
+const ephSaving = ref(false)
+const ephError = ref('')
+const ephForm = reactive({ name: '', client_id: '', target: '', ttl: DEFAULT_TTL_SEC })
+// Oluşturma sonucu: adres ve bitiş zamanı gösterilir.
+const ephResult = ref<Tunnel | null>(null)
+
+const EPH_TTL_KEYS: Record<number, string> = {
+  900: 'ephDur15m', 1800: 'ephDur30m', 3600: 'ephDur1h', 7200: 'ephDur2h', 21600: 'ephDur6h', 43200: 'ephDur12h', 86400: 'ephDur24h',
+}
+const ephTtlLabel = (sec: number) => t('tunnels.' + (EPH_TTL_KEYS[sec] ?? 'ephDur2h'))
+
+const ephNameError = computed(() => checkTunnelName(ephForm.name, usedTunnelLabels(hostnames.value)))
+const ephTarget = computed(() => normalizeTarget(ephForm.target))
+const ephClientOffline = computed(() => {
+  const c = clientById(ephForm.client_id)
+  return !!c && c.status !== 'online'
+})
+const ephCanSubmit = computed(() =>
+  !ephSaving.value && !!ephForm.client_id && !ephNameError.value && !!ephTarget.value && isValidTtl(ephForm.ttl))
+const ephAddress = computed(() => {
+  const fqdn = ephResult.value?.hostnames?.[0]?.fqdn
+  return fqdn ? tunnelUrl(fqdn) : ''
+})
+
+function openEphemeral() {
+  ephError.value = ''
+  ephResult.value = null
+  ephForm.name = randomEphemeralName()
+  ephForm.client_id = (clients.value.find(c => c.status === 'online') ?? clients.value[0])?.id ?? ''
+  ephForm.target = ''
+  ephForm.ttl = DEFAULT_TTL_SEC
+  showEph.value = true
+}
+
+function closeEph() {
+  if (ephSaving.value) return
+  showEph.value = false
+  ephResult.value = null
+  ephError.value = ''
+}
+
+async function submitEphemeral() {
+  if (!ephCanSubmit.value) return
+  ephError.value = ''
+  ephSaving.value = true
+  try {
+    const created = await api.createTunnel({
+      name: ephForm.name.trim().toLowerCase(),
+      client_id: ephForm.client_id,
+      target: ephTarget.value,
+      ttl_sec: ephForm.ttl,
+    })
+    nowMs.value = Date.now()
+    ephResult.value = created
+    void pager.reload(true)
+    try { hostnames.value = await api.listHostnames() } catch { /* ad listesi bir sonraki yüklemede tazelenir */ }
+    loadBillingData()
+  } catch (e: any) {
+    const msg = hostnameError(e, t('tunnels.createFailed'))
+    ephError.value = msg
+    if (apiErrorCode(e) === 'plan_limit_reached') {
+      showEph.value = false
+      openUpgrade(msg, 'tunnels')
+    }
+  } finally {
+    ephSaving.value = false
+  }
+}
+
+async function copyEph(text: string) {
+  try {
+    await navigator.clipboard.writeText(text)
+    toast.success(t('common.copied'))
+  } catch { /* pano erişimi yok */ }
+}
+
+// Kalan süre sayacı: yalnızca geçici tünel (liste ya da sonuç penceresi) varken saniyede bir tıklar.
+const nowMs = ref(Date.now())
+const hasEphemeral = computed(() => !!ephResult.value || tunnels.value.some(tn => !!tn.expires_at))
+let nowTimer: ReturnType<typeof setInterval> | null = null
+watch(hasEphemeral, (on) => {
+  if (nowTimer) { clearInterval(nowTimer); nowTimer = null }
+  if (on) {
+    nowMs.value = Date.now()
+    nowTimer = setInterval(() => { nowMs.value = Date.now() }, 1000)
+  }
+}, { immediate: true })
+// Arka plandaki sekmede zamanlayıcı yavaşlar; görünür olunca sayaç hemen tazelensin.
+function syncNow() { nowMs.value = Date.now() }
+onMounted(() => document.addEventListener('visibilitychange', syncNow))
+onBeforeUnmount(() => {
+  document.removeEventListener('visibilitychange', syncNow)
+  if (nowTimer) clearInterval(nowTimer)
+})
+
+// Sunucu süpürücüsü dakikada bir siler ve olay yayınlamaz: süresi dolmuş satır listedeyken 20 sn'de bir yenile.
+const hasExpiredRows = computed(() => tunnels.value.some(tn => !!tn.expires_at && !tn.expired_at && Date.parse(tn.expires_at) <= nowMs.value))
+useLiveRefresh(async () => { await pager.reload(true); return !pager.error.value }, {
+  fallbackMs: 20000,
+  skip: () => !hasExpiredRows.value,
+})
+
+function ephLeft(tn: Tunnel): string {
+  // Süresi doldu, saklama penceresinde: silinmesine kalan süre.
+  if (tn.expired_at) {
+    const r = remainingLabel(remainingMs(tn.delete_at, nowMs.value) ?? 0)
+    switch (r.kind) {
+      case 'expired': case 's': return t('tunnels.ephExpiredDelSoon')
+      case 'm': return t('tunnels.ephExpiredDelM', { m: r.m })
+      case 'h': return t('tunnels.ephExpiredDelH', { h: r.h })
+      default: return t('tunnels.ephExpiredDelHM', { h: r.h, m: r.m })
+    }
+  }
+  const ms = remainingMs(tn.expires_at, nowMs.value)
+  if (ms === null) return ''
+  const r = remainingLabel(ms)
+  switch (r.kind) {
+    case 'expired': return t('tunnels.ephExpired')
+    case 's': return t('tunnels.ephLeftS', { s: r.s })
+    case 'm': return t('tunnels.ephLeftM', { m: r.m })
+    case 'h': return t('tunnels.ephLeftH', { h: r.h })
+    default: return t('tunnels.ephLeftHM', { h: r.h, m: r.m })
+  }
+}
+const ephAt = (tn: Tunnel) => (tn.expires_at ? new Date(tn.expires_at).toLocaleString(dateLocale()) : '')
+function ephBadgeClass(tn: Tunnel): string {
+  if (tn.expired_at) return 'border-danger/40 bg-danger/10 text-danger'
+  const ms = remainingMs(tn.expires_at, nowMs.value)
+  if (ms === null || ms <= 0) return 'border-line bg-surface-2 text-fg-subtle'
+  return isExpiringSoon(ms) ? 'border-warn/40 bg-warn/10 text-warn' : 'border-accent/40 bg-accent/10 text-accent'
 }
 </script>
 
@@ -1117,6 +1254,20 @@ async function remove(tn: Tunnel) {
     </header>
 
     <PanelFrame :label="t('tunnels.newTunnel')">
+      <template #actions>
+        <button
+          type="button"
+          class="inline-flex cursor-pointer items-center gap-1.5 rounded border border-line px-2.5 py-1 text-xs
+                 text-fg-muted transition-colors duration-150 hover:border-accent hover:text-accent
+                 disabled:cursor-not-allowed disabled:opacity-50"
+          :disabled="!clients.length"
+          :title="t('tunnels.ephBtnTitle')"
+          @click="openEphemeral"
+        >
+          <Icon name="lucide:timer" class="size-3.5" />
+          {{ t('tunnels.ephBtn') }}
+        </button>
+      </template>
       <form class="grid gap-3 p-4 sm:grid-cols-2 lg:grid-cols-[1fr_160px_1fr_180px_auto]" @submit.prevent="submit">
         <div>
           <label for="name" class="label-sys mb-1 block">{{ t('tunnels.name') }}</label>
@@ -1169,7 +1320,7 @@ async function remove(tn: Tunnel) {
       </form>
     </PanelFrame>
 
-    <PanelFrame :label="t('tunnels.definedTunnels')" :meta="`${tunnels.length}`">
+    <PanelFrame :label="t('tunnels.definedTunnels')" :meta="`${pager.total.value ?? tunnels.length}`">
       <p v-if="pending" class="px-4 py-6 text-sm text-fg-muted">{{ t('common.loading') }}</p>
       <p v-else-if="!tunnels.length" class="px-4 py-8 text-center text-sm text-fg-muted">{{ t('tunnels.noTunnels') }}</p>
 
@@ -1190,6 +1341,17 @@ async function remove(tn: Tunnel) {
               <td class="px-4 py-2.5 font-mono text-xs">
                 <p v-for="fqdn in namesOf(tn)" :key="fqdn" class="truncate">{{ fqdn }}</p>
                 <span v-if="!namesOf(tn).length" class="text-fg-subtle">{{ t('tunnels.noName') }}</span>
+                <p v-if="tn.ephemeral" class="mt-1">
+                  <span
+                    class="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 font-sans text-[10px] font-medium"
+                    :class="ephBadgeClass(tn)"
+                    :title="t('tunnels.ephBadgeTitle', { at: ephAt(tn) })"
+                  >
+                    <Icon name="lucide:timer" class="size-3" />
+                    <template v-if="tn.expired_at">{{ ephLeft(tn) }}</template>
+                    <template v-else>{{ t('tunnels.ephBadge') }}<template v-if="tn.expires_at"> · {{ ephLeft(tn) }}</template></template>
+                  </span>
+                </p>
               </td>
               <td class="px-4 py-2.5">
                 <span class="inline-flex items-center gap-1.5">
@@ -1220,6 +1382,7 @@ async function remove(tn: Tunnel) {
                     />
                   </button>
                   <button
+                    v-if="!tn.expired_at"
                     class="cursor-pointer rounded p-1.5 text-fg-muted transition-colors
                            duration-150 hover:bg-surface-2 hover:text-fg"
                     :aria-label="tn.enabled ? t('tunnels.stopTunnel', { name: namesOf(tn)[0] ?? tn.id }) : t('tunnels.startTunnel', { name: namesOf(tn)[0] ?? tn.id })"
@@ -1243,7 +1406,145 @@ async function remove(tn: Tunnel) {
           </tbody>
         </table>
       </div>
+      <ListPager class="px-4 pb-3" :list="pager" />
     </PanelFrame>
+
+    <!-- Geçici tünel oluşturma (FAZ 2 / F07): form, ardından adres + bitiş zamanı -->
+    <div
+      v-if="showEph"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+      @click.self="closeEph"
+    >
+      <div
+        class="modal-pop max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-lg border border-line bg-surface shadow-xl"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="ephTitle"
+      >
+        <div class="flex items-start justify-between border-b border-line p-5 pb-4">
+          <div class="flex items-start gap-2">
+            <Icon name="lucide:timer" class="mt-0.5 size-5 shrink-0 text-accent" />
+            <div>
+              <h2 id="ephTitle" class="text-base font-semibold text-fg">{{ ephResult ? t('tunnels.ephCreated') : t('tunnels.ephTitle') }}</h2>
+              <p v-if="!ephResult" class="mt-0.5 text-xs text-fg-muted">{{ t('tunnels.ephIntro') }}</p>
+            </div>
+          </div>
+          <button class="rounded p-1 text-fg-muted hover:bg-surface-2 hover:text-fg" :aria-label="t('common.close')" @click="closeEph">
+            <Icon name="lucide:x" class="size-4" />
+          </button>
+        </div>
+
+        <!-- Sonuç: adres ve bitiş zamanı -->
+        <div v-if="ephResult" class="space-y-4 p-5">
+          <div>
+            <p class="label-sys mb-1">{{ t('tunnels.ephAddress') }}</p>
+            <div v-if="ephAddress" class="flex items-center gap-2 rounded border border-line bg-bg p-2.5">
+              <a :href="ephAddress" target="_blank" rel="noopener noreferrer" class="min-w-0 flex-1 break-all font-mono text-sm text-accent hover:underline">{{ ephAddress }}</a>
+              <button type="button" class="shrink-0 cursor-pointer rounded p-1 text-fg-muted hover:bg-surface-2 hover:text-fg" :title="t('common.copy')" :aria-label="t('common.copy')" @click="copyEph(ephAddress)">
+                <Icon name="lucide:copy" class="size-4" />
+              </button>
+              <a :href="ephAddress" target="_blank" rel="noopener noreferrer" class="shrink-0 rounded p-1 text-fg-muted hover:bg-surface-2 hover:text-fg" :title="t('common.open')" :aria-label="t('common.open')">
+                <Icon name="lucide:external-link" class="size-4" />
+              </a>
+            </div>
+            <p v-else class="flex items-start gap-2 rounded border border-warn/40 bg-warn/10 p-3 text-xs text-fg">
+              <Icon name="lucide:triangle-alert" class="mt-0.5 size-4 shrink-0 text-warn" />
+              <span>{{ t('tunnels.ephNoAddress') }}</span>
+            </p>
+          </div>
+          <dl class="grid gap-3 text-xs sm:grid-cols-2">
+            <div class="min-w-0">
+              <dt class="label-sys mb-0.5">{{ t('tunnels.target') }}</dt>
+              <dd class="truncate font-mono text-fg" :title="ephResult.target">{{ ephResult.target }}</dd>
+            </div>
+            <div class="min-w-0">
+              <dt class="label-sys mb-0.5">{{ t('tunnels.client') }}</dt>
+              <dd class="truncate text-fg">{{ clientName(ephResult.client_id) }}</dd>
+            </div>
+            <div class="sm:col-span-2">
+              <dt class="label-sys mb-0.5">{{ t('tunnels.ephExpiresAt') }}</dt>
+              <dd class="text-fg">
+                {{ ephAt(ephResult) }}
+                <span class="text-fg-muted">· {{ ephLeft(ephResult) }}</span>
+              </dd>
+            </div>
+          </dl>
+          <p v-if="clientStatusOf(ephResult.client_id) !== 'online'" class="flex items-start gap-1.5 text-[11px] leading-relaxed text-warn">
+            <Icon name="lucide:triangle-alert" class="mt-px size-3.5 shrink-0" />
+            <span>{{ t('tunnels.ephClientOffline') }}</span>
+          </p>
+          <p class="flex items-start gap-1.5 text-[11px] leading-relaxed text-fg-subtle">
+            <Icon name="lucide:info" class="mt-px size-3.5 shrink-0" />
+            <span>{{ t('tunnels.ephNote') }}</span>
+          </p>
+          <div class="flex justify-end">
+            <button type="button" class="cursor-pointer rounded bg-accent px-4 py-1.5 text-sm font-medium text-on-accent transition-opacity hover:opacity-90" @click="closeEph">
+              {{ t('common.done') }}
+            </button>
+          </div>
+        </div>
+
+        <!-- Form -->
+        <form v-else class="space-y-4 p-5" novalidate @submit.prevent="submitEphemeral">
+          <div>
+            <label for="ephName" class="label-sys mb-1 block">{{ t('tunnels.name') }}</label>
+            <input id="ephName" v-model="ephForm.name" autocomplete="off" spellcheck="false" maxlength="63"
+                   class="w-full rounded border border-line bg-bg px-2.5 py-1.5 font-mono text-sm
+                          placeholder:text-fg-subtle focus:border-accent">
+            <p v-if="ephNameError === 'invalid'" class="mt-1 text-[11px] text-danger" role="alert">{{ t('tunnels.ephNameInvalid') }}</p>
+            <p v-else-if="ephNameError === 'taken'" class="mt-1 text-[11px] text-danger" role="alert">{{ t('tunnels.ephNameTaken') }}</p>
+            <p v-else class="mt-1 text-[11px] text-fg-muted">{{ t('tunnels.ephNameHint') }}</p>
+          </div>
+
+          <div>
+            <label for="ephClient" class="label-sys mb-1 block">{{ t('tunnels.client') }}</label>
+            <select id="ephClient" v-model="ephForm.client_id"
+                    class="w-full cursor-pointer rounded border border-line bg-bg px-2.5 py-1.5
+                           font-mono text-sm focus:border-accent">
+              <option v-for="c in clients" :key="c.id" :value="c.id">{{ clientLabel(c) }}</option>
+            </select>
+            <p v-if="ephClientOffline" class="mt-1 flex items-start gap-1.5 text-[11px] text-warn">
+              <Icon name="lucide:triangle-alert" class="mt-px size-3.5 shrink-0" />
+              <span>{{ t('tunnels.ephClientOffline') }}</span>
+            </p>
+          </div>
+
+          <div>
+            <label for="ephTarget" class="label-sys mb-1 block">{{ t('tunnels.target') }}</label>
+            <input id="ephTarget" v-model="ephForm.target" autocomplete="off" spellcheck="false" inputmode="url"
+                   :placeholder="t('tunnels.ephTargetPh')"
+                   class="w-full rounded border border-line bg-bg px-2.5 py-1.5 font-mono text-sm
+                          placeholder:text-fg-subtle focus:border-accent">
+            <p v-if="ephForm.target.trim() && !ephTarget" class="mt-1 text-[11px] text-danger" role="alert">{{ t('tunnels.ephTargetInvalid') }}</p>
+            <p v-else-if="ephTarget" class="mt-1 truncate font-mono text-[11px] text-fg-muted">{{ ephTarget }}</p>
+            <p v-else class="mt-1 text-[11px] text-fg-muted">{{ t('tunnels.ephTargetHint') }}</p>
+          </div>
+
+          <div>
+            <label for="ephTtl" class="label-sys mb-1 block">{{ t('tunnels.ephTtl') }}</label>
+            <select id="ephTtl" v-model.number="ephForm.ttl"
+                    class="w-full cursor-pointer rounded border border-line bg-bg px-2.5 py-1.5
+                           text-sm focus:border-accent">
+              <option v-for="sec in TTL_PRESETS_SEC" :key="sec" :value="sec">{{ ephTtlLabel(sec) }}</option>
+            </select>
+            <p class="mt-1 text-[11px] text-fg-muted">{{ t('tunnels.ephTtlHint') }}</p>
+          </div>
+
+          <p v-if="ephError" class="rounded border border-danger/30 bg-danger/10 p-2 text-xs text-danger" role="alert">{{ ephError }}</p>
+
+          <div class="flex justify-end gap-2 pt-1">
+            <button type="button" class="cursor-pointer rounded px-3 py-1.5 text-sm text-fg-muted hover:bg-surface-2" @click="closeEph">
+              {{ t('common.cancel') }}
+            </button>
+            <button type="submit" :disabled="!ephCanSubmit"
+                    class="cursor-pointer rounded bg-accent px-4 py-1.5 text-sm font-medium text-on-accent
+                           transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50">
+              {{ ephSaving ? t('common.creating') : t('common.create') }}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
 
     <!-- Detaylı Ayarlar Modalı (Genel + Protokol + Erişim + IP) -->
     <div
@@ -2338,12 +2639,15 @@ async function remove(tn: Tunnel) {
   outline: none;
 }
 .help-tip::after {
+  /* Balon simgenin ALTINDA ve ortalanir: modal icinde sola acilan balon
+     pencerenin sol kenarinda kesiliyordu. Alta acilan balon kaydirma alanini
+     buyuttugu icin gerekirse kaydirarak okunur; ustte kesilen okunamazdi. */
   content: attr(data-tip);
   position: absolute;
-  right: calc(100% + 8px);
-  top: 50%;
+  left: 50%;
+  top: calc(100% + 8px);
   width: max-content;
-  max-width: min(260px, 60vw);
+  max-width: min(280px, calc(100vw - 32px));
   background: var(--fg);
   color: var(--bg);
   padding: 8px 10px;
@@ -2354,7 +2658,7 @@ async function remove(tn: Tunnel) {
   text-align: left;
   opacity: 0;
   visibility: hidden;
-  transform: translateY(-50%) translateX(4px);
+  transform: translateX(-50%) translateY(-4px);
   transition: opacity 0.15s ease, transform 0.15s ease;
   z-index: 30;
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.28);
@@ -2364,7 +2668,7 @@ async function remove(tn: Tunnel) {
 .help-tip:focus-visible::after {
   opacity: 1;
   visibility: visible;
-  transform: translateY(-50%) translateX(0);
+  transform: translateX(-50%) translateY(0);
 }
 
 /* Modal açılışı: yumuşak beliriş. */

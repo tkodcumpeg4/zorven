@@ -12,5 +12,5 @@ func (s *Server) canSendExternalMail(_ *http.Request, _ string) bool { return tr
 // externalMailDeniedMessage: acikta kullanilmaz (gonderim reddedilmez).
 func (s *Server) externalMailDeniedMessage() string { return "harici e-posta gonderimi kapali" }
 
-// mailTemplateHTML: acikta hazir (ticari) sablon yoktur.
-func mailTemplateHTML(_ string) string { return "" }
+// mailTemplateHTML: acikta hazir (ticari) sablon yoktur (ikinci parametre dil: kullanilmaz).
+func mailTemplateHTML(_, _ string) string { return "" }

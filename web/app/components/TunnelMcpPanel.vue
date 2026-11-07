@@ -34,7 +34,7 @@ const lines = (s: string) => s.split(/[\n,]+/).map(x => x.trim()).filter(Boolean
 function applyConfig(c: TunnelMCPConfig) {
   form.auth = c.auth
   form.ackNoAuth = !!c.ack_no_auth
-  form.path = c.path
+  form.path = c.path || '/mcp'
   form.transport = c.transport
   form.allowOrgMembers = c.allow_org_members
   form.emails = (c.allowed_emails || []).join('\n')
@@ -52,7 +52,7 @@ async function load() {
   try {
     const m = await api.getTunnelMCP(props.tunnelId)
     enabled.value = m.enabled
-    urls.value = m.urls
+    urls.value = m.urls ?? []
     oauthAvailable.value = m.oauth_available
     applyConfig(m.config)
     if (props.privileged && form.auth === 'apikey') void loadKeys()
@@ -79,7 +79,7 @@ async function save() {
         max_streams: Number(form.maxStreams) || 20, log_level: form.logLevel,
       },
     })
-    urls.value = res.urls
+    urls.value = res.urls ?? []
     applyConfig(res.config)
     toast.success(t('mcpTunnel.saved'))
     if (form.auth === 'apikey') void loadKeys()
@@ -153,8 +153,9 @@ const calls = ref<MCPCall[]>([])
 const callStatus = ref('')
 async function loadStats() {
   try {
-    stats.value = await api.getMCPStats(props.tunnelId, statsWindow.value)
-    calls.value = await api.listMCPCalls(props.tunnelId, { status: callStatus.value || undefined, window: statsWindow.value, limit: 30 })
+    const st = await api.getMCPStats(props.tunnelId, statsWindow.value)
+    stats.value = st ? { ...st, tools: st.tools ?? [] } : null
+    calls.value = (await api.listMCPCalls(props.tunnelId, { status: callStatus.value || undefined, window: statsWindow.value, limit: 30 })) ?? []
   } catch { stats.value = null; calls.value = [] }
 }
 watch([statsWindow, callStatus], loadStats)

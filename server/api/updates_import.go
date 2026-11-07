@@ -86,7 +86,7 @@ func (s *Server) adminImportUpdates(w http.ResponseWriter, r *http.Request) {
 		res.Slug = strings.ToLower(strings.TrimSpace(p.Slug))
 		body := updateBody{
 			Slug: p.Slug, Kind: p.Kind, Version: p.Version, TitleTR: p.TitleTR, BodyTR: p.BodyTR,
-			TitleEN: p.TitleEN, BodyEN: p.BodyEN, TitleJA: p.TitleJA, BodyJA: p.BodyJA,
+			TitleEN: p.TitleEN, BodyEN: p.BodyEN, TitleJA: p.TitleJA, BodyJA: p.BodyJA, TitleZH: p.TitleZH, BodyZH: p.BodyZH,
 			MaintenanceStart: p.MaintenanceStart, MaintenanceEnd: p.MaintenanceEnd,
 		}
 		post, msg := body.validate()

@@ -39,12 +39,18 @@ import (
 
 // Server, yonetim REST API'sini karsilar.
 type Server struct {
+	// JobGate, doluysa periyodik isler (uyari degerlendirici vb.) her tur
+	// basinda sorar; false ise tur atlanir. nil = hep calis.
+	JobGate func() bool
 	Store   store.Store
 	Hub     *tunnel.Hub
 	Log     *reqlog.Ring
 	Events  *events.Broker
 	Logger  *slog.Logger
 	Version string
+	// AccountKey, web servisi (Better Auth) -> Go hesap silme ic ucunun HMAC anahtari
+	// (BETTER_AUTH_SECRET'tan HKDF; bos ise ic uc 503). Bkz. account.go.
+	AccountKey []byte
 
 	// Captcha, Zorven CAPTCHA servisi (main.go kurar; nil ise public uclar 501).
 	Captcha *captcha.Service
@@ -181,7 +187,12 @@ func writeEntitlementError(w http.ResponseWriter, err error) {
 	writeJSONError(w, http.StatusForbidden, "entitlement_denied", err.Error())
 }
 
-// GitHubAuth, GitHub OAuth yapilandirmasi. Uc alan da doluysa giris ACIK olur.
+// GitHubAuth, ESKI Go-tarafi GitHub OAuth yapilandirmasi (yedek yol; panelin asil GitHub girisi ve
+// KAYDI Better Auth'tadir: web/server/lib/auth.ts socialProviders). Uc alan da doluysa giris ACIK olur.
+//
+// Acik kayit (herkesin GitHub ile kaydolmasi) bu yolda BILINCLI olarak yoktur: eskiden
+// --github-open-signup bayragi vardi ama hicbir yere baglanmamisti (Ek 1 madde 20) ve baglansaydi
+// Better Auth kayit korumalarini (e-posta dogrulama, CAPTCHA, e-posta riski) atlardi. Kaldirildi.
 type GitHubAuth struct {
 	ClientID     string
 	ClientSecret string
@@ -191,13 +202,6 @@ type GitHubAuth struct {
 	// BaseURL, callback URL'sini kurmak icin sabit taban (or. https://sunucu:8443).
 	// Bos ise gelen istekten (scheme+host) turetilir.
 	BaseURL string
-
-	// OpenSignup true ise GitHub hesabi olan HERKES kaydolabilir ve kendi
-	// kiracisini alir. false (VARSAYILAN) ise yalnizca Allow listesindekiler.
-	//
-	// Varsayilan kapali: bir sunucunun kazara herkese acilmasi, kimsenin
-	// girememesinden cok daha kotudur.
-	OpenSignup bool
 }
 
 // Routes, API mux'unu kurar.
@@ -240,6 +244,8 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("PATCH /api/v1/projects/{id}", s.renameProject)
 	// Organizasyon silme: yalnizca oturum acmis owner/admin, API token ile DEGIL.
 	mux.HandleFunc("DELETE /api/v1/organization", s.deleteOrganization)
+	// Hesap silme: onizleme (oturumlu kullanici) + Better Auth beforeDelete ic ucu (imzali).
+	s.registerAccount(mux)
 
 	mux.HandleFunc("GET /api/v1/clients", s.listClients)
 	mux.HandleFunc("POST /api/v1/clients", s.createClient)
@@ -255,7 +261,7 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("GET /api/v1/clients/{id}/screen-files/download", s.screenFileDownload)
 
 	mux.HandleFunc("GET /api/v1/tunnels", s.listTunnels)
-	mux.HandleFunc("POST /api/v1/tunnels", s.createTunnel)
+	mux.HandleFunc("POST /api/v1/tunnels", s.idempotentFunc(s.createTunnel))
 	mux.HandleFunc("GET /api/v1/tunnels/{id}", s.getTunnel)
 	// Yuk dengeleme + saglik kontrolu (FAZ 4 / F21)
 	mux.HandleFunc("GET /api/v1/tunnels/{id}/lb", s.getTunnelLB)
@@ -307,8 +313,8 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("PUT /api/v1/tunnels/{id}/security", s.setTunnelSecurity)
 
 	mux.HandleFunc("GET /api/v1/hostnames", s.listHostnames)
-	mux.HandleFunc("POST /api/v1/hostnames", s.createHostname)
-	mux.HandleFunc("POST /api/v1/hostnames/custom", s.createCustomHostname)
+	mux.HandleFunc("POST /api/v1/hostnames", s.idempotentFunc(s.createHostname))
+	mux.HandleFunc("POST /api/v1/hostnames/custom", s.idempotentFunc(s.createCustomHostname))
 	mux.HandleFunc("PATCH /api/v1/hostnames/{id}", s.patchHostname)
 	mux.HandleFunc("POST /api/v1/hostnames/{id}/verify", s.verifyHostname)
 	mux.HandleFunc("POST /api/v1/hostnames/{id}/dns-check", s.dnsCheckHostname)
@@ -345,7 +351,7 @@ func (s *Server) Routes() *http.ServeMux {
 
 	// Ekip ve Uye Yonetimi (Team & Member Tokens)
 	mux.HandleFunc("GET /api/v1/team/members", s.listTeamMembers)
-	mux.HandleFunc("POST /api/v1/team/members/invite", s.inviteTeamMember)
+	mux.HandleFunc("POST /api/v1/team/members/invite", s.idempotentFunc(s.inviteTeamMember))
 	mux.HandleFunc("PATCH /api/v1/team/members/{id}/role", s.updateMemberRole)
 	mux.HandleFunc("DELETE /api/v1/team/members/{id}", s.removeTeamMember)
 	mux.HandleFunc("GET /api/v1/team/members/{id}/tokens", s.listMemberTokens)
@@ -377,7 +383,7 @@ func (s *Server) Routes() *http.ServeMux {
 
 	// Programatik REST API Token Yonetimi
 	mux.HandleFunc("GET /api/v1/api-tokens", s.listAPITokens)
-	mux.HandleFunc("POST /api/v1/api-tokens", s.createAPIToken)
+	mux.HandleFunc("POST /api/v1/api-tokens", s.idempotentFunc(s.createAPIToken))
 	mux.HandleFunc("DELETE /api/v1/api-tokens/{id}", s.revokeAPIToken)
 	mux.HandleFunc("POST /api/v1/api-tokens/{id}/rotate", s.rotateAPIToken)
 	mux.HandleFunc("GET /api/v1/tokens", s.listAPITokens)
@@ -614,7 +620,11 @@ func (s *Server) adminListTenants(w http.ResponseWriter, r *http.Request) {
 			"bu uc yalnizca admin anahtariyla kullanilabilir")
 		return
 	}
-	list, err := s.Store.AdminListTenantsWithCounts(r.Context())
+	pg, ok := pageOf(w, r)
+	if !ok {
+		return
+	}
+	list, total, err := s.Store.AdminListTenantsWithCountsPage(r.Context(), pg)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -622,6 +632,7 @@ func (s *Server) adminListTenants(w http.ResponseWriter, r *http.Request) {
 	if list == nil {
 		list = []store.TenantWithCounts{}
 	}
+	setPageTotals(w, pg, len(list), total)
 	writeJSON(w, http.StatusOK, list)
 }
 
@@ -631,11 +642,16 @@ func (s *Server) adminListClients(w http.ResponseWriter, r *http.Request) {
 			"bu uc yalnizca admin anahtariyla kullanilabilir")
 		return
 	}
-	list, err := s.Store.AdminListAllClients(r.Context())
+	pg, ok := pageOf(w, r)
+	if !ok {
+		return
+	}
+	list, total, err := s.Store.AdminListAllClientsPage(r.Context(), pg)
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
+	setPageTotals(w, pg, len(list), total)
 	for i := range list {
 		if st, ok := s.Hub.Statuses()[list[i].ID]; ok {
 			list[i].Status = "online"
@@ -659,7 +675,11 @@ func (s *Server) adminListHostnames(w http.ResponseWriter, r *http.Request) {
 			"bu uc yalnizca admin anahtariyla kullanilabilir")
 		return
 	}
-	list, err := s.Store.AdminListAllHostnames(r.Context())
+	pg, ok := pageOf(w, r)
+	if !ok {
+		return
+	}
+	list, total, err := s.Store.AdminListAllHostnamesPage(r.Context(), pg)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -667,6 +687,7 @@ func (s *Server) adminListHostnames(w http.ResponseWriter, r *http.Request) {
 	if list == nil {
 		list = []store.HostnameWithTenant{}
 	}
+	setPageTotals(w, pg, len(list), total)
 	writeJSON(w, http.StatusOK, list)
 }
 
@@ -750,6 +771,7 @@ func (s *Server) enrich(c store.Client) store.Client {
 		c.AppKind = sess.AppKind
 		c.Shells, c.DefaultShell = sess.Shells, sess.DefaultShell
 		c.Metrics = sess.Metrics()
+		c.Features = sess.Features()
 	} else if st, ok := s.Hub.Statuses()[c.ID]; ok {
 		c.Status, c.Version, c.RemoteAddr = "online", st.Version, st.RemoteAddr
 		c.AppKind = st.AppKind
@@ -758,6 +780,9 @@ func (s *Server) enrich(c store.Client) store.Client {
 		c.LastSeenAt = &ls
 	} else {
 		c.Status = "offline"
+	}
+	if c.Features == nil {
+		c.Features = []string{}
 	}
 	// Surum bayragi yalnizca CANLI istemci icin: tur (masaustu/CLI) ancak
 	// bagliyken bilinir, offline iken yanlis manifestle karsilastirilmaz.
@@ -799,16 +824,33 @@ func (s *Server) listClients(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	for i := range list {
-		list[i] = s.enrich(list[i])
-	}
-	if limit, cursor, ok := parsePage(r); ok {
+	if legacyCursorMode(r) {
+		for i := range list {
+			list[i] = s.enrich(list[i])
+		}
+		limit, cursor, _ := parsePage(r)
 		page, next, more := paginate(list, func(c store.Client) string { return c.ID }, limit, cursor)
 		setPageHeaders(w, r, next, more)
 		writeJSON(w, http.StatusOK, page)
 		return
 	}
-	writeJSON(w, http.StatusOK, list)
+	pg, ok := pageOf(w, r)
+	if !ok {
+		return
+	}
+	// Yetki suzgeci (politika/etiket) SQL'e indirilemez: kararli sirayla
+	// (created_at, id) bellekte dilimlenir; yalniz sayfadaki satirlar zenginlestirilir.
+	sort.SliceStable(list, func(a, b int) bool {
+		if !list[a].CreatedAt.Equal(list[b].CreatedAt) {
+			return list[a].CreatedAt.Before(list[b].CreatedAt)
+		}
+		return list[a].ID < list[b].ID
+	})
+	page := slicePage(w, pg, list)
+	for i := range page {
+		page[i] = s.enrich(page[i])
+	}
+	writeJSON(w, http.StatusOK, page)
 }
 
 func (s *Server) createClient(w http.ResponseWriter, r *http.Request) {
@@ -962,13 +1004,38 @@ func (s *Server) listTunnels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	projID, _ := s.projectFor(r)
-	var list []store.Tunnel
-	var err error
-	if projID != "" {
-		list, err = s.Store.ListTunnelsByProject(r.Context(), tenantID, projID)
-	} else {
-		list, err = s.Store.ListTunnels(r.Context(), tenantID)
+	if legacyCursorMode(r) {
+		var list []store.Tunnel
+		var err error
+		if projID != "" {
+			list, err = s.Store.ListTunnelsByProject(r.Context(), tenantID, projID)
+		} else {
+			list, err = s.Store.ListTunnels(r.Context(), tenantID)
+		}
+		if err != nil {
+			s.fail(w, err)
+			return
+		}
+		list, err = s.withHostnames(r, tenantID, list)
+		if err != nil {
+			s.fail(w, err)
+			return
+		}
+		if list == nil {
+			list = []store.Tunnel{}
+		}
+		s.fillPublicHosts(list)
+		limit, cursor, _ := parsePage(r)
+		page, next, more := paginate(list, func(t store.Tunnel) string { return t.ID }, limit, cursor)
+		setPageHeaders(w, r, next, more)
+		writeJSON(w, http.StatusOK, page)
+		return
 	}
+	pg, ok := pageOf(w, r)
+	if !ok {
+		return
+	}
+	list, total, err := s.Store.ListTunnelsPage(r.Context(), tenantID, projID, pg)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -982,12 +1049,7 @@ func (s *Server) listTunnels(w http.ResponseWriter, r *http.Request) {
 		list = []store.Tunnel{}
 	}
 	s.fillPublicHosts(list)
-	if limit, cursor, ok := parsePage(r); ok {
-		page, next, more := paginate(list, func(t store.Tunnel) string { return t.ID }, limit, cursor)
-		setPageHeaders(w, r, next, more)
-		writeJSON(w, http.StatusOK, page)
-		return
-	}
+	setPageTotals(w, pg, len(list), total)
 	writeJSON(w, http.StatusOK, list)
 }
 
@@ -1063,16 +1125,45 @@ func (s *Server) createTunnel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	projID, _ := s.projectFor(r)
+	// Gecici tunel. Ust sinir var cunku "gecici" olan sey uzatilabilir
+	// olmamali; daha uzun omur isteyen kalici tunel acar.
+	if body.TTLSec > 0 && (body.TTLSec < MinTunnelTTLSec || body.TTLSec > MaxTunnelTTLSec) {
+		writeJSONError(w, http.StatusUnprocessableEntity, "invalid_ttl",
+			fmt.Sprintf("ttl_sec %d ile %d saniye arasinda olmali", MinTunnelTTLSec, MaxTunnelTTLSec))
+		return
+	}
+
+	// Adres hazirligi tunel ACILMADAN yapilir: tunel ya adresiyle birlikte olusur
+	// ya da hic olusmaz (adressiz tunel yalniz no_domain=true ile ISTENEREK acilir).
+	// hostname_id verildiyse o bos ad, yoksa (no_domain degilse) girilen ada gore
+	// otomatik kapsamli ad kullanilir.
+	var picked store.Hostname // hostname_id ile secilen ad
+	autoFQDN := ""            // otomatik kapsamli ad
+	switch {
+	case body.HostnameID != "":
+		h, err := s.Store.GetHostnameByID(r.Context(), tenantID, body.HostnameID)
+		if errors.Is(err, store.ErrNotFound) {
+			writeJSONError(w, http.StatusUnprocessableEntity, "hostname_not_found",
+				"belirtilen hostname_id bulunamadi")
+			return
+		}
+		if err != nil {
+			s.fail(w, err)
+			return
+		}
+		picked = h
+	case !body.NoDomain && s.PlatformDomain != "":
+		tenant, err := s.Store.GetTenant(r.Context(), tenantID)
+		if err != nil {
+			s.fail(w, err)
+			return
+		}
+		autoFQDN = scopedFQDN(name, tenant.Slug, s.PlatformDomain)
+	}
+
 	var t store.Tunnel
 	var err error
 	if body.TTLSec > 0 {
-		// Gecici tunel. Ust sinir var cunku "gecici" olan sey uzatilabilir
-		// olmamali; daha uzun omur isteyen kalici tunel acar.
-		if body.TTLSec < MinTunnelTTLSec || body.TTLSec > MaxTunnelTTLSec {
-			writeJSONError(w, http.StatusUnprocessableEntity, "invalid_ttl",
-				fmt.Sprintf("ttl_sec %d ile %d saniye arasinda olmali", MinTunnelTTLSec, MaxTunnelTTLSec))
-			return
-		}
 		expires := time.Now().UTC().Add(time.Duration(body.TTLSec) * time.Second)
 		t, err = s.Store.CreateEphemeralTunnel(r.Context(), tenantID, body.ClientID, body.Target, projID, expires)
 	} else {
@@ -1083,31 +1174,30 @@ func (s *Server) createTunnel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if body.HostnameID != "" {
-		// Kullanici var olan bos bir domain sectiyse onu tunelle esle
-		if h, err := s.Store.GetHostnameByID(r.Context(), tenantID, body.HostnameID); err == nil {
-			if err := s.Store.AttachHostname(r.Context(), tenantID, body.HostnameID, t.ID); err == nil {
-				h.TunnelID = t.ID
-				t.Hostnames = []store.Hostname{h}
-			} else {
-				s.Logger.Warn("secilen domain tunelle eslenemedi", "hostname_id", body.HostnameID, "hata", err)
-			}
+	// Ad baglama basarisiz olursa (ayni anda baska biri adi aldiysa, DB hatasi)
+	// tunel geri alinir; istemci yaniti aldiginda yarim kalmis tunel kalmaz.
+	switch {
+	case picked.ID != "":
+		if err := s.Store.AttachHostname(r.Context(), tenantID, picked.ID, t.ID); err != nil {
+			s.rollbackNewTunnel(r, tenantID, t.ID)
+			s.fail(w, err)
+			return
 		}
-	} else if !body.NoDomain && s.PlatformDomain != "" {
-		// Secilen veya onceden olusturulan domain yoksa girilen ada gore otomatik domain ata.
-		// NoDomain=true ise atlanir (yol-yonlendirme hedefi olarak adressiz tunel).
-		if tenant, err := s.Store.GetTenant(r.Context(), tenantID); err != nil {
-			s.Logger.Warn("kapsamli ad icin kiraci okunamadi", "kiraci", tenantID, "hata", err)
-		} else {
-			fqdn := scopedFQDN(name, tenant.Slug, s.PlatformDomain)
-			h, err := s.Store.AddHostnameWithProject(r.Context(), tenantID, t.ID, fqdn, store.HostTypeScoped, projID)
-			if err != nil {
-				s.Logger.Warn("kapsamli ad verilemedi", "fqdn", fqdn, "hata", err)
-			} else {
-				t.Hostnames = []store.Hostname{h}
-				s.autoScanHostname(r.Context(), fqdn)
+		picked.TunnelID = t.ID
+		t.Hostnames = []store.Hostname{picked}
+	case autoFQDN != "":
+		h, err := s.Store.AddHostnameWithProject(r.Context(), tenantID, t.ID, autoFQDN, store.HostTypeScoped, projID)
+		if err != nil {
+			s.rollbackNewTunnel(r, tenantID, t.ID)
+			if errors.Is(err, store.ErrHostnameTaken) {
+				writeJSONError(w, http.StatusConflict, "hostname_taken", autoFQDN+" zaten alinmis")
+				return
 			}
+			s.fail(w, err)
+			return
 		}
+		t.Hostnames = []store.Hostname{h}
+		s.autoScanHostname(r.Context(), autoFQDN)
 	}
 
 	s.tunnelsChanged()
@@ -1115,6 +1205,17 @@ func (s *Server) createTunnel(w http.ResponseWriter, r *http.Request) {
 	s.Events.PublishTenant(tenantID, events.TypeTunnelCreated, t)
 	s.audit(r, "tunnel.create", t.ID, body.Target)
 	writeJSON(w, http.StatusCreated, t)
+}
+
+// rollbackNewTunnel, createTunnel'da ad baglanamayan yeni tuneli siler. Istek
+// iptal edilmis olsa bile (istemci baglantiyi kapatmis) silme tamamlanmali ki
+// adressiz tunel artigi kalmasin; bu yuzden iptalden bagimsiz baglam kullanir.
+func (s *Server) rollbackNewTunnel(r *http.Request, tenantID, tunnelID string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+	defer cancel()
+	if err := s.Store.DeleteTunnel(ctx, tenantID, tunnelID); err != nil {
+		s.logger().Error("adi baglanamayan tunel geri alinamadi", "tunnel", tunnelID, "hata", err)
+	}
 }
 
 func (s *Server) getTunnel(w http.ResponseWriter, r *http.Request) {
@@ -1200,6 +1301,12 @@ func (s *Server) updateTunnel(w http.ResponseWriter, r *http.Request) {
 		if !s.requireDeviceAccess(w, r, tenantID, cur.ClientID) {
 			return
 		}
+		// Suresi dolan gecici tunel yeniden acilamaz (yalniz silinir).
+		if cur.ExpiredAt != nil {
+			writeJSONError(w, http.StatusConflict, "tunnel_expired",
+				"gecici tunelin suresi doldu; yeniden acilamaz, silip yeniden olusturun")
+			return
+		}
 	}
 	if body.ClientID != nil {
 		if strings.TrimSpace(*body.ClientID) == "" {
@@ -1260,6 +1367,14 @@ func (s *Server) updateTunnel(w http.ResponseWriter, r *http.Request) {
 		s.pushClientConfig(oldClientID) // eski istemciden tüneli düşür
 	}
 	s.Events.PublishTenant(tenantID, events.TypeTunnelUpdated, t)
+	detail := ""
+	if body.Target != nil {
+		detail = "target=" + *body.Target
+	}
+	if body.Enabled != nil {
+		detail += fmt.Sprintf(" enabled=%t", *body.Enabled)
+	}
+	s.audit(r, "tunnel.update", t.ID, strings.TrimSpace(detail))
 	writeJSON(w, http.StatusOK, t)
 }
 
@@ -1282,6 +1397,17 @@ func (s *Server) deleteTunnel(w http.ResponseWriter, r *http.Request) {
 	clientID := ""
 	if t, err := s.Store.GetTunnel(r.Context(), tenantID, id); err == nil {
 		clientID = t.ClientID
+
+		if t.Ephemeral {
+			// Gecici tunelin otomatik (scoped) adi tunelle birlikte serbest kalir.
+			if hs, herr := s.Store.ListHostnamesByTunnel(r.Context(), tenantID, id); herr == nil {
+				for _, h := range hs {
+					if h.Type == store.HostTypeScoped {
+						_ = s.Store.DeleteHostname(r.Context(), tenantID, h.ID)
+					}
+				}
+			}
+		}
 	}
 	if err := s.Store.DeleteTunnel(r.Context(), tenantID, id); err != nil {
 		s.fail(w, err)
@@ -1509,6 +1635,9 @@ func (s *Server) listRequests(w http.ResponseWriter, r *http.Request) {
 		if v := q.Get("min_dur"); v != "" {
 			f.MinDurMS, _ = strconv.ParseInt(v, 10, 64)
 		}
+		if v := strings.TrimSpace(q.Get("ip")); v != "" && len(v) <= 64 {
+			f.ClientIP = v
+		}
 		if v := q.Get("max_dur"); v != "" {
 			f.MaxDurMS, _ = strconv.ParseInt(v, 10, 64)
 		}
@@ -1528,12 +1657,23 @@ func (s *Server) listRequests(w http.ResponseWriter, r *http.Request) {
 		// sizinti). Platform geneli izleme /platform sayfasindadir.
 		if tenantID, ok := s.tenantFor(r); ok {
 			f.TenantID = tenantID
+			// Proje kapsami (tunel/istemci listeleriyle ayni): secili proje.
+			if projID, _ := s.projectFor(r); projID != "" {
+				f.ProjectID = projID
+			}
 		}
 
+		// COUNT(*) buyuk tabloda pahali: toplam yerine limit+1 getirip X-Has-More yazilir.
+		f.Limit = limit + 1
 		if logs, err := s.Store.QueryRequestLogs(r.Context(), f); err == nil {
+			more := len(logs) > limit
+			if more {
+				logs = logs[:limit]
+			}
 			if logs == nil {
 				logs = []reqlog.Entry{}
 			}
+			setHasMore(w, more)
 			writeJSON(w, http.StatusOK, logs)
 			return
 		}
@@ -1550,6 +1690,19 @@ func (s *Server) listRequests(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		entries = scoped
+		if projID, _ := s.projectFor(r); projID != "" {
+			if set, err := s.projectTunnelSet(r.Context(), tenantID, projID); err == nil {
+				inProj := make([]reqlog.Entry, 0, len(entries))
+				for _, e := range entries {
+					if set[e.TunnelID] {
+						inProj = append(inProj, e)
+					}
+				}
+				entries = inProj
+			} else {
+				entries = []reqlog.Entry{} // fail-closed
+			}
+		}
 	}
 	if reason, rej := q.Get("reason"), q.Get("rejected"); reason != "" || rej == "true" || rej == "1" {
 		kept := make([]reqlog.Entry, 0, len(entries))
@@ -1590,6 +1743,12 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 	// (request.completed, tunnel.*, client.*). Aksi halde baska kiracinin tunel
 	// hedefleri/istemci kimlikleri ve canli trafigi sizardi.
 	viewerTenant, _ := s.tenantFor(r)
+	// Proje kapsami: istek kayitlari yalniz secili projenin tunelleri icin gonderilir.
+	viewerProject, _ := s.projectFor(r)
+	var projScope *projectTunnelCache
+	if viewerProject != "" && viewerTenant != "" {
+		projScope = &projectTunnelCache{s: s, tenant: viewerTenant, project: viewerProject}
+	}
 
 	// Bosta kalan baglantiyi ara proxy'ler kapatmasin diye periyodik yorum.
 	ticker := time.NewTicker(events.HeartbeatInterval)
@@ -1610,6 +1769,11 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 			}
 			if !streamEventVisible(e, viewerTenant) {
 				continue
+			}
+			if projScope != nil {
+				if entry, ok := e.Data.(reqlog.Entry); ok && !projScope.has(r.Context(), entry.TunnelID) {
+					continue
+				}
 			}
 			data, err := json.Marshal(e.Data)
 			if err != nil {

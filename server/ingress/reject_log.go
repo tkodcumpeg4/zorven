@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tkodcumpeg4/zorven/server/obs"
 	"github.com/tkodcumpeg4/zorven/server/reqlog"
 	"github.com/tkodcumpeg4/zorven/server/store"
 )
@@ -123,6 +124,7 @@ func (h *Handler) logReject(tun store.HostRoute, r *http.Request, status int, re
 // logRejectID, logReject ile aynidir; id doluysa kayit bu istek kimligiyle yazilir
 // (yanitta X-Zorven-Request-Id olarak istemciye de verilmistir).
 func (h *Handler) logRejectID(tun store.HostRoute, r *http.Request, status int, reason string, started time.Time, id string) {
+	obs.CountReject(reason) // metrik: sinif bazli (kiraci/host etiketi yok)
 	if tun.TunnelID == "" || tun.TenantID == "" {
 		return
 	}

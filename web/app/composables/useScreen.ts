@@ -43,8 +43,15 @@ export interface ScreenCursorShape { w: number, h: number, hotX: number, hotY: n
  */
 export interface ScreenViewerState { layered: boolean, layer: 'high' | 'low', auto: boolean, fps: number }
 
-/** Sunucunun bildirdigi yayin yetenekleri (istemci pazarligina gore). */
-export interface ScreenCaps { cursor: boolean, clipboard: boolean, files: boolean }
+/**
+ * Sunucunun bildirdigi yayin yetenekleri (istemci pazarligina gore). maxFps:
+ * bu izleyici icin etkin kare hizi tavani (plan ve ajan yeteneginin asgarisi);
+ * eski sunucuda yok.
+ */
+export interface ScreenCaps { cursor: boolean, clipboard: boolean, files: boolean, maxFps?: number }
+
+/** Bilet yanitindaki plan sinirlari (WS acilmadan once bildirilir). */
+export interface ScreenPlanLimits { maxFps: number, maxResolution: string }
 
 /** Dosya aktarimi durumu (izleyiciye ozel): token yalniz kontrolcuye verilir. */
 export interface ScreenFilesState { enabled: boolean, controller: boolean, token: string }
@@ -100,6 +107,8 @@ type FrameMsg = {
   reason?: string
   /** caps mesaji: ajan H.264 video modunu pazarladi mi. video_policy: etkin mod / desteksiz izleyici sayisi. */
   video?: boolean
+  /** caps mesaji: bu izleyici icin etkin kare hizi tavani (plan + ajan yetenegi). */
+  max_fps?: number
   effective?: string
   unsupported?: number
 }
@@ -200,6 +209,8 @@ export function useScreen() {
       onSettingsChanged?: (s: ScreenSettingsChanged) => void
       /** Bilet yanitindaki control_allowed (rol: yalniz owner/admin denetler); WS acilmadan once cagrilir. */
       onControlAllowed?: (allowed: boolean) => void
+      /** Bilet yanitindaki plan sinirlari (max_fps: 30; Team/Enterprise 60); WS acilmadan once cagrilir. */
+      onPlanLimits?: (l: ScreenPlanLimits) => void
       /** Baglantida salt-izleme iste. */
       viewOnly?: boolean
       /** Katmanli yayinda kendi etkin katmanin / fps tavanin (degisince gelir). */
@@ -226,12 +237,15 @@ export function useScreen() {
     if (key.value) {
       headers.Authorization = `Bearer ${key.value}`
     }
-    const { ticket, control_allowed: controlAllowed } = await $fetch<{ ticket: string, control_allowed?: boolean }>('/api/v1/screen-ticket', {
+    const { ticket, control_allowed: controlAllowed, max_fps: maxFps, max_resolution: maxResolution } = await $fetch<{
+      ticket: string, control_allowed?: boolean, max_fps?: number, max_resolution?: string
+    }>('/api/v1/screen-ticket', {
       method: 'POST',
       headers,
       body: { client_id: clientID },
     })
     opts.onControlAllowed?.(controlAllowed !== false)
+    opts.onPlanLimits?.({ maxFps: maxFps ?? 0, maxResolution: maxResolution ?? '' })
     // Yetkisiz (uye) rol: sunucu zaten kilitli acar; istemci de salt-izleme ister.
     if (controlAllowed === false) opts.viewOnly = true
 
@@ -593,7 +607,7 @@ export function useScreen() {
       if (msg.type === 'caps') {
         vinfo.available = !!msg.video
         emitVideo()
-        opts.onCaps?.({ cursor: !!msg.cursor, clipboard: !!msg.clipboard, files: !!msg.files })
+        opts.onCaps?.({ cursor: !!msg.cursor, clipboard: !!msg.clipboard, files: !!msg.files, maxFps: msg.max_fps || undefined })
         return
       }
       if (msg.type === 'files') {

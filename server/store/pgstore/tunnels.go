@@ -14,15 +14,15 @@ import (
 // NULL olabilir; COALESCE ile 0'a duser). tunnelInsertCols INSERT icindir.
 //
 // hostname YOK: adlar hostnames tablosunda tutulur (bkz. hostnames.go).
-const tunnelSelectCols = `id, tenant_id, client_id, target, enabled, created_at, proto, exposure, COALESCE(public_port, 0), frozen, COALESCE(project_id, ''), ephemeral, expires_at, COALESCE(private_name, ''), public_ip`
+const tunnelSelectCols = `id, tenant_id, client_id, target, enabled, created_at, proto, exposure, COALESCE(public_port, 0), frozen, COALESCE(project_id, ''), ephemeral, expires_at, COALESCE(private_name, ''), public_ip, expired_at`
 const tunnelInsertCols = `id, tenant_id, client_id, target, enabled, created_at, proto, exposure, project_id`
 
 // scanTunnel, tunnelSelectCols sirasiyla bir satiri okur.
 func scanTunnel(row pgx.Row, tn *store.Tunnel) error {
-	var expires *time.Time
+	var expires, expiredAt *time.Time
 	if err := row.Scan(&tn.ID, &tn.TenantID, &tn.ClientID, &tn.Target, &tn.Enabled,
 		&tn.CreatedAt, &tn.Proto, &tn.Exposure, &tn.PublicPort, &tn.Frozen, &tn.ProjectID,
-		&tn.Ephemeral, &expires, &tn.PrivateName, &tn.PublicIP); err != nil {
+		&tn.Ephemeral, &expires, &tn.PrivateName, &tn.PublicIP, &expiredAt); err != nil {
 		return err
 	}
 	if expires != nil {
@@ -30,6 +30,12 @@ func scanTunnel(row pgx.Row, tn *store.Tunnel) error {
 		tn.ExpiresAt = &u
 	} else {
 		tn.ExpiresAt = nil
+	}
+	if expiredAt != nil {
+		u := expiredAt.UTC()
+		tn.ExpiredAt = &u
+		d := u.Add(store.EphemeralRetain)
+		tn.DeleteAt = &d
 	}
 	return nil
 }
@@ -127,15 +133,77 @@ func (s *Store) CreateEphemeralTunnel(ctx context.Context, tenantID, clientID, t
 	return tn, nil
 }
 
-// DeleteExpiredTunnels, suresi dolmus gecici tunelleri temizler ve temizlenen
-// satir sayisini doner. Hostname ve binding satirlari CASCADE ile gider.
-func (s *Store) DeleteExpiredTunnels(ctx context.Context) (int, error) {
-	tag, err := s.pool.Exec(ctx,
-		`DELETE FROM tunnels WHERE expires_at IS NOT NULL AND expires_at < now()`)
+// ExpireEphemeralTunnels, suresi dolan gecici tunelleri trafige KAPATIR ama
+// silmez: enabled=false ve expired_at=now (saklama penceresi baslar). Yalniz bu
+// turda gecis yapan satirlar doner (UPDATE ... RETURNING tek ifade: cok
+// dugumlu kurulumda gecis olayi iki kez yayilmaz).
+func (s *Store) ExpireEphemeralTunnels(ctx context.Context) ([]store.Tunnel, error) {
+	rows, err := s.pool.Query(ctx,
+		`UPDATE tunnels SET enabled = false, expired_at = now()
+		 WHERE ephemeral AND expires_at IS NOT NULL AND expires_at < now() AND expired_at IS NULL
+		 RETURNING `+tunnelSelectCols)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	return int(tag.RowsAffected()), nil
+	defer rows.Close()
+	var out []store.Tunnel
+	for rows.Next() {
+		var tn store.Tunnel
+		if err := scanTunnel(rows, &tn); err != nil {
+			return out, err
+		}
+		out = append(out, tn)
+	}
+	return out, rows.Err()
+}
+
+// DeleteExpiredTunnels, saklama suresi (store.EphemeralRetain) dolmus gecici
+// tunelleri siler ve SILINEN satirlari doner: cagiran, kiraciya tunnel.deleted
+// olayini ve ilgili istemciye guncel yapilandirmayi bu kayitlardan yayar.
+// Binding satirlari CASCADE ile gider. Tunelin OTOMATIK verilmis (scoped)
+// adi da silinir ki ayni adla yeni tunel acilabilsin; kullanicinin elle
+// bagladigi ozel alan adi ve secili kisa ad (global/custom) tunelden
+// ayrilir (SET NULL) ama silinmez.
+//
+// Tek tx + DELETE ... RETURNING: iki supurucu ayni anda calissa bile her tunel
+// yalniz birinin donusunde gorunur.
+func (s *Store) DeleteExpiredTunnels(ctx context.Context) ([]store.Tunnel, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	secs := store.EphemeralRetain.Seconds()
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM hostnames WHERE type = 'scoped' AND tunnel_id IN (
+		   SELECT id FROM tunnels WHERE ephemeral AND expired_at IS NOT NULL
+		      AND expired_at + make_interval(secs => $1) < now())`, secs); err != nil {
+		return nil, err
+	}
+	rows, err := tx.Query(ctx,
+		`DELETE FROM tunnels WHERE ephemeral AND expired_at IS NOT NULL
+		    AND expired_at + make_interval(secs => $1) < now()
+		 RETURNING `+tunnelSelectCols, secs)
+	if err != nil {
+		return nil, err
+	}
+	var out []store.Tunnel
+	for rows.Next() {
+		var tn store.Tunnel
+		if err := scanTunnel(rows, &tn); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		out = append(out, tn)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // ImportTunnel, satiri OLDUGU GIBI yazar (tek seferlik SQLite gocu icin).

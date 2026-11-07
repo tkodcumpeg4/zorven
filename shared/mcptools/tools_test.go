@@ -261,7 +261,7 @@ func TestToolsMapToEndpoints(t *testing.T) {
 		{"delete_tunnel", map[string]any{"tunnel_id": "t1", "confirm": true, "confirm_name": "x"}, "DELETE", "/api/v1/tunnels/t1", nil, nil},
 		{"delete_domain", map[string]any{"domain_id": "a", "confirm": true, "confirm_name": "X.example.com"}, "DELETE", "/api/v1/hostnames/a", nil, nil},
 	}
-	covered0 := map[string]bool{"set_tunnel_access": true} // ayri testte (ic ice govde)
+	covered0 := map[string]bool{"set_tunnel_access": true, "list_apps": true, "get_app": true, "deploy_app": true, "app_logs": true, "app_action": true} // ayri testte (ic ice govde)
 	covered := covered0
 	for _, tc := range tests {
 		covered[tc.tool] = true

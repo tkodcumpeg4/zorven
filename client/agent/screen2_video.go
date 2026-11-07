@@ -60,6 +60,7 @@ func videoEncoderAvailable() bool {
 		runtime.LockOSThread()
 		defer runtime.UnlockOSThread()
 		platVideoThreadInit()
+		defer platVideoThreadDone()
 		enc, err := newVideoEncoderFn(640, 360, 30, 1_000_000, false)
 		if err != nil {
 			return
@@ -101,7 +102,8 @@ type videoCtl struct {
 
 	pref   atomic.Pointer[string]
 	activA atomic.Bool // active'in diger goroutine'ler icin aynasi
-	broken atomic.Bool // kodlayici calismiyor: karo modunda kal
+	broken atomic.Bool // kodlayici su an calismiyor: karo modunda kal (retry beklemesi bitince yeniden denenir)
+	retry  videoRetry  // ussel geri cekilmeli yeniden deneme (screen2_video_retry.go)
 	idr    atomic.Bool
 
 	// kodlama kuyrugu (derinlik 1, en yeni kazanir)
@@ -152,6 +154,9 @@ func (v *videoCtl) SetPref(mode string) {
 	old := v.getPref()
 	v.pref.Store(&mode)
 	if old != mode {
+		// Kullanici/sunucu modu degistirdi: kalici vazgecilmis olsa bile yeniden dene.
+		v.retry.Reset()
+		v.broken.Store(false)
 		v.s.Keyframe()
 	}
 }
@@ -172,11 +177,15 @@ func (v *videoCtl) setActive(a bool) {
 // oranini isler. Yalniz yakalama goroutine'inden cagrilir.
 func (v *videoCtl) frame(fr *image.RGBA, ratio float64, now time.Time) vidAction {
 	if v.broken.Load() {
-		if v.active {
-			v.leave()
-			return vidLeave
+		if v.retry.Ready(now) {
+			v.broken.Store(false) // bekleme bitti: video yeniden denenir
+		} else {
+			if v.active {
+				v.leave()
+				return vidLeave
+			}
+			return vidNone
 		}
-		return vidNone
 	}
 	w, h := fr.Rect.Dx()&^1, fr.Rect.Dy()&^1
 	if w < videoMinDim || h < videoMinDim || w > protocol.VideoMaxDim || h > protocol.VideoMaxDim {
@@ -306,6 +315,7 @@ func (v *videoCtl) encodeLoop(ctx context.Context) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	platVideoThreadInit()
+	defer platVideoThreadDone()
 	e := &videoEncodeState{v: v}
 	defer e.close()
 	for {
@@ -324,6 +334,8 @@ func (v *videoCtl) encodeLoop(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
+			wait, perm := v.retry.Fail(time.Now())
+			v.s.logWarn("video kodlayici hatasi", "hata", err, "yeniden_deneme", wait, "kalici", perm)
 			v.broken.Store(true)
 			e.close()
 			e.sendStop(ctx)
@@ -422,6 +434,12 @@ func (e *videoEncodeState) encode(ctx context.Context, j *vidJob) error {
 		return nil
 	}
 	au := parseAnnexBAU(out)
+	if au.IDR && (au.SPS == nil || au.PPS == nil) {
+		// Bazi kodlayicilar SPS/PPS'i akis icine koymaz (MF: MF_MT_MPEG_SEQUENCE_HEADER).
+		if sp, ok := e.enc.(interface{ SequenceHeader() []byte }); ok {
+			au = fillParamSets(au, sp.SequenceHeader())
+		}
+	}
 	if au.SPS != nil && au.PPS != nil {
 		if cfg, err := avcDecoderConfig(au.SPS, au.PPS); err == nil {
 			if string(cfg) != string(e.cfg) {
@@ -494,7 +512,11 @@ func (e *videoEncodeState) sendChunk(ctx context.Context, au h264AU, ts time.Dur
 	if err != nil {
 		return err
 	}
-	return v.write(ctx, b, true)
+	if err := v.write(ctx, b, true); err != nil {
+		return err
+	}
+	v.retry.Succeed()
+	return nil
 }
 
 func (e *videoEncodeState) sendStop(ctx context.Context) {

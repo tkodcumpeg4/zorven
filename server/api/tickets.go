@@ -31,6 +31,10 @@ type TicketInfo struct {
 	// istegin uzak ekrani denetleyip denetleyemeyecegi. WS acilisinda kullanici
 	// baglami yoktur; karar bilet verilirken verilir ve burada tasinir.
 	ControlAllowed bool
+	// MaxFPS: ekran biletlerinde, bilet verilirken kiracinin planinin ekran fps
+	// degeri (entitlements.ScreenStreamSpec.MaxFPS; 0 = bilinmiyor => 30). WS
+	// acilisinda sunucunun fps tavani buradan okunur: istemcinin istegine guvenilmez.
+	MaxFPS int
 }
 
 // TicketStore, terminal ve ekran WS'leri icin tek kullanimlik biletleri tutar.
@@ -79,6 +83,17 @@ func (ts *TicketStore) issueFull(kind, tenantID, clientID string, release func()
 	}
 	ts.mu.Unlock()
 	return tok
+}
+
+// setMaxFPS, ekran biletine planin ekran fps degerini isler (WS acilisinda
+// izleyicinin fps tavani olarak okunur).
+func (ts *TicketStore) setMaxFPS(tok string, maxFPS int) {
+	ts.mu.Lock()
+	if info, ok := ts.tickets[tok]; ok {
+		info.MaxFPS = maxFPS
+		ts.tickets[tok] = info
+	}
+	ts.mu.Unlock()
 }
 
 // redeem, bileti dogrular ve TEK KULLANIMLIK oldugu icin siler.

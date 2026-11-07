@@ -145,11 +145,11 @@ func (s *Server) terminalHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// InsecureSkipVerify: true ile origin kontrolu atlanir.
-	// Bu guvenlidir cunku kimlik dogrulamasi cookie/oturum degil, TEK KULLANIMLIK
-	// 30 saniyelik bilet ile yapilmistir (bkz. tickets.go).
-	// coder/websocket dökümantasyonu da herhangi bir origini kabul etmek icin
-	// OriginPatterns:["*"] yerine InsecureSkipVerify:true kullanilmasini belirtir.
+	// Origin dogrulamasi yukarida isAllowedOrigin ile (panel hostlari + ayni
+	// origin) yapildi; Origin basligi yoksa (CLI) gecer, cunku kimlik TEK
+	// KULLANIMLIK 30 sn'lik biletle dogrulanir (bkz. tickets.go). coder/websocket'in
+	// kendi (yalniz ayni host) denetimi panel hostlarini bilmedigi icin
+	// InsecureSkipVerify bilincli kullanilir.
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		InsecureSkipVerify: true,
 	})

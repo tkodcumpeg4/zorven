@@ -3,9 +3,11 @@
 //
 //   - Linux/macOS: Unix alan soketi, dizin 0700 + soket 0600 (+ Linux'ta
 //     SO_PEERCRED ile es uid denetimi; root her zaman kabul edilir).
-//   - Windows: AF_UNIX soketi; bulundugu dizin korumali bir DACL ile yalniz
-//     mevcut kullanici SID'i, SYSTEM ve Administrators'a acilir (service modunda
-//     yalniz SYSTEM + Administrators).
+//   - macOS: LOCAL_PEERCRED ile ayni uid denetimi.
+//   - Windows: named pipe (\\.\pipe\zorven-ctl-<yol karmasi>); acik guvenlik
+//     tanimlayicisi (SYSTEM + Administrators [+ kullanici ajaninda sahibi]) ve
+//     GetNamedPipeClientProcessId -> token SID dogrulamasi. Eski ajanlarla
+//     uyum icin istemci, pipe yoksa eski AF_UNIX dosyasina duser.
 //
 // Ag dinleyicisi YOKTUR; sunucudan gelen hicbir mesaj buraya ulasamaz.
 package localctl
@@ -17,13 +19,29 @@ import (
 	"errors"
 	"fmt"
 	"github.com/tkodcumpeg4/zorven/client/config"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"runtime"
 	"runtime/pprof"
+	"strings"
 	"time"
 )
+
+const (
+	// maxRequestBytes, tek IPC isteginin okunabilecek en buyuk boyutu.
+	maxRequestBytes = 64 << 10
+	// maxConns, es zamanli islenen IPC baglanti tavani.
+	maxConns = 32
+)
+
+// CodeDenied, Response.Code: istemcinin bu islem icin yetkisi yok.
+const CodeDenied = "denied"
+
+// ErrAccessDenied, kontrol kanalina erisim (ya da islem yetkisi) reddedildi.
+// Yanit/baglanma hatasi errors.Is ile bununla eslesir.
+var ErrAccessDenied = errors.New("erisim reddedildi")
 
 // Caps, ajanin izin durumu.
 type Caps struct {
@@ -48,7 +66,7 @@ type Updater interface {
 
 // Request / Response satir tabanli JSON protokolu (tek istek, tek yanit).
 type Request struct {
-	Op       string `json:"op"` // "status" | "set" | "update"
+	Op       string `json:"op"` // "status" | "set" | "update" | "reload" | ...
 	Terminal *bool  `json:"terminal,omitempty"`
 	Screen   *bool  `json:"screen,omitempty"`
 
@@ -76,6 +94,25 @@ type Response struct {
 	Tun *TunInfo `json:"tun,omitempty"`
 	// File (debug_stacks): yazilan tani dosyasinin yolu.
 	File string `json:"file,omitempty"`
+
+	// "status" gozlemlenebilirlik alanlari (bkz. status.go). Diger islemlerde bos.
+	Connected   bool             `json:"connected"`
+	State       string           `json:"state"`
+	LastError   string           `json:"last_error"`
+	Server      string           `json:"server"`
+	StartedAt   string           `json:"started_at"`
+	Reconnects  int              `json:"reconnects"`
+	Disconnects []DisconnectInfo `json:"disconnects"`
+	Tunnels     []TunnelInfo     `json:"tunnels"`
+	NodePinned  bool             `json:"node_pinned,omitempty"`
+	Nodes       []NodeInfo       `json:"nodes,omitempty"`
+	// Deploy: ajan baslarken Zorven Apps izni (enable_deploy) aciktaydi. Eski
+	// ajanlar bu alani yazmaz (kapali sayilir).
+	Deploy bool `json:"deploy,omitempty"`
+	// Code: hata turu; yalniz "denied" (erisim reddedildi).
+	Code string `json:"code,omitempty"`
+	// Reload ("reload" islemi): uygulanan degisiklikler.
+	Reload *ReloadInfo `json:"reload,omitempty"`
 }
 
 // Endpoint, bir kontrol soketi konumu.
@@ -127,6 +164,7 @@ func Serve(ctx context.Context, ep Endpoint, ctl Controller, version string, onC
 		return err
 	}
 	go func() { <-ctx.Done(); _ = ln.Close(); _ = os.Remove(ep.Path) }()
+	sem := make(chan struct{}, maxConns)
 	go func() {
 		for {
 			c, err := ln.Accept()
@@ -137,7 +175,16 @@ func Serve(ctx context.Context, ep Endpoint, ctl Controller, version string, onC
 				time.Sleep(50 * time.Millisecond)
 				continue
 			}
-			go handle(c, ep, ctl, version, onChange)
+			select {
+			case sem <- struct{}{}:
+			default:
+				_ = c.Close() // es zamanli baglanti tavani asildi
+				continue
+			}
+			go func() {
+				defer func() { <-sem }()
+				handle(c, ep, ctl, version, onChange)
+			}()
 		}
 	}()
 	return nil
@@ -146,20 +193,51 @@ func Serve(ctx context.Context, ep Endpoint, ctl Controller, version string, onC
 func handle(c net.Conn, ep Endpoint, ctl Controller, version string, onChange func(string)) {
 	defer c.Close()
 	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
-	if err := checkPeer(c); err != nil {
-		_ = json.NewEncoder(c).Encode(Response{Error: "yetkisiz: " + err.Error()})
-		return
+	acc, err := peerAccess(c, ep)
+	if err != nil {
+		logReject(err)
+		return // baglanti sessizce kapatilir (defer)
 	}
 	var req Request
-	if err := json.NewDecoder(bufio.NewReader(c)).Decode(&req); err != nil {
+	// Istek boyutu sinirli: yerel olsa da tek istek kontrol kanalini sisiremez.
+	if err := json.NewDecoder(bufio.NewReader(io.LimitReader(c, maxRequestBytes))).Decode(&req); err != nil {
 		_ = json.NewEncoder(c).Encode(Response{Error: "gecersiz istek"})
 		return
 	}
 	_ = c.SetDeadline(time.Now().Add(opTimeout(req.Op) + 2*time.Second))
+	if !opAllowed(acc, req.Op) {
+		logReject(fmt.Errorf("islem %q bu erisim duzeyi icin izinli degil", req.Op))
+		_ = json.NewEncoder(c).Encode(Response{Error: "erisim reddedildi: bu islem icin yetki yok", Code: CodeDenied})
+		return
+	}
 	resp := Response{OK: true, Service: ep.Service, PID: os.Getpid(), Version: version}
 	switch req.Op {
 	case "status":
 		resp.Caps = ctl.Current()
+		if sr, ok := ctl.(StatusReporter); ok {
+			resp.fillStatus(sr.StatusInfo())
+		}
+		if acc == accessReadOnly {
+			redactStatus(&resp)
+		}
+	case "reload":
+		rl, ok := ctl.(Reloader)
+		if !ok {
+			resp = Response{Error: "bu istemci ayarlari yeniden yuklemeyi desteklemiyor"}
+			break
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), opTimeout(req.Op))
+		info, err := rl.Reload(ctx)
+		cancel()
+		if err != nil {
+			resp = Response{Error: err.Error()}
+			break
+		}
+		resp.Caps = ctl.Current()
+		resp.Reload = &info
+		if onChange != nil && len(info.Changed) > 0 {
+			onChange("reload: " + strings.Join(info.Changed, ","))
+		}
 	case "set":
 		resp.Caps = ctl.Set(req.Terminal, req.Screen)
 		if onChange != nil {
@@ -218,7 +296,7 @@ func ptr(b *bool) string {
 
 // Call, ep'deki ajana tek bir istek yollar.
 func Call(ep Endpoint, req Request) (Response, error) {
-	c, err := net.DialTimeout("unix", ep.Path, 2*time.Second)
+	c, err := dial(ep, 2*time.Second)
 	if err != nil {
 		return Response{}, err
 	}
@@ -232,6 +310,9 @@ func Call(ep Endpoint, req Request) (Response, error) {
 		return Response{}, err
 	}
 	if !resp.OK {
+		if resp.Code == CodeDenied {
+			return resp, fmt.Errorf("%w: %s", ErrAccessDenied, resp.Error)
+		}
 		return resp, errors.New(resp.Error)
 	}
 	return resp, nil
@@ -242,11 +323,14 @@ func Call(ep Endpoint, req Request) (Response, error) {
 func Find() (*Endpoint, *Response, error) {
 	var firstErr error
 	for _, ep := range Candidates() {
-		if _, err := os.Stat(ep.Path); err != nil {
+		if !present(ep) {
 			continue
 		}
 		r, err := Call(ep, Request{Op: "status"})
 		if err != nil {
+			if absent(err) {
+				continue
+			}
 			if firstErr == nil {
 				firstErr = fmt.Errorf("%s: %w", ep.Path, err)
 			}

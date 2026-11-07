@@ -10,7 +10,7 @@ import (
 )
 
 // checkPeer: es uid (veya root) zorunlu; dizin/soket izinlerine ek savunma.
-func checkPeer(c net.Conn) error {
+func checkPeer(c net.Conn, _ Endpoint) error {
 	uc, ok := c.(*net.UnixConn)
 	if !ok {
 		return nil
@@ -29,8 +29,8 @@ func checkPeer(c net.Conn) error {
 	if gerr != nil {
 		return gerr
 	}
-	if cred.Uid != 0 && int(cred.Uid) != os.Geteuid() {
-		return fmt.Errorf("uid %d izinli degil", cred.Uid)
+	if !uidAllowed(cred.Uid, uint32(os.Geteuid())) {
+		return fmt.Errorf("uid %d (pid %d) izinli degil", cred.Uid, cred.Pid)
 	}
 	return nil
 }

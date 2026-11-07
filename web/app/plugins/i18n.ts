@@ -9,7 +9,7 @@ import en from '~/i18n/locales/en.json'
 let _global: { t: (key: string, ...args: any[]) => string } | null = null
 
 /** Aktif dil kodu (tr|en|ja); i18n hazır değilse tr. */
-export function currentLang(): 'tr' | 'en' | 'ja' {
+export function currentLang(): 'tr' | 'en' | 'ja' | 'zh' {
   const l = (_global as any)?.locale
   const v = l && typeof l === 'object' && 'value' in l ? l.value : l
   return v === 'en' ? v : 'tr'
@@ -18,7 +18,21 @@ export function currentLang(): 'tr' | 'en' | 'ja' {
 /** Tarih/saat bicimlendirme icin BCP47 etiketi (tr-TR, en-US, ja-JP). */
 export function dateLocale(): string {
   const l = currentLang()
-  return l === 'ja' ? 'ja-JP' : l === 'en' ? 'en-US' : 'tr-TR'
+  return l === 'zh' ? 'zh-CN' : l === 'ja' ? 'ja-JP' : l === 'en' ? 'en-US' : 'tr-TR'
+}
+
+/**
+ * Panel dilini sunucuya bildiren çerez (zorven_lang). localStorage sunucuya gitmez; işlem
+ * e-postaları (doğrulama, şifre sıfırlama, 2FA kodu) bu çerezle panelin diliyle gönderilir
+ * (web/server/lib/email-lang.ts okur). Hassas değil; JS ile yazılır.
+ */
+export function persistLangCookie(lang: string): void {
+  try {
+    const secure = location.protocol === 'https:' ? '; Secure' : ''
+    document.cookie = `zorven_lang=${encodeURIComponent(lang)}; Path=/; Max-Age=31536000; SameSite=Lax${secure}`
+  } catch {
+    /* çerez yazılamadı: sunucu Accept-Language'e düşer */
+  }
 }
 
 /** Setup dışından güvenli çeviri; i18n hazır değilse anahtarı döndürür. */
@@ -41,6 +55,8 @@ export default defineNuxtPlugin((nuxtApp) => {
     }
     if (saved === 'en' || saved === 'tr') initial = saved
     else initial = browserLang()
+    // Etkin panel dili sunucuya da bildirilir (e-posta dili): ilk açılışta tarayıcı dili de dahil.
+    persistLangCookie(initial)
   }
   const i18n = createI18n({
     legacy: false,
@@ -54,7 +70,7 @@ export default defineNuxtPlugin((nuxtApp) => {
 })
 
 /** Tarayıcının tercih ettiği dillerden ilk tanınanı seçer; Türkçe -> tr, aksi halde İngilizce. */
-export function browserLang(langs: readonly string[] = navigator.languages?.length ? navigator.languages : [navigator.language]): 'tr' | 'en' | 'ja' {
+export function browserLang(langs: readonly string[] = navigator.languages?.length ? navigator.languages : [navigator.language]): 'tr' | 'en' | 'ja' | 'zh' {
   for (const l of langs) {
     const p = (l || '').toLowerCase().split('-')[0]
     if (p === 'tr') return 'tr'

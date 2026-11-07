@@ -36,8 +36,48 @@ const (
 	defaultUDPMaxFlows  = 1024
 )
 
+// Varsayilan PPS sinirlari: oyun/VoIP tipik hizlari (20-200 pps/flow) bunlarin
+// cok altindadir. Asan paketler kuyruga alinmaz, dusurulur (dropped_rate).
+//
+// Ortam degiskenleri (main.go okur, SetUDPDefaultPPS ile uygular):
+//
+//	ZORVEN_UDP_FLOW_PPS    flow basina varsayilan (vars. 2000; 0 = sinirsiz)
+//	ZORVEN_UDP_TUNNEL_PPS  tunel toplam varsayilani (vars. 20000; 0 = sinirsiz)
+//
+// Tunel kaydinda max_pps / max_flow_pps > 0 ise o deger gecerlidir; 0 ise bu
+// varsayilanlar uygulanir. Kova 1 saniyelik patlama payi tutar.
+const (
+	DefaultUDPFlowPPS   = 2000
+	DefaultUDPTunnelPPS = 20000
+
+	udpRateLogEvery = time.Minute
+)
+
+var (
+	udpDefFlowPPS   atomic.Int64
+	udpDefTunnelPPS atomic.Int64
+)
+
+func init() {
+	udpDefFlowPPS.Store(DefaultUDPFlowPPS)
+	udpDefTunnelPPS.Store(DefaultUDPTunnelPPS)
+}
+
+// SetUDPDefaultPPS, tunel kaydinda deger verilmeyen (0) tuneller icin flow ve
+// tunel PPS varsayilanlarini ayarlar. 0 = sinirsiz, negatif = varsayilana don.
+func SetUDPDefaultPPS(flow, tunnel int) {
+	if flow < 0 {
+		flow = DefaultUDPFlowPPS
+	}
+	if tunnel < 0 {
+		tunnel = DefaultUDPTunnelPPS
+	}
+	udpDefFlowPPS.Store(int64(flow))
+	udpDefTunnelPPS.Store(int64(tunnel))
+}
+
 // UDPLimits, bir UDP tunelinin sinirlari. Sifir alanlar varsayilana duser
-// (MaxPPS / MaxFlowPPS icin sifir = sinirsiz).
+// (MaxPPS / MaxFlowPPS icin sifir = SetUDPDefaultPPS varsayilani; negatif = sinirsiz).
 type UDPLimits struct {
 	IdleTimeout time.Duration
 	MaxPacket   int
@@ -56,11 +96,17 @@ func (l UDPLimits) normalized() UDPLimits {
 	if l.MaxFlows <= 0 {
 		l.MaxFlows = defaultUDPMaxFlows
 	}
-	if l.MaxPPS < 0 {
+	switch {
+	case l.MaxPPS < 0:
 		l.MaxPPS = 0
+	case l.MaxPPS == 0:
+		l.MaxPPS = int(udpDefTunnelPPS.Load())
 	}
-	if l.MaxFlowPPS < 0 {
+	switch {
+	case l.MaxFlowPPS < 0:
 		l.MaxFlowPPS = 0
+	case l.MaxFlowPPS == 0:
+		l.MaxFlowPPS = int(udpDefFlowPPS.Load())
 	}
 	return l
 }
@@ -104,6 +150,13 @@ type udpFlow struct {
 
 	// unregLive: canli akis defteri (Reevaluate) kaydini siler.
 	unregLive func()
+
+	// clientID, flow'un yapistigi istemci (birincil ya da replika). Flow omru
+	// boyunca degismez; oturum gidince flow silinir ve sonraki paket yeniden eslenir.
+	clientID string
+	// release, replikali tunelde istemcinin acik-flow sayacini azaltir (tek sefer;
+	// nil = replikasiz flow).
+	release func()
 }
 
 // udpCounters, dinleyici basladigindan beri biriken sayaclar.
@@ -131,6 +184,7 @@ type udpListener struct {
 
 	tunnelBucket  tokenBucket // tunel PPS (yalnizca okuma dongusu)
 	newFlowBucket tokenBucket // yeni flow hizi (yalnizca okuma dongusu)
+	rateLogAt     time.Time   // son hiz-siniri logu (yalnizca okuma dongusu)
 
 	// meter: kiracinin aylik kullanimi + hiz siniri (nil = yok). Dinleyici
 	// basina tek Batcher; datagram basina yalnizca atomikler, rateLoop (1 sn)
@@ -170,10 +224,37 @@ func (m *Manager) newUDPListener(bind string, port int, ti TunnelInfo) (*udpList
 }
 
 // setInfo, tunel bilgisini (istemci, sinirlar) canli gunceller; dinleyici
-// yeniden acilmaz, mevcut flow'lar korunur.
+// yeniden acilmaz, mevcut flow'lar korunur. Tek istisna replikali tunelde aday
+// kumesi degistiginde: artik aday olmayan istemciye (kaldirilan replika) yapisik
+// flow'lar birakilir, sonraki paket yeniden eslenir. Replikasiz tunelde ek is yok.
 func (ul *udpListener) setInfo(ti TunnelInfo) {
 	ti.UDP = ti.UDP.normalized()
-	ul.ti.Store(&ti)
+	old := ul.ti.Swap(&ti)
+	if old != nil && (len(old.Replicas) > 0 || len(ti.Replicas) > 0) && !sameCandidates(*old, ti) {
+		// Asenkron: removeFlow ajana StreamClose yazar (bloklayabilir); setInfo
+		// Manager.Reload icinden, m.mu altinda cagrilir.
+		go ul.dropStaleFlows()
+	}
+}
+
+// dropStaleFlows, tunelin GUNCEL aday kumesinde olmayan istemciye yapisik flow'lari kapatir.
+func (ul *udpListener) dropStaleFlows() {
+	keep := ul.info().candidates()
+	type staleFlow struct {
+		key string
+		f   *udpFlow
+	}
+	var stale []staleFlow
+	ul.mu.Lock()
+	for k, f := range ul.flows {
+		if f.clientID != "" && !containsID(keep, f.clientID) {
+			stale = append(stale, staleFlow{k, f})
+		}
+	}
+	ul.mu.Unlock()
+	for _, s := range stale {
+		ul.removeFlow(s.key, s.f)
+	}
 }
 
 func (ul *udpListener) info() TunnelInfo { return *ul.ti.Load() }
@@ -187,6 +268,9 @@ func (ul *udpListener) close() {
 		for k, f := range ul.flows {
 			f.cancel()
 			f.stream.Close("listener closed")
+			if f.release != nil {
+				f.release()
+			}
 			delete(ul.flows, k)
 		}
 		ul.mu.Unlock()
@@ -214,6 +298,7 @@ func (ul *udpListener) admit(lim UDPLimits, size int, f *udpFlow, active int, no
 	}
 	if !ul.tunnelBucket.allow(lim.MaxPPS, now) {
 		ul.stats.droppedRate.Add(1)
+		ul.logRateDrop("tunnel", lim.MaxPPS, now)
 		return false
 	}
 	if f == nil {
@@ -225,9 +310,23 @@ func (ul *udpListener) admit(lim UDPLimits, size int, f *udpFlow, active int, no
 	}
 	if !f.bucket.allow(lim.MaxFlowPPS, now) {
 		ul.stats.droppedRate.Add(1)
+		ul.logRateDrop("flow", lim.MaxFlowPPS, now)
 		return false
 	}
 	return true
+}
+
+// logRateDrop, PPS siniri asimini tunel basina dakikada en fazla bir kez loglar.
+func (ul *udpListener) logRateDrop(kind string, limit int, now time.Time) {
+	if !ul.rateLogAt.IsZero() && now.Sub(ul.rateLogAt) < udpRateLogEvery {
+		return
+	}
+	ul.rateLogAt = now
+	if ul.m == nil || ul.m.Log == nil {
+		return
+	}
+	ul.m.Log.Warn("rawproxy: udp pps siniri asildi, paketler dusuruluyor",
+		"kind", kind, "limit_pps", limit, "tunnel", ul.info().TunnelID)
 }
 
 // handle, tek bir gelen datagrami isler. Yalnizca okuma dongusunden cagrilir.
@@ -275,17 +374,37 @@ func (ul *udpListener) openFlow(ti TunnelInfo, src *net.UDPAddr, key string) *ud
 	if !ok {
 		return nil
 	}
-	sess, online := ul.m.Hub.Get(ti.ClientID)
-	if !online {
-		return nil
+	var (
+		stream  bridgeStream
+		cid     = ti.ClientID
+		release func()
+		ctx     context.Context
+		cancel  context.CancelFunc
+	)
+	if len(ti.Replicas) > 0 || ul.m.useRemote(ti.ClientID) {
+		// (Oturum baska dugumdeyse tek adayli sira ile dugumler arasi tunel kullanilir.)
+		// Replikali tunel: yeni flow icin aday secimi (replicas.go). Flow bu
+		// oturuma yapisik kalir; oturum gidince silinir ve yeniden eslenir.
+		ctx, cancel = context.WithCancel(ul.m.ctx())
+		if stream, cid, release = ul.m.openReplicaUDP(ctx, ti, key); stream == nil {
+			cancel()
+			return nil
+		}
+	} else {
+		sess, online := ul.m.Hub.Get(ti.ClientID)
+		if !online {
+			return nil
+		}
+		ctx, cancel = context.WithCancel(ul.m.ctx())
+		rs, err := sess.OpenStream(ctx, ti.TunnelID, "udp", key)
+		if err != nil {
+			cancel()
+			return nil
+		}
+		stream = rs
 	}
-	ctx, cancel := context.WithCancel(ul.m.ctx())
-	stream, err := sess.OpenStream(ctx, ti.TunnelID, "udp", key)
-	if err != nil {
-		cancel()
-		return nil
-	}
-	f := &udpFlow{stream: stream, cancel: cancel, lastSeen: time.Now().UnixNano(), grantExp: grantExp}
+	f := &udpFlow{stream: stream, cancel: cancel, lastSeen: time.Now().UnixNano(), grantExp: grantExp,
+		clientID: cid, release: release}
 	if !grantExp.IsZero() {
 		f.unreg = ul.m.doorConns.add(ti.TunnelID, src.IP.String(), func() { ul.removeFlow(key, f) })
 	}
@@ -365,6 +484,9 @@ func (ul *udpListener) removeFlow(key string, f *udpFlow) {
 	}
 	f.cancel()
 	f.stream.Close("flow closed")
+	if f.release != nil {
+		f.release()
+	}
 }
 
 func (ul *udpListener) idleSweep() {
@@ -375,23 +497,29 @@ func (ul *udpListener) idleSweep() {
 		case <-ul.done:
 			return
 		case <-tk.C:
-			cutoff := time.Now().Add(-ul.info().UDP.IdleTimeout).UnixNano()
-			type staleFlow struct {
-				key string
-				f   *udpFlow
-			}
-			var stale []staleFlow
-			ul.mu.Lock()
-			for k, f := range ul.flows {
-				if f.lastSeen < cutoff || (!f.grantExp.IsZero() && time.Now().After(f.grantExp)) {
-					stale = append(stale, staleFlow{k, f})
-				}
-			}
-			ul.mu.Unlock()
-			for _, s := range stale {
-				ul.removeFlow(s.key, s.f)
-			}
+			ul.sweepIdle(time.Now())
 		}
+	}
+}
+
+// sweepIdle, bosta kalan (IdleTimeout) ya da grant suresi dolan flow'lari kapatir.
+// Replikali tunelde de ayni: bosta kalan esleme (flow) silinir, sonraki paket yeniden eslenir.
+func (ul *udpListener) sweepIdle(now time.Time) {
+	cutoff := now.Add(-ul.info().UDP.IdleTimeout).UnixNano()
+	type staleFlow struct {
+		key string
+		f   *udpFlow
+	}
+	var stale []staleFlow
+	ul.mu.Lock()
+	for k, f := range ul.flows {
+		if f.lastSeen < cutoff || (!f.grantExp.IsZero() && now.After(f.grantExp)) {
+			stale = append(stale, staleFlow{k, f})
+		}
+	}
+	ul.mu.Unlock()
+	for _, s := range stale {
+		ul.removeFlow(s.key, s.f)
 	}
 }
 

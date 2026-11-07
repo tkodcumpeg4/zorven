@@ -3,8 +3,18 @@
 //
 // Yalnizca bizim mail domainimize ve GECERLI bir kiraci slug'ina yonelik
 // alicilar kabul edilir; digerleri 550 ile reddedilir (open relay degildir).
-// Kimlik dogrulama yoktur — internetten gelen MTA'lar anonim teslim eder; bu
-// yuzden yalnizca RCPT'i bilinen adreslere kisitlariz.
+// SMTP kimlik dogrulamasi (AUTH) yoktur — internetten gelen MTA'lar anonim
+// teslim eder; bu yuzden yalnizca RCPT'i bilinen adreslere kisitlariz.
+//
+// Gelen her ileti DATA sonunda SPF / DKIM / DMARC ile dogrulanir (bkz.
+// mailauth ve InboundAuth): sonuc iletinin en ustune Authentication-Results
+// (RFC 8601) olarak yazilir; DMARC p=reject basarisizligi 550 5.7.1 ile
+// reddedilir, p=quarantine ya da (DMARC kaydi yokken) SPF fail + gecerli DKIM
+// yoklugu Onemsiz (\Junk) klasorune gider; gecici DNS hatalarinda ileti normal
+// teslim edilir.
+//
+// Kabul edilen her iletiye RFC 5321 madde 4.4 izleme basligi (Received) eklenir
+// ve EN USTE durur; Authentication-Results onun altindadir (bkz. received.go).
 package mail
 
 import (
@@ -14,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -22,6 +33,7 @@ import (
 	_ "github.com/emersion/go-message/charset" // ISO-8859-x, windows-125x vb. cozumleme
 	"github.com/emersion/go-message/mail"
 	"github.com/emersion/go-smtp"
+	"github.com/tkodcumpeg4/zorven/server/mail/mailauth"
 	"github.com/tkodcumpeg4/zorven/server/store"
 )
 
@@ -34,6 +46,9 @@ const (
 type Backend struct {
 	// Local, adres cozumleme + INBOX teslimi (SMTP gonderim ve panel ile ortak).
 	Local *Local
+	// Auth, gelen iletilerin SPF/DKIM/DMARC dogrulamasidir; nil ise dogrulama
+	// yapilmaz (eski davranis).
+	Auth *InboundAuth
 }
 
 // NewServer, verilen adreste (or. ":25") dinleyecek yapilandirilmis bir SMTP
@@ -47,9 +62,16 @@ func NewServer(st store.Store, domain, platformDomain string, systemLocalParts [
 	return NewServerLocal(NewLocal(st, domain, platformDomain, systemLocalParts), addr)
 }
 
-// NewServerLocal, hazir bir Local ile gelen SMTP sunucusu kurar.
+// NewServerLocal, hazir bir Local ile gelen SMTP sunucusu kurar; kimlik
+// dogrulama varsayilan kipte (AuthEnforce) ve sistem DNS cozumleyicisiyle acik gelir.
 func NewServerLocal(l *Local, addr string) *smtp.Server {
-	be := &Backend{Local: l}
+	return NewServerLocalAuth(l, addr, NewInboundAuth(l, AuthEnforce, nil))
+}
+
+// NewServerLocalAuth, NewServerLocal gibidir; kimlik dogrulama ayarini disaridan
+// alir (nil: dogrulama kapali).
+func NewServerLocalAuth(l *Local, addr string, auth *InboundAuth) *smtp.Server {
+	be := &Backend{Local: l, Auth: auth}
 	s := smtp.NewServer(be)
 	s.Addr = addr
 	s.Domain = l.MailDomain
@@ -61,23 +83,46 @@ func NewServerLocal(l *Local, addr string) *smtp.Server {
 	return s
 }
 
-func (b *Backend) NewSession(_ *smtp.Conn) (smtp.Session, error) {
-	return &session{be: b}, nil
+func (b *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
+	return &session{be: b, conn: c}, nil
 }
 
 type session struct {
 	be   *Backend
+	conn *smtp.Conn
 	from string
 	rcpt []string
+
+	// Istemci bilgisi: Mail() aninda baglantidan alinir (testler dogrudan doldurur).
+	remoteIP net.IP
+	helo     string
+	// tls, islem STARTTLS ile sifreli bir baglantida mi basladi (Received: with ESMTPS).
+	tls bool
 }
 
 func (s *session) Mail(from string, _ *smtp.MailOptions) error {
 	s.from = strings.TrimSpace(from)
+	if s.conn != nil {
+		// Mail() EHLO/HELO'dan sonra cagrilir; SPF icin istemci adresi ve HELO adi gerekir.
+		s.helo = s.conn.Hostname()
+		s.remoteIP = connIP(s.conn.Conn())
+		// STARTTLS sonrasi istemci EHLO + MAIL'i yeniden verir; durum islem basinda okunur.
+		_, s.tls = s.conn.TLSConnectionState()
+	}
 	return nil
 }
 
 func (s *session) Rcpt(to string, _ *smtp.RcptOptions) error {
 	to = strings.TrimSpace(strings.ToLower(to))
+	// RFC 5321 madde 4.5.1: "postmaster" alan adsiz da gecerli bir alicidir ve
+	// desteklenmesi ZORUNLUDUR; platformun postmaster@<platform> sistem kutusuna gider.
+	// Platform alan adi yoksa (gelistirme) eski davranis: alan adsiz adres reddedilir.
+	//
+	// Tel uzerinde: go-smtp yerel kopyasi (server/third_party/go-smtp, YAMA.md)
+	// RCPT'te alan adsiz postmaster'i oturuma iletir.
+	if to == "postmaster" && s.be.Local.PlatformDomain != "" {
+		to += "@" + s.be.Local.PlatformDomain
+	}
 	at := strings.LastIndex(to, "@")
 	if at < 0 {
 		return &smtp.SMTPError{Code: 550, Message: "gecersiz alici adresi"}
@@ -110,10 +155,32 @@ func (s *session) Data(r io.Reader) error {
 		return fmt.Errorf("mail govdesi okunamadi: %w", err)
 	}
 
+	// Kimlik dogrulama (SPF / DKIM / DMARC): kendi DNS zaman siniri vardir
+	// (mailauth.DefaultTimeout); teslim baglami bundan ayridir.
+	var opts DeliverOpts
+	if a := s.be.Auth; a != nil && a.Verifier != nil {
+		res := a.Verifier.Verify(context.Background(), mailauth.Input{
+			ClientIP: s.remoteIP, HELO: s.helo, MailFrom: s.from, Message: raw,
+		})
+		// Sahte Authentication-Results basliklari silinir, sonuc en uste eklenir.
+		raw = mailauth.Prepend(raw, a.AuthservID, res, a.StripIDs...)
+		act := a.action(res, s.rcpt)
+		log.Printf("[mail] gelen ileti dogrulamasi: %s", authSummary(res, s.remoteIP, act))
+		switch act {
+		case mailauth.ActionReject:
+			return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 7, 1}, Message: rejectText(res)}
+		case mailauth.ActionJunk:
+			opts.Junk = true
+		}
+	}
+
+	// RFC 5321 madde 4.4: izleme basligi EN USTE (Authentication-Results altinda kalir).
+	raw = append(s.receivedHeader(), raw...)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	n, err := s.be.Local.Deliver(ctx, s.from, s.rcpt, raw)
+	n, err := s.be.Local.DeliverWith(ctx, s.from, s.rcpt, raw, opts)
 	if err != nil {
 		return &smtp.SMTPError{Code: 451, Message: "gecici depolama hatasi, sonra tekrar deneyin"}
 	}
@@ -121,9 +188,29 @@ func (s *session) Data(r io.Reader) error {
 	return nil
 }
 
+// receivedHeader, bu islem icin Received satirlarini uretir. "for" yalniz tek
+// (tekil) alici varsa yazilir: coklu aliciya yazmak diger alicilari sizdirirdi.
+func (s *session) receivedHeader() []byte {
+	forRcpt := ""
+	if len(s.rcpt) > 0 {
+		forRcpt = s.rcpt[0]
+		for _, rc := range s.rcpt[1:] {
+			if rc != forRcpt {
+				forRcpt = ""
+				break
+			}
+		}
+	}
+	return receivedStamp{
+		HELO: s.helo, IP: s.remoteIP, By: s.be.Local.MailDomain, TLS: s.tls,
+		ID: newReceivedID(), For: forRcpt, At: time.Now(),
+	}.header()
+}
+
 func (s *session) Reset() {
 	s.from = ""
 	s.rcpt = nil
+	s.tls = false
 }
 
 func (s *session) Logout() error { return nil }

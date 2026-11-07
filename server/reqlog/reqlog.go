@@ -89,6 +89,7 @@ type MetricBucket struct {
 type Filter struct {
 	TenantID  string    // zorunlu kapsam (bos = tum kiracilar, yalnizca platform admin)
 	TunnelID  string    // belirli tunel
+	ProjectID string    // yalniz bu projenin tunelleri (TenantID ile birlikte kullanilir; bos = proje suzmesi yok)
 	Hostname  string    // belirli hostname
 	Method    string    // GET/POST/...
 	StatusMin int       // dahil (or. 400)
@@ -98,6 +99,7 @@ type Filter struct {
 	Until     time.Time // bu ana kadar
 	MinDurMS  int64     // en az sure
 	MaxDurMS  int64     // en fazla sure (0 = sinirsiz)
+	ClientIP  string    // istemci IP'si: tam adres ya da onek ("84.38." gibi)
 	Rejected  bool      // true: yalnizca ingress'in reddettigi istekler
 	Reason    string    // belirli reject_reason (Rejected'i da ima eder)
 	Limit     int       // sayfa boyutu

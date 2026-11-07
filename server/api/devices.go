@@ -88,13 +88,20 @@ func (s *Server) listDevices(w http.ResponseWriter, r *http.Request) {
 		}
 	})
 
-	if limit, cursor, ok := parsePage(r); ok {
+	if legacyCursorMode(r) {
+		limit, cursor, _ := parsePage(r)
 		page, next, more := paginate(out, func(d Device) string { return d.ID }, limit, cursor)
 		setPageHeaders(w, r, next, more)
 		writeJSON(w, http.StatusOK, page)
 		return
 	}
-	writeJSON(w, http.StatusOK, out)
+	// Siralama canli duruma (online) bagli ve yetki suzgeci uygulandigi icin
+	// SQL'e indirilemez; ayni kararli sirayla bellekte dilimlenir.
+	pg, ok := pageOf(w, r)
+	if !ok {
+		return
+	}
+	writeJSON(w, http.StatusOK, slicePage(w, pg, out))
 }
 
 func (s *Server) getDevice(w http.ResponseWriter, r *http.Request) {

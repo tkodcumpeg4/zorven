@@ -212,5 +212,8 @@ function copyBackup() {
 
       <div v-else class="mt-5 text-sm text-fg-muted">{{ t('common.loading') }}</div>
     </div>
+
+    <!-- Etkin oturumlar: cihaz/IP/zaman, tek oturumu ya da diğerlerini sonlandırma (yalnız e-posta/şifre hesapları) -->
+    <AccountSessions v-if="method === 'better-auth'" />
   </div>
 </template>

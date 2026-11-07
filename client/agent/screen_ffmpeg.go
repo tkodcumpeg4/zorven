@@ -39,7 +39,7 @@ func detectHWEncoder() string {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		out, err := exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-encoders").Output()
+		out, err := hideConsole(exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-encoders")).Output()
 		if err != nil {
 			return
 		}
@@ -97,7 +97,7 @@ func (sm *screenManager) captureH264(ctx context.Context, ss *screenSession, dis
 		args = insertAfter(args, "desktop", "-vf", "scale="+itoa(maxWidth)+":-2")
 	}
 
-	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
+	cmd := hideConsole(exec.CommandContext(ctx, "ffmpeg", args...))
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return false

@@ -12,11 +12,11 @@ import "github.com/kardianos/service"
 const systemdUnitWithNetAdmin = `[Unit]
 Description={{Description}}
 ConditionFileIsExecutable={{Path | cmdEscape}}
+StartLimitIntervalSec=300
+StartLimitBurst=10
 {{range Dependencies}}{{.}}
 {{end}}
 [Service]
-StartLimitInterval=5
-StartLimitBurst=10
 ExecStart={{Path | cmdEscape}}{{range Arguments}} {{. | cmd}}{{end}}
 {{if ChRoot}}RootDirectory={{ChRoot | cmd}}
 {{end}}{{if WorkingDirectory}}WorkingDirectory={{WorkingDirectory | cmdEscape}}
@@ -29,7 +29,8 @@ StandardError=file:{{LogDirectory}}/{{Name}}.err
 {{end}}{{if Restart}}Restart={{Restart}}
 {{end}}{{if SuccessExitStatus}}SuccessExitStatus={{SuccessExitStatus}}
 {{end}}AmbientCapabilities=CAP_NET_ADMIN
-RestartSec=120
+RestartSec=5
+RestartPreventExitStatus=78
 EnvironmentFile=-/etc/sysconfig/{{Name}}
 
 {{range EnvVars}}{{.}}

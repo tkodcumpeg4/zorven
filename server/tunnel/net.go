@@ -55,7 +55,7 @@ func (s *Session) handleNet(ctx context.Context, t protocol.MessageType, data []
 	if nc == nil && t == protocol.TypeNetRegister {
 		ob := netctl.NewOutbox()
 		nc = s.netMgr.Attach(netctl.Identity{
-			TenantID: s.TenantID, Kind: netctl.KindDevice, ClientID: s.ClientID, ClientName: s.ClientName,
+			TenantID: s.TenantID, Kind: netctl.KindDevice, ClientID: s.ClientID, ClientName: s.ClientName, UserID: s.UserID,
 			Punch: s.netPunch, Tun: s.netTun, ALog: s.netALog,
 		}, ob)
 		s.netConn = nc

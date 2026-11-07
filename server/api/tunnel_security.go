@@ -66,6 +66,7 @@ func (s *Server) getTunnelSecurity(w http.ResponseWriter, r *http.Request) {
 		"geo":           cfg.Geo,
 		"bot":           cfg.Bot,
 		"rate":          cfg.Rate,
+		"trusted":       cfg.Trusted,
 		"updated_at":    ts.UpdatedAt,
 		"rules":         tunsec.Rules(),
 		"geo_db_loaded": geoLoaded,
@@ -116,7 +117,7 @@ func (s *Server) setTunnelSecurity(w http.ResponseWriter, r *http.Request) {
 	s.tunnelsChanged() // router snapshot'i + rawproxy Geo haritasi tazelensin
 	// Z2: acik ham TCP/UDP akislari yeni ayara gore yeniden degerlendirilsin.
 	s.notifyAuthzChange(tenantID)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "waf": cfg.WAF, "geo": cfg.Geo, "bot": cfg.Bot, "rate": cfg.Rate})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "waf": cfg.WAF, "geo": cfg.Geo, "bot": cfg.Bot, "rate": cfg.Rate, "trusted": cfg.Trusted})
 }
 
 // notifyAuthzChange, Z2 olay noktasi: ham TCP/UDP ve ziyaretci akislarinin

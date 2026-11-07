@@ -27,6 +27,7 @@ const (
 	pageLimited      pageKind = "limited"      // cok fazla basarisiz deneme
 	pageDoorOpen     pageKind = "dooropen"     // web door: kapi acildi (IP, sure, adres, kapat dugmesi)
 	pageDoorClosed   pageKind = "doorclosed"   // web door: kapi kapatildi
+	pageDoorConfirm  pageKind = "doorconfirm"  // web door: giris sonrasi onay (POST + CSRF jetonu)
 )
 
 type providerButton struct {
@@ -59,6 +60,8 @@ type accessPageData struct {
 	CloseText  string // "Kapiyi kapat" dugmesi
 	CloseHref  string // kapali sayfasinda "tekrar giris yap" baglantisi
 	ReopenText string
+	OpenText   string // onay sayfasi dugmesi
+	CSRF       string // onay formunun imzali kisa omurlu jetonu
 	// diger IP ailesi yan kanali (bos = yok)
 	AddrURL     string
 	ScriptNonce string
@@ -92,6 +95,7 @@ type pageText struct {
 	doorIP, doorUntil, doorAddr, doorProto, doorIdentity       string
 	doorIPv4, doorIPv6                                         string
 	doorClose, doorReopen                                      string
+	doorConfirmTitle, doorConfirmMsg, doorConfirmBtn           string
 	doorRemainingFmt                                           string // %d sa %d dk
 	doorRemainingDaysFmt                                       string // %d gun %d sa
 	doorSNIHint                                                string
@@ -131,6 +135,9 @@ var pageTexts = map[string]pageText{
 		doorAddr:             "Bağlantı adresi",
 		doorProto:            "Protokol",
 		doorIdentity:         "Giriş yapan",
+		doorConfirmTitle:     "Kapıyı aç",
+		doorConfirmMsg:       "Giriş doğrulandı. Bu IP adresinden gelen bağlantılara izin vermek için düğmeye basın.",
+		doorConfirmBtn:       "Kapıyı aç",
 		doorClose:            "Kapıyı kapat",
 		doorReopen:           "Tekrar giriş yap",
 		doorRemainingFmt:     "%d sa %d dk kaldı",
@@ -170,6 +177,9 @@ var pageTexts = map[string]pageText{
 		doorAddr:             "Connection address",
 		doorProto:            "Protocol",
 		doorIdentity:         "Signed in as",
+		doorConfirmTitle:     "Open the door",
+		doorConfirmMsg:       "Sign-in verified. Press the button to allow connections from this IP address.",
+		doorConfirmBtn:       "Open the door",
 		doorClose:            "Close the door",
 		doorReopen:           "Sign in again",
 		doorRemainingFmt:     "%d h %d min left",
@@ -179,7 +189,7 @@ var pageTexts = map[string]pageText{
 }
 
 // pickLang, Accept-Language'e gore "tr" veya "en" secer (varsayilan tr).
-// q degerlerine gore siralar; tr/en disindaki diller atlanir.
+// q degerlerine gore siralar; bunlar disindaki diller atlanir.
 func pickLang(r *http.Request) string {
 	type cand struct {
 		lang string
@@ -263,7 +273,9 @@ func buildProviderButtons(lang string, configured, allowed []string, rd string) 
 		q.Set("p", name)
 		q.Set("rd", rd)
 		text := t.continueWith + label
-		if lang == "tr" {
+		switch lang {
+		case "tr":
+			// tr: "Google ile devam et" (saglayici adi basta)
 			text = label + t.continueWith
 		}
 		out = append(out, providerButton{
@@ -394,6 +406,11 @@ var accessPageTmpl = template.Must(template.New("access").Parse(`<!doctype html>
       </script>{{end}}
       <form method="post" action="/_zvd/close">
         <button class="btn" type="submit">{{.CloseText}}</button>
+      </form>
+    {{else if eq .Kind "doorconfirm"}}
+      <form method="post" action="/">
+        <input type="hidden" name="zv_csrf" value="{{.CSRF}}">
+        <button class="btn primary" type="submit">{{.OpenText}}</button>
       </form>
     {{else if eq .Kind "doorclosed"}}
       <div class="actions"><a class="btn primary" href="{{.CloseHref}}" rel="nofollow">{{.ReopenText}}</a></div>

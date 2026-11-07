@@ -36,7 +36,14 @@ func migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	}
 	defer conn.Exec(context.Background(), `SELECT pg_advisory_unlock($1)`, migrationLockKey) //nolint:errcheck
 
-	if _, err := pool.Exec(ctx,
+	// Migration'lar havuzun statement_timeout'una takilmamali: bu oturumda kapat,
+	// bitince baslangic degerine dondur (baglanti havuza geri doner).
+	if _, err := conn.Exec(ctx, `SET statement_timeout = 0`); err != nil {
+		return fmt.Errorf("migration statement_timeout ayarlanamadi: %w", err)
+	}
+	defer conn.Exec(context.Background(), `RESET statement_timeout`) //nolint:errcheck
+
+	if _, err := conn.Exec(ctx,
 		`CREATE TABLE IF NOT EXISTS schema_migrations (
 			version int PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`); err != nil {
 		return fmt.Errorf("schema_migrations olusturulamadi: %w", err)
@@ -59,7 +66,7 @@ func migrate(ctx context.Context, pool *pgxpool.Pool) error {
 		}
 
 		var exists bool
-		if err := pool.QueryRow(ctx,
+		if err := conn.QueryRow(ctx,
 			`SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=$1)`, version).
 			Scan(&exists); err != nil {
 			return err
@@ -72,10 +79,10 @@ func migrate(ctx context.Context, pool *pgxpool.Pool) error {
 		if err != nil {
 			return err
 		}
-		if _, err := pool.Exec(ctx, string(sqlBytes)); err != nil {
+		if _, err := conn.Exec(ctx, string(sqlBytes)); err != nil {
 			return fmt.Errorf("migration %s uygulanamadi: %w", name, err)
 		}
-		if _, err := pool.Exec(ctx,
+		if _, err := conn.Exec(ctx,
 			`INSERT INTO schema_migrations (version) VALUES ($1)`, version); err != nil {
 			return err
 		}

@@ -38,7 +38,19 @@ type clipboardWatcher struct {
 	enabled bool
 	seen    uint32 // islenmis son sayac
 	lastTxt string // son gonderilen/ayarlanan metin (yankiyi onler)
+
+	// getFails/failSeq: ayni sayac degeri icin ardisik Get hatalari. Baska bir
+	// uygulama panoyu aciksa Get gecici basarisiz olur; sayaci "gorulmus"
+	// isaretlemeyip sonraki turda yeniden deneriz (sinirli).
+	getFails int
+	failSeq  uint32
+
+	// notice, kullaniciya gorunur uyari (or. metin boyut siniri); nil olabilir.
+	notice func(detail string)
 }
+
+// clipboardGetRetries, ayni pano surumu icin en fazla ardisik Get denemesi.
+const clipboardGetRetries = 8
 
 func newClipboardWatcher(be clipboardBackend, send func(string)) *clipboardWatcher {
 	return &clipboardWatcher{be: be, send: send}
@@ -86,14 +98,35 @@ func (w *clipboardWatcher) Step() {
 		w.mu.Unlock()
 		return
 	}
-	w.seen = seq
 	txt, err := w.be.Get()
-	if err != nil || txt == "" {
+	if err != nil {
+		// Gecici hata: "gorulmus" isaretleme, sonraki turda yeniden dene.
+		if w.failSeq != seq {
+			w.failSeq, w.getFails = seq, 0
+		}
+		w.getFails++
+		if w.getFails >= clipboardGetRetries {
+			w.seen = seq // vazgec: sonsuz dongu olmasin
+			w.getFails = 0
+		}
+		w.mu.Unlock()
+		return
+	}
+	w.seen, w.getFails = seq, 0
+	if txt == "" {
 		w.mu.Unlock()
 		return
 	}
 	txt = normalizeClipboard(txt)
-	if len(txt) > protocol.MaxScreenClipboardSize || txt == w.lastTxt || !protocol.ClipboardTextOK(txt) {
+	if len(txt) > protocol.MaxScreenClipboardSize || !protocol.ClipboardTextOK(txt) {
+		notice := w.notice
+		w.mu.Unlock()
+		if notice != nil {
+			notice(protocol.DegradedClipboardTooLarge)
+		}
+		return
+	}
+	if txt == w.lastTxt {
 		w.mu.Unlock()
 		return
 	}

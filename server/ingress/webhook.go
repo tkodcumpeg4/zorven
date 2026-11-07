@@ -35,6 +35,51 @@ var webhookProviders = map[string]struct{}{
 	"gitlab":  {},
 	"shopify": {},
 	"slack":   {},
+	"hmac":    {}, // genel: ozel baslik + onek + hex|base64 (+ istege bagli zaman damgasi basligi)
+}
+
+// genericHMAC, provider=hmac icin kural ayaridir. SignatureHeader zorunludur.
+type genericHMAC struct {
+	SignatureHeader string // or. X-Signature
+	Prefix          string // or. "sha256=" (yoksa bos)
+	Encoding        string // hex (vars.) | base64
+	TimestampHeader string // doluysa imza "<ts>.<govde>" uzerinden ve tolerans zorunlu
+}
+
+// verifyGenericHMAC, ozel baslikli HMAC-SHA256 imzasini dogrular (sabit zamanli).
+// TimestampHeader tanimliysa damga zorunludur ve tolerans penceresine uymalidir.
+func verifyGenericHMAC(g genericHMAC, secret, body []byte, h http.Header, tolerance time.Duration, now time.Time) bool {
+	if len(secret) == 0 || g.SignatureHeader == "" {
+		return false
+	}
+	got := strings.TrimSpace(h.Get(g.SignatureHeader))
+	if g.Prefix != "" {
+		rest, ok := strings.CutPrefix(got, g.Prefix)
+		if !ok {
+			return false
+		}
+		got = rest
+	}
+	if got == "" {
+		return false
+	}
+	msg := body
+	if g.TimestampHeader != "" {
+		ts := strings.TrimSpace(h.Get(g.TimestampHeader))
+		if tolerance <= 0 {
+			tolerance = defaultWebhookTolerance
+		}
+		if ts == "" || !timestampFresh(ts, tolerance, now) {
+			return false
+		}
+		msg = []byte(ts + "." + string(body))
+	}
+	expected := hmacSHA256(secret, msg)
+	if strings.EqualFold(g.Encoding, "base64") {
+		raw, err := base64.StdEncoding.DecodeString(got)
+		return err == nil && hmac.Equal(expected, raw)
+	}
+	return equalHex(expected, got)
 }
 
 func isKnownWebhookProvider(p string) bool {

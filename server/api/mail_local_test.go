@@ -62,6 +62,11 @@ func (m *localMailStore) ListMailMessages(_ context.Context, _ string, folder st
 	return nil, nil
 }
 
+func (m *localMailStore) ListMailMessagesPage(ctx context.Context, tenantID, folder string, _ store.Page) ([]store.MailMessage, int, error) {
+	msgs, err := m.ListMailMessages(ctx, tenantID, folder, 0)
+	return msgs, len(msgs), err
+}
+
 func newLocalMailServer(t *testing.T) (*Server, *localMailStore, *fakeSMTP) {
 	t.Helper()
 	smtpSrv, addr := startFakeSMTP(t)

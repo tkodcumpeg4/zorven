@@ -93,6 +93,9 @@ func (m *orgAuthzStore) CreateAPIToken(_ context.Context, tenantID string, userI
 func (m *orgAuthzStore) ListSecrets(context.Context, string, string) ([]store.Secret, error) {
 	return []store.Secret{}, nil
 }
+func (m *orgAuthzStore) ListSecretsPage(context.Context, string, string, store.Page) ([]store.Secret, int, error) {
+	return []store.Secret{}, 0, nil
+}
 func (m *orgAuthzStore) CreateSecret(_ context.Context, tenantID, _, name, value string) (store.Secret, error) {
 	return store.Secret{ID: "sec_1", Name: name}, nil
 }

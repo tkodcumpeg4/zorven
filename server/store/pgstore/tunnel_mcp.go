@@ -143,7 +143,7 @@ func (s *Store) InsertMCPCalls(ctx context.Context, calls []store.MCPCall) error
 
 func (s *Store) ListMCPCalls(ctx context.Context, tenantID, tunnelID string, f store.MCPCallFilter) ([]store.MCPCall, error) {
 	limit := f.Limit
-	if limit <= 0 || limit > 200 {
+	if limit <= 0 || limit > 501 {
 		limit = 50
 	}
 	since := f.Since

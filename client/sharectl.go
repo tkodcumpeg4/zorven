@@ -106,7 +106,7 @@ func noAgentErr() error {
 
 func newShareRmCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "rm <id|ad>",
+		Use:   "rm <id|name>",
 		Short: i18n.T("share.rm.short"),
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {

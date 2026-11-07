@@ -77,6 +77,7 @@ func (b *HTTPBackend) Do(ctx context.Context, r Request) (Response, error) {
 	}
 	req.Header.Set("Authorization", "Bearer "+b.Token)
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("X-Zorven-Client", "mcp") // bilgi amacli (denetim); yetkilendirmede ASLA kullanilmaz
 	if r.Body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

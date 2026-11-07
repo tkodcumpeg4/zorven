@@ -59,13 +59,32 @@ func (s *Server) listHostnames(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	projID, _ := s.projectFor(r)
-	var list []store.Hostname
-	var err error
-	if projID != "" {
-		list, err = s.Store.ListHostnamesByProject(r.Context(), tenantID, projID)
-	} else {
-		list, err = s.Store.ListHostnames(r.Context(), tenantID)
+	if legacyCursorMode(r) {
+		var list []store.Hostname
+		var err error
+		if projID != "" {
+			list, err = s.Store.ListHostnamesByProject(r.Context(), tenantID, projID)
+		} else {
+			list, err = s.Store.ListHostnames(r.Context(), tenantID)
+		}
+		if err != nil {
+			s.fail(w, err)
+			return
+		}
+		if list == nil {
+			list = []store.Hostname{}
+		}
+		limit, cursor, _ := parsePage(r)
+		page, next, more := paginate(list, func(h store.Hostname) string { return h.ID }, limit, cursor)
+		setPageHeaders(w, r, next, more)
+		writeJSON(w, http.StatusOK, page)
+		return
 	}
+	pg, ok := pageOf(w, r)
+	if !ok {
+		return
+	}
+	list, total, err := s.Store.ListHostnamesPage(r.Context(), tenantID, projID, pg)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -73,12 +92,7 @@ func (s *Server) listHostnames(w http.ResponseWriter, r *http.Request) {
 	if list == nil {
 		list = []store.Hostname{}
 	}
-	if limit, cursor, ok := parsePage(r); ok {
-		page, next, more := paginate(list, func(h store.Hostname) string { return h.ID }, limit, cursor)
-		setPageHeaders(w, r, next, more)
-		writeJSON(w, http.StatusOK, page)
-		return
-	}
+	setPageTotals(w, pg, len(list), total)
 	writeJSON(w, http.StatusOK, list)
 }
 

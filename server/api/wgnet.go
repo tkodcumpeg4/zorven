@@ -8,7 +8,7 @@ package api
 //	POST   /api/v1/net/shares         — paylasim olustur
 //	PATCH  /api/v1/net/shares/{id}    — alicilari/adi/suresi guncelle
 //	DELETE /api/v1/net/shares/{id}    — paylasimi iptal et (peer aninda duser)
-//	GET    /api/v1/net/session        — WebSocket; `zorven access` oturum dugumu (yalniz API token)
+//	GET    /api/v1/net/session        — WebSocket; `zorven access` oturum dugumu (API token net:connect VEYA cihazin istemci token'i; istemci token'i yalniz bu uc icin)
 //
 // GUVENLIK: oturum ucu cerezle KABUL EDILMEZ (CSWSH; network.go ile ayni gerekce).
 // Sunucu yalniz sifreli WireGuard paketlerini iletir, icerigi goremez.
@@ -142,7 +142,11 @@ func (s *Server) listNetShares(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, v)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"shares": out})
+	pg, okPg := pageOf(w, r)
+	if !okPg {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"shares": slicePage(w, pg, out)})
 }
 
 type createNetShareBody struct {
@@ -307,7 +311,11 @@ func (s *Server) listNetNodes(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, n)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"nodes": out})
+	pg, okPg := pageOf(w, r)
+	if !okPg {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"nodes": slicePage(w, pg, out)})
 }
 
 func (s *Server) revokeNetNode(w http.ResponseWriter, r *http.Request) {
@@ -332,9 +340,13 @@ func (s *Server) revokeNetNode(w http.ResponseWriter, r *http.Request) {
 // netSession, `zorven access`in baglandigi WebSocket ucu: kullanici adina
 // gecici bir WireGuard dugumu. Metin = net_* kontrol, ikili = FrameWG.
 func (s *Server) netSession(w http.ResponseWriter, r *http.Request) {
+	if cp, ok := clientPrincipalFromContext(r.Context()); ok {
+		s.netSessionAsDevice(w, r, cp)
+		return
+	}
 	if _, isToken := apiScopesFromContext(r.Context()); !isToken {
 		writeJSONError(w, http.StatusForbidden, "token_required",
-			"ag oturumu yalnizca API token ile acilabilir (zorven access)")
+			"ag oturumu yalnizca API token veya istemci token'i ile acilabilir (zorven access)")
 		return
 	}
 	if !requireScope(w, r, ScopeNetConnect) {
@@ -363,15 +375,48 @@ func (s *Server) netSession(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusForbidden, "not_member", "kullanici bu organizasyonun uyesi degil")
 		return
 	}
+	s.acceptNetSession(w, r, netctl.Identity{
+		TenantID: tenantID, Kind: netctl.KindSession, UserID: caller.UserID, Role: role, Punch: true,
+	})
+}
+
+// netSessionAsDevice: istemci token'iyla `zorven access`. Oturum, cihazin
+// kimligiyle (ClientID: cihaz alicilari + posture kapisi) ve sahibi kullanicinin
+// kimligiyle (UserID/rol: kullanici ve rol alicilari) acilir; yalnizca bu
+// kimliklere acilmis paylasimlar gorunur. Plan kapisi yok (tum planlar).
+func (s *Server) netSessionAsDevice(w http.ResponseWriter, r *http.Request, cp clientPrincipal) {
+	if s.Net == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "net_disabled", "Zorven Net bu sunucuda kapali")
+		return
+	}
+	tenantID, ok := s.tenantFor(r)
+	if !ok {
+		writeJSONError(w, http.StatusInternalServerError, "no_tenant", "istek kiraci kapsami olmadan ulasti")
+		return
+	}
+	id := netctl.Identity{TenantID: tenantID, Kind: netctl.KindSession, ClientID: cp.ClientID, Punch: true}
+	if cp.UserID != "" {
+		role, err := s.Store.GetMemberRole(r.Context(), tenantID, cp.UserID)
+		if err != nil {
+			s.fail(w, err)
+			return
+		}
+		// Sahibi artik uye degilse kullanici/rol kimligi tasinmaz; cihaz kimligi kalir.
+		if role != "" {
+			id.UserID, id.Role = cp.UserID, role
+		}
+	}
+	s.acceptNetSession(w, r, id)
+}
+
+func (s *Server) acceptNetSession(w http.ResponseWriter, r *http.Request, id netctl.Identity) {
 	c, err := websocket.Accept(w, r, nil)
 	if err != nil {
 		return
 	}
 	defer c.CloseNow()
 	c.SetReadLimit(protocol.WSReadLimit)
-	s.runNetSession(r.Context(), c, netctl.Identity{
-		TenantID: tenantID, Kind: netctl.KindSession, UserID: caller.UserID, Role: role, Punch: true,
-	})
+	s.runNetSession(r.Context(), c, id)
 }
 
 // RunNetSession, kimligi dogrulanmis bir WS baglantisini dugum olarak calistirir

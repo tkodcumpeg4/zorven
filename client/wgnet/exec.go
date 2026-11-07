@@ -9,7 +9,7 @@ import (
 // execOutput, komutu calistirir; birlesik cikti ve hata doner. Argumanlar kabuga
 // VERILMEZ (enjeksiyon yok); calistirilan komutlar sabittir.
 func execOutput(ctx context.Context, name string, args ...string) (string, error) {
-	out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
+	out, err := hideConsole(exec.CommandContext(ctx, name, args...)).CombinedOutput()
 	return strings.TrimSpace(string(out)), err
 }
 

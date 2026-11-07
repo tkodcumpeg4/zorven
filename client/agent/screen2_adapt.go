@@ -11,8 +11,13 @@ import (
 const (
 	screen2MinQuality = 35
 	screen2MinFPS     = 3
-	// screen2MaxFPS, kullanicinin secebilecegi ve uyarlamanin ulasabilecegi tavan.
-	screen2MaxFPS = 30
+	// screen2MaxFPS, kullanicinin secebilecegi ve uyarlamanin ulasabilecegi tavan
+	// (sunucu screen2_fps60'i onaylamadiysa; eski sunucu/ajan davranisi).
+	screen2MaxFPS = protocol.Screen2FPSBase
+	// screen2HighFPS, sunucu screen2_fps60'i onayladiysa gecerli tavan. Hangi degere
+	// izin verildigine sunucu karar verir (planin ekran fps degeri, ustten 60);
+	// uyarlama (yazma suresi, sunucu geri bildirimi) bu tavanin ALTINDA calisir.
+	screen2HighFPS = protocol.Screen2FPSMax
 	// screen2RaiseAfter: art arda bu kadar "rahat" kareden sonra bir basamak yukselir.
 	screen2RaiseAfter = 4
 	// screen2RaiseFPS: her yukselis basamaginda eklenen FPS.

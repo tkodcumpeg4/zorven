@@ -1,10 +1,7 @@
 package agent
 
 import (
-	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,7 +12,6 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/minio/selfupdate"
 	"github.com/tkodcumpeg4/zorven/shared/updatesig"
 )
 
@@ -42,7 +38,7 @@ func (a *Agent) CheckUpdateNow(ctx context.Context) error {
 	a.forceUpdate.Store(true) // elle: sunucu ayari (otomatik guncelleme) yuklenmemis olsa da kontrol et
 	defer a.forceUpdate.Store(false)
 	a.maybeUpdate(ctx, "elle")
-	return a.lastUpdateErr
+	return a.updateResult()
 }
 
 // CheckUpdateQuiet, CheckUpdateNow gibidir ama stdout'a yazmaz; sonucu metin
@@ -51,12 +47,14 @@ func (a *Agent) CheckUpdateQuiet(ctx context.Context) (string, error) {
 	a.quietUpdate.Store(true)
 	defer a.quietUpdate.Store(false)
 	err := a.CheckUpdateNow(ctx)
-	return a.lastUpdateMsg, err
+	return a.updateMsg(), err
 }
 
 // reportUpdate, elle guncellemenin sonucunu kaydeder; sessiz kipte yazmaz.
 func (a *Agent) reportUpdate(msg string) {
+	a.updMu.Lock()
 	a.lastUpdateMsg = msg
+	a.updMu.Unlock()
 	if !a.quietUpdate.Load() {
 		fmt.Println(msg)
 	}
@@ -67,15 +65,18 @@ func (a *Agent) httpBase() string {
 	if a.Insecure {
 		scheme = "http"
 	}
-	return scheme + "://" + a.ServerAddr
+	return scheme + "://" + a.serverAddr()
 }
 
 func (a *Agent) updateHTTPClient() *http.Client {
 	if a.httpClient != nil {
 		return a.httpClient
 	}
-	return http.DefaultClient
+	return defaultUpdateClient
 }
+
+// defaultUpdateClient: baglanti/TLS/baslik zaman asimli; govde suresi istek ctx'iyle sinirlanir.
+var defaultUpdateClient = NewHTTPClient()
 
 // runUpdater, acilis + periyodik guncelleme kontrolunu yurutur. ctx bitince
 // durur. WSS "update_available" sinyali ayrica readLoop'tan maybeUpdate'i tetikler.
@@ -112,8 +113,10 @@ func (a *Agent) runUpdater(ctx context.Context) {
 func (a *Agent) maybeUpdate(ctx context.Context, reason string) {
 	// Gelistirme ikilisi (surum yok/"dev") veya kapaliysa hicbir sey yapma.
 	forced := a.forceUpdate.Load()
-	a.lastUpdateErr = nil
+	a.setUpdateErr(nil)
+	a.updMu.Lock()
 	a.lastUpdateMsg = ""
+	a.updMu.Unlock()
 	// Masaustu uygulamasinin gomulu ajani ASLA kendini guncellemez: calisan exe
 	// masaustu uygulamasidir; CLI ikilisini onun uzerine yazmak uygulamayi CLI'ye
 	// cevirir (2026-10-09 olayi). Masaustunun kendi guncelleyicisi var (desktop.json).
@@ -122,7 +125,7 @@ func (a *Agent) maybeUpdate(ctx context.Context, reason string) {
 	}
 	if a.Version == "" || a.Version == "dev" {
 		if forced {
-			a.lastUpdateErr = fmt.Errorf("gelistirme surumu (%q) guncellenmez", a.Version)
+			a.setUpdateErr(fmt.Errorf("gelistirme surumu (%q) guncellenmez", a.Version))
 		}
 		return
 	}
@@ -155,7 +158,7 @@ func (a *Agent) maybeUpdate(ctx context.Context, reason string) {
 			a.Log.Debug("guncelleme: manifest alinamadi", "hata", err)
 		}
 		if forced {
-			a.lastUpdateErr = fmt.Errorf("surum bilgisi alinamadi: %w", err)
+			a.setUpdateErr(fmt.Errorf("surum bilgisi alinamadi: %w", err))
 		}
 		return
 	}
@@ -188,37 +191,70 @@ func (a *Agent) maybeUpdate(ctx context.Context, reason string) {
 	a.Log.Info("guncelleme bulundu, indiriliyor",
 		"mevcut", a.Version, "yeni", m.Version, "sebep", reason)
 
-	data, err := a.download(ctx, "/bin/"+f.Name)
+	if badVersion(exePath, m.Version) {
+		a.Log.Warn("guncelleme atlandi: bu surum daha once geri alindi", "surum", m.Version)
+		return
+	}
+
+	// Aktif terminal/ekran/dosya oturumu varken (otomatik yolda) indirilmis ikiliyi
+	// uygulamayi ertele (en fazla maxUpdateDeferral): yeniden baslatma oturumlari keser.
+	// Ertelemeden ONCE indir; bekleme sirasinda surum degisse de dosya dogrulanmis kalir.
+	tmp, gotSum, err := a.downloadToFile(ctx, "/bin/"+f.Name, dirOf(exePath), 200<<20)
 	if err != nil {
 		a.Log.Warn("guncelleme: indirme basarisiz", "hata", err)
 		if forced {
-			a.lastUpdateErr = fmt.Errorf("indirme basarisiz: %w", err)
+			a.setUpdateErr(fmt.Errorf("indirme basarisiz: %w", err))
 		}
 		return
 	}
-	sum := sha256.Sum256(data)
-	if got := hex.EncodeToString(sum[:]); got != f.SHA256 {
-		a.Log.Warn("guncelleme: sha256 uyusmuyor, iptal", "beklenen", f.SHA256, "alinan", got)
+	defer os.Remove(tmp)
+	if gotSum != f.SHA256 {
+		a.Log.Warn("guncelleme: sha256 uyusmuyor, iptal", "beklenen", f.SHA256, "alinan", gotSum)
 		if forced {
-			a.lastUpdateErr = fmt.Errorf("indirilen dosya dogrulanamadi (sha256)")
+			a.setUpdateErr(fmt.Errorf("indirilen dosya dogrulanamadi (sha256)"))
 		}
+		return
+	}
+	if !forced && !a.waitIdleForUpdate(ctx, maxUpdateDeferral, updateDeferPoll) {
 		return
 	}
 	// selfupdate calisan ikiliyi guvenli sekilde degistirir (Windows'ta
-	// rename-hilesi + hata halinde rollback).
-	if err := selfupdate.Apply(bytes.NewReader(data), selfupdate.Options{}); err != nil {
+	// rename-hilesi + hata halinde rollback); eski ikili <exe>.old olarak SAKLANIR
+	// (acilista onaylanmazsa geri konur, bkz. update_apply.go).
+	oldPath, err := applyUpdateFile(tmp, exePath)
+	if err != nil {
 		a.Log.Error("guncelleme: uygulanamadi", "hata", err)
 		if forced {
-			a.lastUpdateErr = fmt.Errorf("uygulanamadi (yonetici/root yetkisi gerekebilir): %w", err)
+			a.setUpdateErr(fmt.Errorf("uygulanamadi (yonetici/root yetkisi gerekebilir): %w", err))
 		}
 		return
 	}
+	_ = os.Remove(badPath(exePath))
+	_ = writeMarker(exePath, updateMarker{From: a.Version, To: m.Version, OldPath: oldPath, At: time.Now().UTC().Format(time.RFC3339)})
 	a.Log.Info("guncelleme uygulandi, yeniden baslatiliyor", "surum", m.Version)
 	if forced {
 		a.reportUpdate(i18n.T("upd.updated", a.Version, m.Version))
 		return // elle: komut biter, yeni ikili bir sonraki calistirmada kullanilir
 	}
 	a.restartSelf(exePath)
+}
+
+func (a *Agent) setUpdateErr(err error) {
+	a.updMu.Lock()
+	a.lastUpdateErr = err
+	a.updMu.Unlock()
+}
+
+func (a *Agent) updateResult() error {
+	a.updMu.Lock()
+	defer a.updMu.Unlock()
+	return a.lastUpdateErr
+}
+
+func (a *Agent) updateMsg() string {
+	a.updMu.Lock()
+	defer a.updMu.Unlock()
+	return a.lastUpdateMsg
 }
 
 // errUpdateSignature, manifest imzasinin eksik/gecersiz oldugunu belirtir.

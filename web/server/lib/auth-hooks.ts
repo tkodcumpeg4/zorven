@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import { APIError, createAuthMiddleware, getSessionFromCtx } from "better-auth/api"
-import { checkSignup, type Env, type FetchFn } from "./signup-guard.ts"
+import { checkSignup, checkPasswordResetRequest, PASSWORD_RESET_REQUEST_PATHS, type Env, type FetchFn } from "./signup-guard.ts"
 
 // Bu dosya yalnizca Better Auth hook'larini icerir (DB/ortam yan etkisi yok);
 // boylece birim testi memory adapter ile calisabilir (auth-hooks.test.ts).
@@ -54,6 +54,10 @@ function makeHooks(getEnv: () => Env, doFetch: FetchFn) {
   before: createAuthMiddleware(async (ctx) => {
     if (ctx.path === "/sign-up/email") {
       await checkSignup(ctx, getEnv(), doFetch)
+      return
+    }
+    if (PASSWORD_RESET_REQUEST_PATHS.includes(ctx.path)) {
+      await checkPasswordResetRequest(ctx, getEnv(), doFetch)
       return
     }
     if (ctx.path !== "/two-factor/verify-totp") return

@@ -47,6 +47,30 @@ func (m *nilListStore) AdminListAllHostnames(ctx context.Context) ([]store.Hostn
 	return nil, nil
 }
 
+func (m *nilListStore) ListTunnelsPage(ctx context.Context, tenantID, projectID string, pg store.Page) ([]store.Tunnel, int, error) {
+	return nil, 0, nil
+}
+
+func (m *nilListStore) ListHostnamesPage(ctx context.Context, tenantID, projectID string, pg store.Page) ([]store.Hostname, int, error) {
+	return nil, 0, nil
+}
+
+func (m *nilListStore) ListProjectsPage(ctx context.Context, tenantID string, pg store.Page) ([]store.Project, int, error) {
+	return nil, 0, nil
+}
+
+func (m *nilListStore) AdminListTenantsWithCountsPage(ctx context.Context, pg store.Page) ([]store.TenantWithCounts, int, error) {
+	return nil, 0, nil
+}
+
+func (m *nilListStore) AdminListAllClientsPage(ctx context.Context, pg store.Page) ([]store.ClientWithTenant, int, error) {
+	return nil, 0, nil
+}
+
+func (m *nilListStore) AdminListAllHostnamesPage(ctx context.Context, pg store.Page) ([]store.HostnameWithTenant, int, error) {
+	return nil, 0, nil
+}
+
 func TestEmptyListsSerializeAsEmptyArray(t *testing.T) {
 	srv := &Server{
 		Store: &nilListStore{},

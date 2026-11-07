@@ -70,6 +70,11 @@ type rawAction struct {
 	Provider     string `json:"provider"`      // github | stripe | gitlab | shopify | slack
 	SecretRef    string `json:"secret_ref"`    // {{secret:ad}} veya duz deger
 	ToleranceSec int    `json:"tolerance_sec"` // zaman damgali saglayicilarda; 0 => 300
+	// provider=hmac (genel): imza basligi, onek, kodlama, istege bagli zaman damgasi basligi
+	SignatureHeader string `json:"signature_header"`
+	SignaturePrefix string `json:"signature_prefix"`
+	SignatureEnc    string `json:"signature_encoding"` // hex (vars.) | base64
+	TimestampHeader string `json:"timestamp_header"`
 	// waf (FAZ 1 Part 2 / F02)
 	Ruleset  string   `json:"ruleset"`  // "" | owasp-lite
 	Patterns []string `json:"patterns"` // kuruma ozel ek regex'ler
@@ -127,6 +132,7 @@ type policyAction struct {
 	provider  string
 	secret    []byte
 	tolerance time.Duration
+	generic   genericHMAC // provider=hmac
 	// waf
 	wafRules []*regexp.Regexp
 }
@@ -353,7 +359,19 @@ func compileActionWith(a rawAction, secrets map[string]string, newLim func(perSe
 		if tol <= 0 {
 			tol = defaultWebhookTolerance
 		}
-		return policyAction{kind: actVerifyWebhook, provider: prov, secret: []byte(sec), tolerance: tol}, nil
+		act := policyAction{kind: actVerifyWebhook, provider: prov, secret: []byte(sec), tolerance: tol}
+		if prov == "hmac" {
+			act.generic = genericHMAC{
+				SignatureHeader: strings.TrimSpace(a.SignatureHeader),
+				Prefix:          a.SignaturePrefix,
+				Encoding:        strings.ToLower(strings.TrimSpace(a.SignatureEnc)),
+				TimestampHeader: strings.TrimSpace(a.TimestampHeader),
+			}
+			if act.generic.SignatureHeader == "" {
+				return failClosedAction("verify_webhook", "hmac icin signature_header gerekli")
+			}
+		}
+		return act, nil
 	case "waf":
 		base, ok := wafRuleset(a.Ruleset)
 		if !ok {
@@ -445,19 +463,26 @@ const WebhookMaxBody = 1 << 20 // 1 MB
 // getirir; boylece akis asagiya bozulmadan devam eder.
 // tooLarge=true ise sinir asilmistir ve govde tuketilmemis sayilir.
 func readWebhookBody(r *http.Request) (body []byte, tooLarge bool) {
+	body, tooLarge, _ = readWebhookBodyErr(r)
+	return body, tooLarge
+}
+
+// readWebhookBodyErr, readWebhookBody'nin okuma hatasini da bildiren surumudur.
+// Okuma hatasinda (kesik/kopuk govde) dogrulama FAIL-CLOSED yapilmalidir.
+func readWebhookBodyErr(r *http.Request) (body []byte, tooLarge bool, readErr bool) {
 	if r.Body == nil {
-		return nil, false
+		return nil, false, false
 	}
 	buf, err := io.ReadAll(io.LimitReader(r.Body, WebhookMaxBody+1))
 	if err != nil {
-		return nil, false
+		return nil, false, true
 	}
 	if len(buf) > WebhookMaxBody {
-		return nil, true
+		return nil, true, false
 	}
 	r.Body = io.NopCloser(bytes.NewReader(buf))
 	r.ContentLength = int64(len(buf))
-	return buf, false
+	return buf, false, false
 }
 
 // matches, istegin bu kurala uyup uymadigini soyler.
@@ -621,7 +646,7 @@ func (rt *Router) evaluatePolicyList(policies []*compiledPolicy, r *http.Request
 	var reqRemove, respRemove []string
 	// Webhook govdesi en fazla BIR KEZ okunur; birden cok kural eslesirse paylasilir.
 	var whBody []byte
-	var whRead, whTooLarge bool
+	var whRead, whTooLarge, whReadErr bool
 	// Geo cozumu TEMBEL ve istek basina BIR KEZ: yalnizca Geo kosulu tasiyan bir
 	// kurala gelindiginde yapilir, sonra tum kurallar ayni sonucu paylasir.
 	var geo ipInfo
@@ -675,9 +700,23 @@ func (rt *Router) evaluatePolicyList(policies []*compiledPolicy, r *http.Request
 					return out
 				}
 			case actVerifyWebhook:
+				if isGRPCRequest(r) {
+					// gRPC govdesi akar ve ikilidir; webhook imzasi icin govdeyi
+					// tamamen okumak akisi kilitlerdi (bkz. grpc.go kararlari).
+					out.webhookFailed = true
+					out.webhookStatus = http.StatusUnsupportedMediaType
+					out.webhookMessage = "Webhook dogrulamasi gRPC isteklerinde desteklenmez."
+					return out
+				}
 				if !whRead {
-					whBody, whTooLarge = readWebhookBody(r)
+					whBody, whTooLarge, whReadErr = readWebhookBodyErr(r)
 					whRead = true
+				}
+				if whReadErr {
+					out.webhookFailed = true
+					out.webhookStatus = http.StatusBadRequest
+					out.webhookMessage = "Webhook govdesi okunamadi."
+					return out
 				}
 				if whTooLarge {
 					out.webhookFailed = true
@@ -685,8 +724,7 @@ func (rt *Router) evaluatePolicyList(policies []*compiledPolicy, r *http.Request
 					out.webhookMessage = "Webhook govdesi dogrulama sinirini asiyor."
 					return out
 				}
-				if !verifyWebhook(cr.action.provider, cr.action.secret, whBody, r.Header,
-					cr.action.tolerance, time.Now()) {
+				if !verifyAction(cr.action, whBody, r.Header, time.Now()) {
 					out.webhookFailed = true
 					out.webhookStatus = http.StatusUnauthorized
 					out.webhookMessage = "Webhook imzasi dogrulanamadi."
@@ -797,4 +835,12 @@ func normalizePolicyPrefix(p string) string {
 		return ""
 	}
 	return canonicalPath(p)
+}
+
+// verifyAction, derlenmis verify_webhook eylemini calistirir.
+func verifyAction(a policyAction, body []byte, h http.Header, now time.Time) bool {
+	if a.provider == "hmac" {
+		return verifyGenericHMAC(a.generic, a.secret, body, h, a.tolerance, now)
+	}
+	return verifyWebhook(a.provider, a.secret, body, h, a.tolerance, now)
 }

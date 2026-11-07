@@ -173,6 +173,10 @@ func macCGButton(b int) uint32 {
 		return macBtnRight
 	case 1:
 		return macBtnCenter
+	case 3: // geri (yan dugme 1)
+		return 3
+	case 4: // ileri (yan dugme 2)
+		return 4
 	}
 	return macBtnLeft
 }
@@ -185,7 +189,7 @@ func macMouseEvent(kind string, button, held int) (evType, cgButton uint32) {
 		switch cg {
 		case macBtnRight:
 			return r, cg
-		case macBtnCenter:
+		case macBtnCenter, 3, 4:
 			return o, cg
 		}
 		return l, cg

@@ -49,7 +49,7 @@ func parseRoute(p string) (routeKind, string, string) {
 	case "/sitemap-updates.xml":
 		return routeSitemap, "", ""
 	}
-	for _, lang := range []string{LangTR, LangEN, LangJA} {
+	for _, lang := range []string{LangTR, LangEN, LangJA, LangZH} {
 		base := ListPath(lang)
 		if p == base {
 			return routeList, lang, ""
@@ -130,14 +130,15 @@ var (
 )
 
 func (s *Site) template(lang string) (string, bool) {
-	names := map[string]string{LangTR: "updates.html", LangEN: "en/updates.html", LangJA: "ja/updates.html"}
+	names := map[string]string{LangTR: "updates.html", LangEN: "en/updates.html", LangJA: "ja/updates.html", LangZH: "zh/updates.html"}
 	if b, err := fs.ReadFile(s.FS, names[lang]); err == nil {
 		return string(b), true
 	}
-	if lang == LangJA {
-		// ja iskeleti henuz yoksa en iskeleti kullanilir (dil niteligi duzeltilir).
+	if lang == LangJA || lang == LangZH {
+		// ja/zh iskeleti henuz yoksa en iskeleti kullanilir (dil niteligi duzeltilir).
 		if b, err := fs.ReadFile(s.FS, names[LangEN]); err == nil {
-			return strings.Replace(string(b), `<html lang="en">`, `<html lang="ja">`, 1), true
+			attr := map[string]string{LangJA: "ja", LangZH: "zh-CN"}[lang]
+			return strings.Replace(string(b), `<html lang="en">`, `<html lang="`+attr+`">`, 1), true
 		}
 	}
 	return "", false
@@ -217,18 +218,25 @@ var ui = map[string]uiText{
 		"すべての更新情報", "公開された更新情報はまだありません。", "新しい記事", "古い記事", "RSS で購読",
 		"メンテナンス時間", "この記事はまだこの言語に翻訳されていません。%s 版を表示しています。", "更新情報が見つかりません", "ja_JP",
 		"お知らせメールの設定はダッシュボードのプロフィールページで変更できます。"},
+	LangZH: {"更新动态", "版本发布、更新与维护", "Zorven 有哪些变化、我们何时进行维护：所有公告集中在这里。",
+		"更新动态 — 版本说明与维护公告 | Zorven",
+		"Zorven 版本说明、产品更新与计划维护公告。",
+		"全部更新", "尚未发布任何更新。", "较新", "较早", "通过 RSS 订阅",
+		"维护窗口", "本文尚未翻译为该语言，当前显示%s版本。", "未找到该更新", "zh_CN",
+		"你可以在控制台的“个人资料”页面管理公告邮件。"},
 }
 
 var langName = map[string]map[string]string{
-	LangTR: {LangTR: "Türkçe", LangEN: "İngilizce", LangJA: "Japonca"},
-	LangEN: {LangTR: "Turkish", LangEN: "English", LangJA: "Japanese"},
-	LangJA: {LangTR: "トルコ語", LangEN: "英語", LangJA: "日本語"},
+	LangTR: {LangTR: "Türkçe", LangEN: "İngilizce", LangJA: "Japonca", LangZH: "Çince"},
+	LangEN: {LangTR: "Turkish", LangEN: "English", LangJA: "Japanese", LangZH: "Chinese"},
+	LangJA: {LangTR: "トルコ語", LangEN: "英語", LangJA: "日本語", LangZH: "中文"},
+	LangZH: {LangTR: "土耳其语", LangEN: "英语", LangJA: "日语", LangZH: "中文"},
 }
 
 func (s *Site) abs(p string) string { return strings.TrimRight(s.BaseURL, "/") + p }
 
 func (s *Site) listAlts() [][2]string {
-	return [][2]string{{LangTR, s.abs(ListPath(LangTR))}, {LangEN, s.abs(ListPath(LangEN))}, {LangJA, s.abs(ListPath(LangJA))}, {"x-default", s.abs(ListPath(LangTR))}}
+	return [][2]string{{LangTR, s.abs(ListPath(LangTR))}, {LangEN, s.abs(ListPath(LangEN))}, {LangJA, s.abs(ListPath(LangJA))}, {"zh-CN", s.abs(ListPath(LangZH))}, {"x-default", s.abs(ListPath(LangTR))}}
 }
 
 func windowHTML(p store.UpdatePost, lang string) string {
@@ -342,9 +350,13 @@ func (s *Site) servePost(w http.ResponseWriter, r *http.Request, lang, slug stri
 
 	// hreflang yalniz gercek cevirisi olan dillerde.
 	var alts [][2]string
-	for _, l := range []string{LangTR, LangEN, LangJA} {
+	for _, l := range []string{LangTR, LangEN, LangJA, LangZH} {
 		if Has(p, l) {
-			alts = append(alts, [2]string{l, s.abs(PostPath(l, p.Slug))})
+			code := l
+			if l == LangZH {
+				code = "zh-CN"
+			}
+			alts = append(alts, [2]string{code, s.abs(PostPath(l, p.Slug))})
 		}
 	}
 	alts = append(alts, [2]string{"x-default", s.abs(PostPath(LangTR, p.Slug))})
@@ -422,11 +434,11 @@ func (s *Site) serveSitemap(w http.ResponseWriter, r *http.Request) {
 	var b strings.Builder
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n" +
 		`<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">` + "\n")
-	for _, l := range []string{LangTR, LangEN, LangJA} {
+	for _, l := range []string{LangTR, LangEN, LangJA, LangZH} {
 		b.WriteString(`<url><loc>` + xmlEsc(s.abs(ListPath(l))) + `</loc></url>` + "\n")
 	}
 	for _, p := range posts {
-		for _, l := range []string{LangTR, LangEN, LangJA} {
+		for _, l := range []string{LangTR, LangEN, LangJA, LangZH} {
 			if !Has(p, l) {
 				continue
 			}
