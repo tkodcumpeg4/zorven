@@ -726,11 +726,18 @@ type udpRepHarness struct {
 	fc *fakeClients
 }
 
-func newUDPRep(t *testing.T, ti TunnelInfo, fc *fakeClients, bal Balancer) *udpRepHarness {
+// setup fonksiyonlari dinleyici (okuma dongusu) baslamadan ONCE calisir:
+// yonetici alanlarini sonradan yazmak veri yarisidir (go test -race).
+func newUDPRep(t *testing.T, ti TunnelInfo, fc *fakeClients, bal Balancer, setup ...func(*Manager)) *udpRepHarness {
 	t.Helper()
 	m := New(tunnel.NewHub(), nil, quietLog(), nil)
-	m.streams = fc
+	if fc != nil { // nil *fakeClients'i arayuze koymak "nil olmayan" arayuz yapar
+		m.streams = fc
+	}
 	m.Balancer = bal
+	for _, f := range setup {
+		f(m)
+	}
 	ti.Proto = "udp"
 	if ti.TunnelID == "" {
 		ti.TunnelID = "u"

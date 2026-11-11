@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/tkodcumpeg4/zorven/server/ratelimit"
@@ -101,6 +102,19 @@ type Router struct {
 	// reloadMu, Reload'lari serilestirir (O8): es zamanli iki Reload'dan eski
 	// olanin yenisini ezmesi ve limiter onbelleginin yarismasi engellenir.
 	reloadMu sync.Mutex
+
+	// Birlestirme: es zamanli Reload isteklerini tek yuklemeye dusurur (O4; bkz. Reload).
+	coalesceMu      sync.Mutex
+	reloadRunning   bool
+	reloadPending   *reloadCall
+	reloadLoadCount atomic.Int64 // yapilan tam yukleme sayisi (test/gozlem)
+}
+
+// reloadCall, tek bir tam yuklemenin sonucunu bekleyenlerle paylasir.
+type reloadCall struct {
+	done chan struct{}
+	err  error
+	ctx  context.Context
 }
 
 // pathRule, bir host icin tek bir yol-on-eki -> route eslesmesi.
@@ -228,7 +242,61 @@ func (r *Router) SetIPIntel(x *ipIntel) {
 
 // Reload, eslestirmeleri veritabanindan yeniden okur.
 // Sunucu acilisinda ve her tunel/ad degisikliginden sonra cagrilir.
-func (r *Router) Reload(ctx context.Context) (err error) {
+//
+// Birlestirme (O4): her tunel degisikligi yanittan once TAM tabloyu yukluyor ve tek
+// kilit altinda siraya giriyordu; 20 paralel olusturmada 20 tam yukleme siraya dizilip
+// bir kismi 120 sn'den fazla bekledi. Simdi: yukleme yokken cagiran hemen yukler; bir
+// yukleme surerken gelenler BIR SONRAKI tek yuklemeyi bekler (hepsi ayni sonucu paylasir).
+// Garanti korunur: cagiran, degisikligini yazdiktan SONRA baslayan bir yuklemenin
+// bitmesini bekler; yani yanit dondugunde degisiklik yonlendirmeye yansimistir.
+// N esanli cagri en cok 2 tam yuklemeye (suren + bir sonraki) duser.
+//
+// ctx yalniz beklemeyi keser; birlestirilmis yukleme ilk bekleyenin baglamindan iptal
+// edilmeden (WithoutCancel) calisir ki bir istemcinin vazgecmesi digerlerinin yuklemesini
+// bozmasin (sure statement_timeout ile sinirli).
+func (r *Router) Reload(ctx context.Context) error {
+	r.coalesceMu.Lock()
+	if !r.reloadRunning {
+		r.reloadRunning = true
+		r.coalesceMu.Unlock()
+		c := &reloadCall{done: make(chan struct{}), ctx: ctx}
+		r.runReload(c)
+		return c.err
+	}
+	c := r.reloadPending
+	if c == nil {
+		c = &reloadCall{done: make(chan struct{}), ctx: context.WithoutCancel(ctx)}
+		r.reloadPending = c
+	}
+	r.coalesceMu.Unlock()
+	select {
+	case <-c.done:
+		return c.err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// runReload, c'yi yukler; ardindan bekleyen bir sonraki cagri varsa onu ayri
+// goroutine'de baslatir (bu cagiran onun sonucunu beklemeden doner).
+func (r *Router) runReload(c *reloadCall) {
+	c.err = r.reloadOnce(c.ctx)
+	close(c.done)
+	r.coalesceMu.Lock()
+	next := r.reloadPending
+	r.reloadPending = nil
+	if next == nil {
+		r.reloadRunning = false
+		r.coalesceMu.Unlock()
+		return
+	}
+	r.coalesceMu.Unlock()
+	go r.runReload(next)
+}
+
+// reloadOnce, tek bir tam yukleme.
+func (r *Router) reloadOnce(ctx context.Context) (err error) {
+	r.reloadLoadCount.Add(1)
 	r.reloadMu.Lock()
 	defer r.reloadMu.Unlock()
 	if hook := r.OnReload; hook != nil {

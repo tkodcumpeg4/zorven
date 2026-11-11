@@ -146,6 +146,28 @@ func TestVarsayilanKapali(t *testing.T) {
 	}
 }
 
+// A6 #1: loopback disi + token'siz dinleyici acilmaz (fail-closed); loopback'te serbest.
+func TestServeLoopbackDisiTokensizReddedilir(t *testing.T) {
+	for _, a := range []string{":0", "0.0.0.0:0", "[::]:0", "192.0.2.10:9100", "127.example.com:9"} {
+		if Serve(context.Background(), Config{Addr: a}, nil) {
+			t.Fatalf("%s token'siz acilmamaliydi", a)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if !Serve(ctx, Config{Addr: "127.0.0.1:0"}, nil) {
+		t.Fatal("loopback token'siz acilmaliydi")
+	}
+	if !Serve(ctx, Config{Addr: "127.0.0.1:0", Token: "t"}, nil) {
+		t.Fatal("tokenli acilmaliydi")
+	}
+	for a, want := range map[string]bool{"127.0.0.1:1": true, "localhost:1": true, "[::1]:1": true, ":1": false, "10.0.0.1:1": false} {
+		if got := isLoopbackAddr(a); got != want {
+			t.Fatalf("isLoopbackAddr(%q)=%v", a, got)
+		}
+	}
+}
+
 func TestInstrumentWebSocketVeAkisiBozmaz(t *testing.T) {
 	before := reqByClass[class2xx].Load()
 	h := Instrument(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -187,7 +209,7 @@ func TestReadyz(t *testing.T) {
 	}
 	// Taze Reload: DB kapali olsa da hazir.
 	ReloadDone(time.Millisecond, nil)
-	if rr, body = get(); rr.Code != http.StatusOK || !strings.Contains(body, `"db":{"ok":false}`) {
+	if rr, body = get(); rr.Code != http.StatusOK || !strings.Contains(body, `"db":{"ok":false,"required":false}`) {
 		t.Fatalf("taze veri, db kapali: %d %s", rr.Code, body)
 	}
 	// Eski veri: hazir degil.
@@ -209,6 +231,21 @@ func TestReadyz(t *testing.T) {
 		t.Fatalf("sertifika dolmus: %d", rr.Code)
 	}
 	certNotAfter.Store(0)
+	// RequireDB (standalone/primary): taze veri olsa da DB kapaliyken hazir degil.
+	SetReadiness(Readiness{RequireDB: true, DBPing: func(context.Context) error { return errors.New("kapali") }})
+	if rr, body = get(); rr.Code != http.StatusServiceUnavailable || !strings.Contains(body, `"required":true`) {
+		t.Fatalf("RequireDB + db kapali: %d %s", rr.Code, body)
+	}
+	SetReadiness(Readiness{RequireDB: true, DBPing: func(context.Context) error { return nil }})
+	if rr, _ = get(); rr.Code != http.StatusOK {
+		t.Fatalf("RequireDB + db acik: %d", rr.Code)
+	}
+	// Kapanis (draining): hazir degil.
+	SetDraining(true)
+	if rr, body = get(); rr.Code != http.StatusServiceUnavailable || !strings.Contains(body, `"draining":true`) {
+		t.Fatalf("draining: %d %s", rr.Code, body)
+	}
+	SetDraining(false)
 	// Yontem kisiti.
 	rr = httptest.NewRecorder()
 	ReadyHandler().ServeHTTP(rr, httptest.NewRequest("POST", "/readyz", nil))

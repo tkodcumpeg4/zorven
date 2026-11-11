@@ -193,6 +193,11 @@ func (s *Server) createNetworkResource(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusConflict, "name_taken", "bu adda bir özel kaynak zaten var")
 		return
 	}
+	unlock, ok := s.lockQuota(w, r, tenantID, entitlements.QuotaTunnels)
+	if !ok {
+		return
+	}
+	defer unlock()
 	if s.Entitlements != nil {
 		if err := s.Entitlements.CanCreateTunnel(r.Context(), tenantID); err != nil {
 			writeEntitlementError(w, err)
@@ -212,6 +217,7 @@ func (s *Server) createNetworkResource(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	unlock()
 	t, _ = s.Store.GetTunnel(r.Context(), tenantID, t.ID)
 
 	s.tunnelsChanged()

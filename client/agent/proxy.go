@@ -48,8 +48,12 @@ type clientSession struct {
 	// LocalAddr'a cozer (apps_zapp.go). nil olabilir.
 	zapp *zappTable
 
-	// coder/websocket ayni anda tek yazar kaldirir.
-	writeMu sync.Mutex
+	// Sunucu baglantisina tum yazimlar grup yaziciden gecer (batchwrite.go);
+	// coder/websocket ayni anda tek yazar kaldirir. cork, el sikismada yakalanan
+	// alt TCP baglantisi (nil olabilir: yazimlar birlestirilmez).
+	cork   *corkConn
+	bwOnce sync.Once
+	bw     *batchWriter
 
 	mu       sync.Mutex
 	inflight map[uint64]*inflight
@@ -247,15 +251,25 @@ type inflight struct {
 	// dongusu yavas yerel servis yuzunden bloklanmaz (writeq.go).
 	q *writeQueue
 	// failMsg, kuyruk tasmasi/yazim zaman asimi nedeniyle iptal sebebi.
-	failMsg atomic.Pointer[string]
-	// idle, yanit govdesi bosta zaman asimi icin son okuma hareketi.
+	failMsg  atomic.Pointer[string]
 	tunnelID string
+	// serverCanceled, sunucu cancel mesajiyla istegi biraktiysa true: bu durumda
+	// sunucuya hata cercevesi yollamak gereksizdir (kayit zaten silinmistir).
+	serverCanceled atomic.Bool
+	// grant, istek govdesi kredisi pazarlandiysa (body_credit) kredi iadesi;
+	// aksi halde nil (bkz. reqcredit.go).
+	grant *bodyGrant
 }
 
 func (i *inflight) closeBody(err error) {
 	i.once.Do(func() {
 		if i.q != nil {
 			i.q.stop()
+		}
+		if i.grant != nil {
+			// Kuyrukta kalan veri yerel servise yazilmayacak: krediyi iade et ki
+			// sunucu (yanit bitene kadar) govde gondermeye devam edebilsin.
+			i.grant.kill()
 		}
 		if err != nil {
 			i.bodyW.CloseWithError(err)
@@ -300,16 +314,21 @@ func newClientSession(conn *websocket.Conn, localURL string, log *slog.Logger) *
 
 // --- yazma ----------------------------------------------------------------
 
-// connWriteCtx, sunucu baglantisina yazim baglami. Istek baglami yazim
-// SIRASINDA iptal edilirse coder/websocket tum baglantiyi kapatir (tek istegin
-// iptali tuneli dusurur); zaten iptal edilmisse yazmadan doner, aksi halde
-// iptali yazima tasimaz, yalniz zaman asimi uygular.
-func connWriteCtx(ctx context.Context, d time.Duration) (context.Context, context.CancelFunc, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, nil, err
-	}
-	c, cancel := context.WithTimeout(context.WithoutCancel(ctx), d)
-	return c, cancel, nil
+// Istek baglaminin iptali yazima TASINMAZ: coder/websocket yazim SIRASINDA
+// iptal edilen baglamda tum baglantiyi kapatir (tek istegin iptali tuneli
+// dusururdu). Zaten iptal edilmis baglamla gonderim hic baslamaz; kuyruga
+// girmis mesaj ise yazilir (batchWriter.write).
+
+// writer, baglantinin grup yazicisi (tembel: testler clientSession'i dogrudan kurar).
+func (cs *clientSession) writer() *batchWriter {
+	cs.bwOnce.Do(func() { cs.bw = newBatchWriter(cs.conn, cs.cork) })
+	return cs.bw
+}
+
+// urgentControl, normal mesajlarin onune gecebilen kontrol mesajlari: sira
+// iliskisi olmayan canlilik ve kredi iadesi (bkz. batchwrite.go).
+func urgentControl(t protocol.MessageType) bool {
+	return t == protocol.TypePong || t == protocol.TypeWindowUpdate
 }
 
 func (cs *clientSession) sendControl(ctx context.Context, v any, t protocol.MessageType) error {
@@ -317,40 +336,16 @@ func (cs *clientSession) sendControl(ctx context.Context, v any, t protocol.Mess
 	if err != nil {
 		return err
 	}
-	cs.writeMu.Lock()
-	defer cs.writeMu.Unlock()
-
-	wctx, cancel, err := connWriteCtx(ctx, 10*time.Second)
-	if err != nil {
-		return err
-	}
-	defer cancel()
-	return cs.conn.Write(wctx, websocket.MessageText, data)
+	return cs.writer().write(ctx, websocket.MessageText, data, 10*time.Second, urgentControl(t))
 }
 
 // sendBinary, hazir kodlanmis ikili mesaji (screen2 kareleri) gonderir.
 func (cs *clientSession) sendBinary(ctx context.Context, b []byte) error {
-	cs.writeMu.Lock()
-	defer cs.writeMu.Unlock()
-
-	wctx, cancel, err := connWriteCtx(ctx, 15*time.Second)
-	if err != nil {
-		return err
-	}
-	defer cancel()
-	return cs.conn.Write(wctx, websocket.MessageBinary, b)
+	return cs.writer().write(ctx, websocket.MessageBinary, b, 15*time.Second, false)
 }
 
 func (cs *clientSession) sendFrame(ctx context.Context, f protocol.BodyFrame) error {
-	cs.writeMu.Lock()
-	defer cs.writeMu.Unlock()
-
-	wctx, cancel, err := connWriteCtx(ctx, 30*time.Second)
-	if err != nil {
-		return err
-	}
-	defer cancel()
-	return cs.conn.Write(wctx, websocket.MessageBinary, f.Encode())
+	return cs.writer().write(ctx, websocket.MessageBinary, f.Encode(), 30*time.Second, false)
 }
 
 // --- istek yasam dongusu ---------------------------------------------------
@@ -367,6 +362,9 @@ func (cs *clientSession) handleRequest(parent context.Context, req protocol.HTTP
 	cs.mu.Unlock()
 
 	fl.tunnelID = req.TunnelID
+	if req.HasBody && protocol.HasCap(req.Caps, protocol.ReqCapBodyCredit) {
+		fl.grant = &bodyGrant{cs: cs, reqID: req.ReqID}
+	}
 	if !req.HasBody {
 		fl.closeBody(nil)
 	} else {
@@ -375,11 +373,20 @@ func (cs *clientSession) handleRequest(parent context.Context, req protocol.HTTP
 			t := time.AfterFunc(d, func() { pr.CloseWithError(errWriteStalled) })
 			_, err := pw.Write(b)
 			t.Stop()
+			if err == nil && fl.grant != nil {
+				// Pipe yazimi yerel istemci baytlari aldiginda doner: veri yerel
+				// servise gitti, pencere acilabilir.
+				fl.grant.written(len(b))
+			}
 			return err
 		}, func() { fl.closeBody(nil) }, func(err error) {
 			if errors.Is(err, io.ErrClosedPipe) {
 				// Yerel servis govdeyi okumayi birakti (erken yanit, or. 413): normal;
-				// yanit akmaya devam eder, yalniz govde yazimi durur.
+				// yanit akmaya devam eder, yalniz govde yazimi durur. Kalan govde
+				// atilir; kredisi iade edilmezse sunucu yanit bitene kadar beklerdi.
+				if fl.grant != nil {
+					fl.grant.kill()
+				}
 				return
 			}
 			msg := "istek govdesi yerel servise iletilemedi: " + err.Error()
@@ -393,6 +400,13 @@ func (cs *clientSession) handleRequest(parent context.Context, req protocol.HTTP
 	go func() {
 		defer cancel()
 		defer cs.forget(req.ReqID)
+		if fl.grant != nil {
+			// Kabul (Increment 0) yerel istekten ve dolayisiyla yanit basligindan
+			// ONCE yazilir: sunucu basligi kabulsuz gorurse ajani eski sayar.
+			_ = cs.sendControl(ctx, protocol.WindowUpdate{
+				Type: protocol.TypeWindowUpdate, ReqID: req.ReqID, Increment: 0,
+			}, protocol.TypeWindowUpdate)
+		}
 		cs.doLocal(ctx, req, fl)
 	}()
 }
@@ -490,9 +504,18 @@ func (cs *clientSession) doLocal(ctx context.Context, req protocol.HTTPRequest, 
 		if fm := fl.failMsg.Load(); fm != nil {
 			code, msg = protocol.CodeLocalUnreachable, *fm
 		}
+		if fl.serverCanceled.Load() {
+			// Ziyaretci gitti / sunucu zaman asimi: yerel servis hatasi degil;
+			// iptal edilen her istek icin WARN satiri gurultu olurdu.
+			cs.log.Debug("yerel istek sunucu iptaliyle durdu", "req_id", req.ReqID, "hata", err)
+			return
+		}
 		cs.log.Warn("yerel servise ulasilamadi",
 			"req_id", req.ReqID, "hedef", target, "hata", err)
-		cs.sendError(ctx, req.ReqID, code, msg)
+		// Yazim baglami iptalden ayrilir: istek govdesi kuyrugu tasinca (onFail)
+		// istek baglami iptal edilir ve bu hata eskiden HIC gonderilmiyordu;
+		// ziyaretci 30 sn bekleyip 504 aliyordu.
+		cs.sendError(context.WithoutCancel(ctx), req.ReqID, code, msg)
 		return
 	}
 	// Baslik gecikmesi onRequest'e; govde dahil toplam sure olcume (defer).
@@ -547,10 +570,33 @@ func (cs *clientSession) doLocal(ctx context.Context, req protocol.HTTPRequest, 
 		trailers = func() http.Header { return resp.Trailer }
 	}
 	if err := cs.streamResponseTT(ctx, req.ReqID, req.TunnelID, rbody, trailers); err != nil {
+		if fl.serverCanceled.Load() {
+			// Ziyaretci indirmeyi yarida birakti: beklenen; hata sayilmaz.
+			cs.log.Debug("yanit govdesi sunucu iptaliyle durdu", "req_id", req.ReqID)
+			return
+		}
 		cs.tm.addError(req.TunnelID)
 		cs.log.Warn("yanit govdesi gonderilemedi", "req_id", req.ReqID, "hata", err)
+		var be *bodyReadError
+		if errors.As(err, &be) {
+			// Y4: govde yarida kesildi (yerel servis baglantiyi kopardi, bosta
+			// zaman asimi). Basliktan SONRA http_error yollanir: sunucu bunu
+			// govdeyi hata ile kapatmak olarak isler (eski sunucular da ayni
+			// sekilde; tip yeni degil). Yollanmazsa sunucu govdenin devamini
+			// sonsuza kadar bekliyordu. Bosta zaman asimi istek baglamini iptal
+			// ettigi icin yazim baglami iptalden ayrilir.
+			_ = cs.sendError(context.WithoutCancel(ctx), req.ReqID, protocol.CodeLocalUnreachable,
+				"yerel servis yanit govdesini yarida kesti: "+be.err.Error())
+		}
 	}
 }
+
+// bodyReadError, yanit govdesi YEREL servisten okunurken olusan hata (sunucu
+// baglantisina yazim hatasindan ayirmak icin).
+type bodyReadError struct{ err error }
+
+func (e *bodyReadError) Error() string { return "yerel yanit govdesi okunamadi: " + e.err.Error() }
+func (e *bodyReadError) Unwrap() error { return e.err }
 
 // idleBody, her Read icin bosta zaman asimi uygular: sure dolarsa istek baglami
 // iptal edilir (alttaki Read hata ile doner). Toplam sureyi SINIRLAMAZ.
@@ -613,22 +659,33 @@ func (cs *clientSession) streamResponseTT(ctx context.Context, reqID uint64, tun
 					return err
 				}
 			}
+			// O13: govde bu okumayla bittiyse (Content-Length'li yanitta net/http
+			// EOF'u son veriyle birlikte doner) EOF bayragi son veri cercevesine
+			// konur; ayri bos EOF cercevesi (istek basina bir mesaj + syscall)
+			// gerekmez. Sunucunun tum surumleri veri+EOF cercevesini "once veriyi
+			// yaz, sonra kapat" olarak isler. Trailer varsa EOF'tan once
+			// gitmeleri gerektiginden ayri EOF yolu korunur.
+			last := readErr == io.EOF && (trailers == nil || len(trailers()) == 0)
 			if err := cs.sendFrame(ctx, protocol.BodyFrame{
 				FrameType: protocol.FrameResponseBody,
 				ReqID:     reqID,
 				Seq:       seq,
+				EOF:       last,
 				Payload:   buf[:n],
 			}); err != nil {
 				return err
 			}
 			cs.tm.addOut(tunnelID, n)
 			seq++
+			if last {
+				return nil
+			}
 		}
 		if readErr == io.EOF {
 			break
 		}
 		if readErr != nil {
-			return readErr
+			return &bodyReadError{err: readErr}
 		}
 	}
 
@@ -679,8 +736,16 @@ func (cs *clientSession) routeBody(frame protocol.BodyFrame) {
 	}
 	if len(frame.Payload) > 0 {
 		cs.tm.addIn(fl.tunnelID, len(frame.Payload))
+		if fl.grant != nil {
+			fl.grant.received(len(frame.Payload))
+		}
 		// Kuyruga al; BLOKLAMAZ. Tasarsa yalniz bu istek iptal edilir.
 		if err := fl.q.push(frame.Payload); err != nil {
+			if fl.grant != nil {
+				// Yerel servis govdeyi okumayi birakti / kuyruk kapandi: veri
+				// atiliyor, kredisi iade edilmezse sunucu bosuna beklerdi.
+				fl.grant.kill()
+			}
 			cs.log.Debug("istek govdesi kuyruga alinamadi", "req_id", frame.ReqID, "hata", err)
 			return
 		}
@@ -697,9 +762,19 @@ func (cs *clientSession) cancelRequest(reqID uint64, reason string) {
 	cs.mu.Unlock()
 	if ok {
 		cs.log.Debug("istek iptal edildi", "req_id", reqID, "sebep", reason)
+		// Sunucu istegi birakti: govde hatasini ona geri bildirmek anlamsiz.
+		fl.serverCanceled.Store(true)
+		// Baglam iptali yerel istegi (dial, baslik bekleme, govde okuma) ve kredi
+		// beklemesini (windowTable.acquire) cozer. Istek govdesi borusu da
+		// kapatilir: yarim yuklemede (O8) yerel servis govdeyi beklerken
+		// yazma kuyrugu ve hedef baglantisi asili kalmasin.
 		fl.cancel()
+		fl.closeBody(errRequestCanceled)
 	}
 }
+
+// errRequestCanceled, sunucu istegi iptal ettiginde istek govdesi borusunun hatasi.
+var errRequestCanceled = errors.New("istek sunucu tarafindan iptal edildi")
 
 // closeAll, baglanti koptugunda tum ucustaki istekleri sonlandirir.
 func (cs *clientSession) closeAll() {
@@ -712,6 +787,8 @@ func (cs *clientSession) closeAll() {
 		fl.cancel()
 		fl.closeBody(errors.New("baglanti koptu"))
 	}
+	// Yazmayi bekleyen gonderenler (kredi iadesi, govde cercevesi) asili kalmasin.
+	cs.writer().close(errConnClosed)
 	cs.closeAllWS()
 	cs.closeAllStreams()
 }
@@ -801,9 +878,19 @@ func validLocalPath(p string) bool {
 
 // safeDialContext, DNS Rebinding ve Port Scanning saldirilarina karsi
 // hem host adi hem de cozumlenen tum IP adreslerini ve portu dogrular.
+//
+// O9: dial zaman asimi localDialTimeout. Eskiden 0'di (sinirsiz): yanit
+// vermeyen (SYN kara deligi) hedefte istek isletim sisteminin SYN yeniden
+// deneme suresi kadar (~130 sn) yasiyordu; ziyaretci ise 30 sn'de 504 aliyordu.
+// h2 yerel istemcileri (origin.go) zaten ayni sureyi kullanir.
 func safeDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
-	return guardedDial(ctx, network, addr, true, 0)
+	return guardedDial(ctx, network, addr, true, localDialTimeout)
 }
+
+// localDialTimeout, yerel HTTP hedefine TCP baglantisi kurma suresi. Yerel
+// servis normalde milisaniyede kabul eder; 10 sn yalniz olu/erisilemez hedefi
+// keser ve hata ziyaretciye sunucunun 30 sn'lik zaman asimindan once ulasir.
+const localDialTimeout = 10 * time.Second
 
 // streamDialContext, TCP/UDP akislari icin ayni hedef kisitlamasini uygular
 // (metadata/link-local, DNS cozumleme sonucu) ancak hassas port listesini

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -18,6 +19,10 @@ import (
 var (
 	ErrAuthFailed      = errors.New("kimlik dogrulama basarisiz")
 	ErrAuthRateLimited = errors.New("cok fazla basarisiz deneme")
+	// ErrAuthBusy, argon2 kapisi doluyken doner. ErrAuthRateLimited'i sarar:
+	// IMAP/SMTP katmani bunu zaten gecici hata ("sonra tekrar deneyin") olarak
+	// yaziyor; istemci parolayi yanlis sanip kullaniciya sormaz.
+	ErrAuthBusy = fmt.Errorf("%w: sunucu yogun", ErrAuthRateLimited)
 )
 
 const (
@@ -191,39 +196,66 @@ func (a *Authenticator) Authenticate(ctx context.Context, proto, username, passw
 		a.Logger.Warn("mail istemcisi girisi hiz siniri nedeniyle reddedildi", "proto", proto, "kullanici", user, "ip", ip)
 		return nil, ErrAuthRateLimited
 	}
-	fail := func(reason string) (*Account, error) {
+	fail := func(reason, metricReason string) (*Account, error) {
 		a.recordFail(ip, user)
+		auth.ReportFailure(nil, auth.KindMail, metricReason, ip) // log asagida (ayrintili)
 		a.Logger.Warn("mail istemcisi girisi basarisiz", "proto", proto, "kullanici", user, "ip", ip, "neden", reason)
 		return nil, ErrAuthFailed
+	}
+	busy := func() (*Account, error) {
+		auth.ReportFailure(nil, auth.KindMail, auth.ReasonBusy, ip)
+		a.Logger.Warn("mail istemcisi girisi ertelendi: dogrulama kapasitesi dolu", "proto", proto, "ip", ip)
+		return nil, ErrAuthBusy
 	}
 
 	tenantID, system, ok := a.ResolveMailbox(ctx, user)
 	if !ok {
-		auth.VerifyDummy(NormalizeAppPassword(password))
-		return fail("bilinmeyen kutu")
+		if errors.Is(auth.VerifyDummyContext(ctx, NormalizeAppPassword(password)), auth.ErrBusy) {
+			return busy()
+		}
+		return fail("bilinmeyen kutu", auth.ReasonUnknown)
 	}
 	pws, err := a.Store.ListActiveMailAppPasswords(ctx, user)
 	if err != nil {
 		a.Logger.Error("uygulama parolalari okunamadi", "hata", err)
+		auth.ReportFailure(nil, auth.KindMail, auth.ReasonStoreError, ip)
 		return nil, ErrAuthFailed
 	}
 	norm := NormalizeAppPassword(password)
 	if len(pws) == 0 {
-		auth.VerifyDummy(norm)
-		return fail("uygulama parolasi yok")
+		if errors.Is(auth.VerifyDummyContext(ctx, norm), auth.ErrBusy) {
+			return busy()
+		}
+		return fail("uygulama parolasi yok", auth.ReasonUnknown)
+	}
+	success := func(p store.MailAppPassword) (*Account, error) {
+		a.clearFails(ip, user)
+		if terr := a.Store.TouchMailAppPassword(ctx, p.ID, ip); terr != nil {
+			a.Logger.Warn("uygulama parolasi son kullanim guncellenemedi", "hata", terr)
+		}
+		a.Logger.Info("mail istemcisi girisi basarili", "proto", proto, "kullanici", user, "ip", ip, "parola_id", p.ID)
+		return &Account{TenantID: tenantID, Address: user, System: system, PasswordID: p.ID}, nil
+	}
+	// Once onbellek (argon2'siz): IMAP istemcileri sik yeniden baglanir ve kutu
+	// basina birden cok uygulama parolasi olabilir; eslesen parola sondaysa
+	// oncekilerin her biri icin 32 MB argon2 calismasin. Parola listesi her
+	// giriste depodan okundugundan iptal edilen parola aninda gecersizdir.
+	for _, p := range pws {
+		if p.TenantID == tenantID && auth.CachedOK("mail:"+p.ID, norm, p.PasswordHash) {
+			return success(p)
+		}
 	}
 	for _, p := range pws {
 		if p.TenantID != tenantID {
 			continue
 		}
-		if okPw, verr := auth.Verify(norm, p.PasswordHash); verr == nil && okPw {
-			a.clearFails(ip, user)
-			if terr := a.Store.TouchMailAppPassword(ctx, p.ID, ip); terr != nil {
-				a.Logger.Warn("uygulama parolasi son kullanim guncellenemedi", "hata", terr)
-			}
-			a.Logger.Info("mail istemcisi girisi basarili", "proto", proto, "kullanici", user, "ip", ip, "parola_id", p.ID)
-			return &Account{TenantID: tenantID, Address: user, System: system, PasswordID: p.ID}, nil
+		okPw, verr := auth.VerifyCached(ctx, "mail:"+p.ID, norm, p.PasswordHash)
+		if errors.Is(verr, auth.ErrBusy) {
+			return busy()
+		}
+		if verr == nil && okPw {
+			return success(p)
 		}
 	}
-	return fail("parola yanlis")
+	return fail("parola yanlis", auth.ReasonInvalid)
 }

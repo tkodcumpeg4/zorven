@@ -148,10 +148,13 @@ func (a *Agent) watchNetwork(ctx context.Context) {
 		case now := <-t.C:
 			wall := now.Round(0).Sub(last.Round(0))
 			mono := now.Sub(last)
+			prev := last
 			last = now
 			if wakeJump(wall, mono, netWatchTick) {
-				a.Log.Info("uyanma / duraksama algilandi, baglanti yenileniyor", "sure", wall.Round(time.Second))
-				a.onNetworkEvent()
+				// Duraksama en gec "onceki tik + bir tik" aninda baslamistir (surec
+				// calissaydi o anda tik gelirdi). Bu andan SONRA kurulan baglanti
+				// uyanmadan sonra kurulmustur ve tazedir (A1 #14).
+				a.onWake(prev.Add(netWatchTick+time.Second), wall)
 				ips = localIPs()
 				continue
 			}
@@ -174,6 +177,23 @@ func (a *Agent) signalWake() {
 	case a.wakeCh <- struct{}{}:
 	default:
 	}
+}
+
+// onWake: uyanma / duraksama algilandi. Mevcut baglanti duraksamadan ONCE
+// kurulduysa sagligi bilinemez ve yenilenir. Uyanmadan sonra (okuma dongusu
+// eski baglantinin koptugunu gorup yeniden baglanmis) kurulduysa dokunulmaz:
+// eskiden SIGCONT'tan ~3 sn sonra izleyicinin tiki gelince yeni kurulmus
+// oturum bir kez daha koparilip yeniden kuruluyordu (A1 #14).
+func (a *Agent) onWake(pausedBy time.Time, gap time.Duration) {
+	a.mu.Lock()
+	c, at := a.curConn, a.curConnAt
+	a.mu.Unlock()
+	if c != nil && at.After(pausedBy) {
+		a.Log.Info("uyanma / duraksama algilandi; baglanti uyanmadan sonra kurulmus, korunuyor", "sure", gap.Round(time.Second))
+		return
+	}
+	a.Log.Info("uyanma / duraksama algilandi, baglanti yenileniyor", "sure", gap.Round(time.Second))
+	a.onNetworkEvent()
 }
 
 // onNetworkEvent: baglanti sagligi bilinemez (uyku/ag degisimi) -> mevcut baglantiyi

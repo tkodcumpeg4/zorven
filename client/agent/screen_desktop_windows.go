@@ -4,20 +4,19 @@ package agent
 
 import (
 	"sync"
-	"syscall"
 
 	"golang.org/x/sys/windows"
 )
 
 var (
-	modUser32Screen      = syscall.NewLazyDLL("user32.dll")
+	modUser32Screen      = windows.NewLazySystemDLL("user32.dll")
 	procOpenInputDesktop = modUser32Screen.NewProc("OpenInputDesktop")
 	procSetThreadDesktop = modUser32Screen.NewProc("SetThreadDesktop")
 	procCloseDesktop     = modUser32Screen.NewProc("CloseDesktop")
 
 	procSetProcessDpiAwarenessContext = modUser32Screen.NewProc("SetProcessDpiAwarenessContext")
 	procSetProcessDPIAware            = modUser32Screen.NewProc("SetProcessDPIAware")
-	modShcoreScreen                   = syscall.NewLazyDLL("shcore.dll")
+	modShcoreScreen                   = windows.NewLazySystemDLL("shcore.dll")
 	procSetProcessDpiAwareness        = modShcoreScreen.NewProc("SetProcessDpiAwareness")
 )
 

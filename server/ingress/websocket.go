@@ -2,6 +2,7 @@ package ingress
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -13,6 +14,10 @@ import (
 
 // wsAcceptTimeout, yerel servisin WS yukseltmesini kabul etmesi icin taninan sure.
 const wsAcceptTimeout = 20 * time.Second
+
+// wsWriteStall, tarayiciya tek bir yazimin ilerlemeden bekleyebilecegi sure
+// (degisken: testler kisaltir).
+var wsWriteStall = 30 * time.Second
 
 // serveWebSocket, bir WebSocket yukseltme istegini tunel uzerinden yerel
 // servise proxy'ler. Tarayici baglantisi hijack edilir; 101 el sikismasi ve
@@ -74,6 +79,12 @@ func (h *Handler) serveWebSocketLog(w http.ResponseWriter, r *http.Request, sess
 	// (istemcinin gonderdigi X-Forwarded-For tek basina backend'e ulasmaz).
 	setForwardedHeaders(wsHeaders, r)
 	stream, err := sess.OpenWS(ctx, tunnelID, agentPath(r.URL), r.URL.RawQuery, wsHeaders)
+	if errors.Is(err, tunnel.ErrTooManyStreams) {
+		logRec.status = http.StatusServiceUnavailable
+		writeError(w, r, http.StatusServiceUnavailable, protocol.CodeRateLimited,
+			"Bu tunel icin cok fazla acik WebSocket baglantisi var.")
+		return
+	}
 	if err != nil {
 		logRec.status = http.StatusBadGateway
 		writeError(w, r, http.StatusBadGateway, protocol.CodeClientOffline,
@@ -140,6 +151,18 @@ func (h *Handler) serveWebSocketLog(w http.ResponseWriter, r *http.Request, sess
 		conn.Close()
 	})()
 
+	// Akis iptal edilirse (kuyruk tasti, oturum dustu) asagidaki yazim okumayan
+	// tarayiciya bloklu olabilir; baglantiyi kapatmak yazimi cozer (Y1).
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-stream.Aborted():
+			conn.Close()
+		case <-done:
+		}
+	}()
+
 	// tarayici -> yerel: hijack edilen baglantidan oku, ajana ilet.
 	go func() {
 		buf := make([]byte, 32*1024)
@@ -159,9 +182,13 @@ func (h *Handler) serveWebSocketLog(w http.ResponseWriter, r *http.Request, sess
 	}()
 
 	// yerel -> tarayici: ajandan gelen baytlari hijack edilen baglantiya yaz.
+	// Her yazima ilerleme son tarihi: tarayici wsWriteStall boyunca hic okumazsa
+	// akis kapatilir (eskiden zaman asimsiz bloklaniyordu ve kuyruk dolup
+	// kapansa bile bu goroutine kapanisi goremiyordu).
 	for {
 		select {
 		case data := <-stream.FromLocal():
+			_ = conn.SetWriteDeadline(time.Now().Add(wsWriteStall))
 			if _, werr := conn.Write(data); werr != nil {
 				return
 			}

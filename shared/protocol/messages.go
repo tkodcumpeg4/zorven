@@ -302,6 +302,10 @@ type HTTPRequest struct {
 	// bilgilendirme amaclidir ve omitempty'dir (eski ajanlar yok sayar).
 	HTTPMajor  int  `json:"http_major,omitempty"`
 	TETrailers bool `json:"te_trailers,omitempty"`
+
+	// Caps, sunucunun bu istek icin ONERDIGI yetenekler (bkz. ReqCapBodyCredit,
+	// streamflow.go). Eski ajanlar alani bilmez ve yok sayar.
+	Caps []string `json:"caps,omitempty"`
 }
 
 type Cancel struct {
@@ -363,6 +367,11 @@ type WSOpen struct {
 	Path     string              `json:"path"`
 	Query    string              `json:"query"`
 	Headers  map[string][]string `json:"headers"`
+
+	// Caps, sunucunun bu akis icin ONERDIGI akis yetenekleri (StreamCapCredit).
+	// Eski ajanlar alani yok sayar; WSAccept.Caps'te yankilanmayan yetenek
+	// kullanilmaz (bkz. streamflow.go).
+	Caps []string `json:"caps,omitempty"`
 }
 
 // WSAccept, ajandan sunucuya: yerel servise yapilan yukseltmenin sonucu.
@@ -374,6 +383,9 @@ type WSAccept struct {
 	Headers map[string][]string `json:"headers"`
 	Code    string              `json:"code,omitempty"`
 	Message string              `json:"message,omitempty"`
+
+	// Caps, ajanin WSOpen.Caps icinden KABUL ettigi yetenekler (yalniz basarida).
+	Caps []string `json:"caps,omitempty"`
 }
 
 // WSClose, her iki yon: WS akisini sonlandir.
@@ -406,6 +418,11 @@ type StreamOpen struct {
 	// Ajan bunu YALNIZCA tunel hedefi "subnet:<CIDR>" ise ve ip o araligin
 	// icindeyse kullanir; aksi halde yok sayar (tunel tanimindaki hedefe gider).
 	Dest string `json:"dest,omitempty"`
+
+	// Caps, sunucunun bu akis icin ONERDIGI akis yetenekleri (StreamCapCredit,
+	// StreamCapHalfClose; yalniz tcp). Eski ajanlar alani yok sayar ve
+	// StreamAck.Caps'i bos birakir; sunucu o zaman eski davranisa duser.
+	Caps []string `json:"caps,omitempty"`
 }
 
 // StreamAck, ajandan sunucuya: baglanti kuruldu (Code bos) veya hata (Code dolu).
@@ -414,6 +431,9 @@ type StreamAck struct {
 	ReqID   uint64      `json:"req_id"`
 	Code    string      `json:"code,omitempty"`
 	Message string      `json:"message,omitempty"`
+
+	// Caps, ajanin StreamOpen.Caps icinden KABUL ettigi yetenekler (yalniz basarida).
+	Caps []string `json:"caps,omitempty"`
 }
 
 // StreamClose, her iki yon: ham akisi sonlandir.
@@ -448,10 +468,21 @@ func PeekType(data []byte) (MessageType, error) {
 
 // Marshal, mesaji JSON'a cevirir. Type alanini cagiranin doldurmasi gerekir;
 // unutulursa burada yakalanir.
+//
+// A1 #6: dogrulama eskiden her mesajda ciktinin TAMAMINI PeekType ile yeniden
+// JSON-parse ediyordu (sunucu CPU %4.6, ajan %5.4). Butun mesaj yapilarinda
+// Type ILK alandir; json.Marshal ciktisi bu durumda tam olarak `{"type":"<t>"`
+// ile baslar ve ardindan `,` ya da `}` gelir. Bu on ek eslesirse sonuc PeekType
+// ile ayni olurdu (struct ciktisinda yinelenen anahtar olamaz), parse atlanir.
+// Eslesmezse (Type ilk alan degil, harita, kacislanmis karakter) eski tam
+// denetime dusulur: davranis birebir aynidir, yalniz hizli yol eklenmistir.
 func Marshal(v any, t MessageType) ([]byte, error) {
 	data, err := json.Marshal(v)
 	if err != nil {
 		return nil, err
+	}
+	if typePrefixMatches(data, t) {
+		return data, nil
 	}
 	got, err := PeekType(data)
 	if err != nil {
@@ -461,6 +492,28 @@ func Marshal(v any, t MessageType) ([]byte, error) {
 		return nil, fmt.Errorf("type alani %q olmali, %q bulundu", t, got)
 	}
 	return data, nil
+}
+
+// typePrefixMatches, data'nin `{"type":"<t>"` ile basladigini ve degerin
+// orada bittigini (ardindan `,` ya da `}`) denetler. t bos ya da JSON'da
+// kacislanmasi gereken bir karakter iceriyorsa false doner (tam denetim).
+func typePrefixMatches(data []byte, t MessageType) bool {
+	const head = `{"type":"`
+	if t == "" || len(data) < len(head)+len(t)+2 || string(data[:len(head)]) != head {
+		return false
+	}
+	for i := 0; i < len(t); i++ {
+		c := t[i]
+		if c < 0x20 || c == '"' || c == '\\' || c == '<' || c == '>' || c == '&' || c >= 0x80 {
+			return false
+		}
+	}
+	rest := data[len(head):]
+	if string(rest[:len(t)]) != string(t) || rest[len(t)] != '"' {
+		return false
+	}
+	next := rest[len(t)+1]
+	return next == ',' || next == '}'
 }
 
 // --- Uzak terminal ---------------------------------------------------------

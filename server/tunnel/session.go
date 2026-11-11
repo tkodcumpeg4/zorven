@@ -31,6 +31,30 @@ const (
 	// maxConsecutiveBadFrames, pes pese gelen bozuk kontrol/govde cercevesi siniri.
 	// Asilirsa saldiri/bozuk istemci sayilir ve baglanti kapatilir.
 	maxConsecutiveBadFrames = 5
+
+	// maxFrameLogs, oturum basina yazilan bozuk/beklenmeyen cerceve WARN siniri.
+	// Beklenmeyen tipler ardisik-hata sayacini sifirladigi icin oturum kapanmaz;
+	// her cerceveye bir satir yazmak 300 cercevede 300 satir log seli demekti.
+	// Fazlasi sayilir, oturum sonunda tek ozet satiri yazilir.
+	maxFrameLogs = 10
+)
+
+// Donmus ajan tespiti (O15). Bekleyen bir HTTP istegi varken ajandan stallAfter
+// boyunca hicbir cerceve gelmediyse araya erken bir ping girer; ping'den sonra
+// stallGrace icinde de hicbir sey gelmezse oturum olu sayilip kapatilir ve
+// bekleyen istekler hemen hata alir (ziyaretci 30 sn bekleyip 504 almaz, ajan
+// yeniden baglaninca trafik doner). Bosta oturumlarda davranis ayni kalir
+// (HeartbeatInterval x maxMissedPongs): kimse beklemiyorken yavas/mobil agda
+// yanlis pozitif riskine girmeye gerek yok.
+//
+// Neden yanlis pozitif dusuk: herhangi bir cerceve (govde parcasi, pong, WS
+// verisi) canlilik sayilir; yavas ama canli bir ag 10 sn'de en az pong'u
+// ulastirir. Tum surumler ping'e pong doner (eski istemciler dahil), yeni
+// mesaj ya da alan yok: tel protokolu degismez.
+var (
+	stallCheckEvery = 2 * time.Second
+	stallAfter      = 10 * time.Second
+	stallGrace      = 10 * time.Second
 )
 
 // Session, bagli tek bir istemciyi temsil eder.
@@ -67,6 +91,10 @@ type Session struct {
 	lastSeen    time.Time
 	missedPongs int
 	badFrames   atomic.Int32
+
+	// frameLogs / frameLogsDropped: warnFrame log siniri (maxFrameLogs).
+	frameLogs        atomic.Int32
+	frameLogsDropped atomic.Int64
 
 	// Ucusta olan istekler. req_id oturum omru boyunca artan bir sayacdir;
 	// ayni WSS baglantisi uzerinde es zamanli istekleri ayirt eder
@@ -128,6 +156,9 @@ type Session struct {
 	// creditMu, istek basina biriken kredi iadesini korur.
 	creditMu sync.Mutex
 	credit   map[uint64]int
+	// reqCreditMode, ajanin istek govdesi kredisini (body_credit) destekleyip
+	// desteklemedigi: reqCreditUnknown/Yes/No (reqcredit.go).
+	reqCreditMode atomic.Int32
 
 	// Uzak terminal aboneleri: session_id -> ciktinin gonderilecegi kanal.
 	// Dashboard koprusu (server/api) buraya abone olur.
@@ -153,6 +184,8 @@ type Session struct {
 	// Aktif ham TCP/UDP tunel akislari: req_id -> koprü (FAZ 3 / D2).
 	rawMu      sync.Mutex
 	rawBridges map[uint64]*rawBridge
+	// streamMem, ham/WS akis kuyruklarinda bekleyen toplam bellek (streamq.go).
+	streamMem atomic.Int64
 
 	// UDP tunel olcumu (FeatureUDPProbe; bkz. udpprobe.go). udpProbe yalnizca
 	// el sikismada yazilir.
@@ -302,6 +335,7 @@ func (s *Session) Run(ctx context.Context) error {
 	defer s.closeAllRaw()
 	defer s.closeAllFiles()
 	defer s.closeNet()
+	defer s.flushFrameLogs()
 
 	go s.heartbeat(ctx, cancel)
 
@@ -323,7 +357,7 @@ func (s *Session) Run(ctx context.Context) error {
 		switch typ {
 		case websocket.MessageText:
 			if err := s.handleControl(ctx, data); err != nil {
-				s.log.Warn("kontrol mesaji islenemedi", "hata", err)
+				s.warnFrame("kontrol mesaji islenemedi", "hata", err)
 				if s.badFrames.Add(1) >= maxConsecutiveBadFrames {
 					s.log.Warn("ardisik bozuk cerceve siniri asildi, baglanti kapatiliyor", "bad_frames", s.badFrames.Load())
 					s.conn.CloseNow()
@@ -335,7 +369,7 @@ func (s *Session) Run(ctx context.Context) error {
 		case websocket.MessageBinary:
 			frame, err := protocol.DecodeBodyFrame(data)
 			if err != nil {
-				s.log.Warn("bozuk govde cercevesi", "hata", err)
+				s.warnFrame("bozuk govde cercevesi", "hata", err)
 				if s.badFrames.Add(1) >= maxConsecutiveBadFrames {
 					s.log.Warn("ardisik bozuk cerceve siniri asildi, baglanti kapatiliyor", "bad_frames", s.badFrames.Load())
 					s.conn.CloseNow()
@@ -460,6 +494,18 @@ func (s *Session) handleControl(ctx context.Context, data []byte) error {
 		}
 		s.routeStreamClose(sc.ReqID)
 
+	case protocol.TypeWindowUpdate:
+		// Ham/WS akisinda kredi iadesi (akis basina pazarlik; bkz. protocol/streamflow.go).
+		// Pazarlanmamis akis icin gelirse creditGate kapali oldugundan yok sayilir.
+		var wu protocol.WindowUpdate
+		if err := json.Unmarshal(data, &wu); err != nil {
+			return err
+		}
+		// Once HTTP istek govdesi kredisi (body_credit), degilse ham/WS akisi.
+		if !s.routeReqCredit(wu.ReqID, wu.Increment) {
+			s.routeStreamWindow(wu.ReqID, wu.Increment)
+		}
+
 	case protocol.TypeHTTPResponse:
 		var msg protocol.HTTPResponse
 		if err := json.Unmarshal(data, &msg); err != nil {
@@ -471,6 +517,7 @@ func (s *Session) handleControl(ctx context.Context, data []byte) error {
 			s.log.Debug("bilinmeyen req_id icin yanit", "req_id", msg.ReqID)
 			return nil
 		}
+		s.noteReqHead(e)
 		e.deliverHead(ResponseHead{Status: msg.Status, Headers: msg.Headers, HasBody: msg.HasBody})
 		if !msg.HasBody {
 			e.closeBody(nil)
@@ -603,10 +650,11 @@ func (s *Session) handleControl(ctx context.Context, data []byte) error {
 		if !ok {
 			return nil
 		}
+		s.noteReqHead(e)
 		e.fail(msg.Code, msg.Message, errors.New(msg.Message))
 
 	default:
-		s.log.Warn("beklenmeyen mesaj tipi", "tip", t)
+		s.warnFrame("beklenmeyen mesaj tipi", "tip", t)
 	}
 	return nil
 }
@@ -615,11 +663,35 @@ func (s *Session) handleControl(ctx context.Context, data []byte) error {
 func (s *Session) heartbeat(ctx context.Context, cancel context.CancelFunc) {
 	ticker := time.NewTicker(HeartbeatInterval)
 	defer ticker.Stop()
+	// Esikler bir kez okunur (testler paket degiskenlerini degistirir).
+	every, after, grace := stallParams()
+	stall := time.NewTicker(every)
+	defer stall.Stop()
+	var probeAt time.Time
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case now := <-stall.C:
+			var probe, dead bool
+			probeAt, probe, dead = s.stallStep(now, probeAt, after, grace)
+			if dead {
+				s.log.Warn("ajan yanit vermiyor (bekleyen istek var), baglanti kapatiliyor",
+					"bekleyen", s.PendingCount(), "sessiz_sn", int(now.Sub(s.LastSeen()).Seconds()))
+				// CloseNow: donmus es kapanis cercevesine yanit vermez; Close burada
+				// saniyelerce beklerdi. Run'in Read'i hata alir, bekleyenler hemen dusurulur.
+				s.conn.CloseNow()
+				cancel()
+				return
+			}
+			if probe {
+				// Ayri goroutine: yazma kilidi/tamponu doluysa (donmus es) Send
+				// writeTimeout'a kadar bloklayabilir; tespit saati bundan etkilenmemeli.
+				go func() {
+					_ = s.Send(ctx, protocol.Ping{Type: protocol.TypePing, TS: time.Now().UTC()}, protocol.TypePing)
+				}()
+			}
 		case <-ticker.C:
 			s.mu.Lock()
 			s.missedPongs++
@@ -639,6 +711,43 @@ func (s *Session) heartbeat(ctx context.Context, cancel context.CancelFunc) {
 				return
 			}
 		}
+	}
+}
+
+// stallStep, donmus ajan tespitinin tek adimi (bkz. stallAfter). probeAt sifir
+// degilse erken ping o anda gonderilmistir. Donus: yeni probeAt, simdi ping
+// gonderilmeli mi, oturum olu mu.
+func (s *Session) stallStep(now, probeAt time.Time, after, grace time.Duration) (time.Time, bool, bool) {
+	last := s.LastSeen()
+	if !probeAt.IsZero() {
+		if last.After(probeAt) {
+			return time.Time{}, false, false // ping'den sonra bir sey geldi: canli
+		}
+		if now.Sub(probeAt) >= grace {
+			return probeAt, false, true
+		}
+		return probeAt, false, false
+	}
+	if now.Sub(last) < after || s.PendingCount() == 0 {
+		return time.Time{}, false, false
+	}
+	return now, true, false
+}
+
+// warnFrame, bozuk/beklenmeyen cerceve uyarisini oturum basina maxFrameLogs
+// satirla sinirlar; fazlasi sayilir ve flushFrameLogs ile ozetlenir.
+func (s *Session) warnFrame(msg string, args ...any) {
+	if s.frameLogs.Add(1) > maxFrameLogs {
+		s.frameLogsDropped.Add(1)
+		return
+	}
+	s.log.Warn(msg, args...)
+}
+
+// flushFrameLogs, bastirilan cerceve uyarilarini tek satirda ozetler.
+func (s *Session) flushFrameLogs() {
+	if n := s.frameLogsDropped.Load(); n > 0 {
+		s.log.Warn("bozuk/beklenmeyen cerceve uyarilari bastirildi", "bastirilan", n, "ilk", maxFrameLogs)
 	}
 }
 
@@ -678,7 +787,7 @@ func (s *Session) routeBodyFrame(frame protocol.BodyFrame) {
 		return
 	}
 	if frame.FrameType != protocol.FrameResponseBody {
-		s.log.Warn("istemciden beklenmeyen cerceve tipi", "tip", frame.FrameType)
+		s.warnFrame("istemciden beklenmeyen cerceve tipi", "tip", frame.FrameType)
 		return
 	}
 
@@ -693,7 +802,7 @@ func (s *Session) routeBodyFrame(frame protocol.BodyFrame) {
 				// Istemci acik penceresinden fazlasini gonderdi. YALNIZCA bu
 				// istegi dusuruyoruz; oturum ve diger istekler ayakta kalir.
 				// (Eskiden burada bloklanirdik ve TUM oturum dururdu.)
-				s.log.Warn("akis kontrolu ihlali; istek dusuruldu", "req_id", frame.ReqID)
+				s.warnFrame("akis kontrolu ihlali; istek dusuruldu", "req_id", frame.ReqID)
 				e.fail(protocol.CodeClientOffline, "akis kontrolu penceresi asildi", err)
 				return
 			}
@@ -710,7 +819,8 @@ func (s *Session) routeBodyFrame(frame protocol.BodyFrame) {
 // SendRequest, istegi istemciye gonderir ve yeni exchange'i doner.
 // Cagiran, is bitince s.FinishExchange(e.reqID) cagirmak ZORUNDADIR.
 func (s *Session) SendRequest(ctx context.Context, req protocol.HTTPRequest) (*Exchange, error) {
-	e, err := s.newExchange()
+	// Govdeli istekte istek govdesi kredisi onerilir (reqcredit.go).
+	e, err := s.newExchangeCredit(s.offerReqCredit(&req))
 	if err != nil {
 		return nil, err
 	}
@@ -742,6 +852,13 @@ func (s *Session) StreamRequestBodyUnbounded(ctx context.Context, reqID uint64, 
 func (s *Session) streamRequestBody(ctx context.Context, reqID uint64, body io.ReadCloser, max int64) error {
 	defer body.Close()
 
+	// Istek govdesi kredisi (body_credit): ajan pencereyi verdikce gonder.
+	// Beklerken ziyaretciden okunmaz; geri basinc TCP/H2 ile ziyaretciye yansir.
+	var credit *reqBodyCredit
+	if e, ok := s.lookupExchange(reqID); ok {
+		credit = e.reqCredit
+	}
+
 	var limited io.Reader = body
 	if max > 0 {
 		limited = io.LimitReader(body, max+1)
@@ -756,6 +873,11 @@ func (s *Session) streamRequestBody(ctx context.Context, reqID uint64, body io.R
 			total += int64(n)
 			if max > 0 && total > max {
 				return ErrBodyTooLarge
+			}
+			if credit != nil {
+				if err := credit.acquire(ctx, n+protocol.StreamFrameCost, &s.reqCreditMode); err != nil {
+					return err
+				}
 			}
 			frame := protocol.BodyFrame{
 				FrameType: protocol.FrameRequestBody,
@@ -907,4 +1029,14 @@ func (s *Session) Metrics() *protocol.Metrics {
 	s.metricsMu.RLock()
 	defer s.metricsMu.RUnlock()
 	return s.latestMetrics
+}
+
+// stallMu, donmus ajan esiklerini korur: testler esikleri kisaltirken onceki
+// testten kalan bir oturumun heartbeat goroutine'i ayni anda okuyabilir (race).
+var stallMu sync.RWMutex
+
+func stallParams() (every, after, grace time.Duration) {
+	stallMu.RLock()
+	defer stallMu.RUnlock()
+	return stallCheckEvery, stallAfter, stallGrace
 }

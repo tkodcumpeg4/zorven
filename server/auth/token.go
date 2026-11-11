@@ -13,6 +13,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
@@ -121,13 +122,23 @@ func Split(full string) (id, secret string, err error) {
 }
 
 // Verify, gizli kismi saklanan hash ile karsilastirir.
-// Karsilastirma sabit zamanlidir.
+// Karsilastirma sabit zamanlidir. argon2 kapisi doluysa ErrBusy doner.
 func Verify(secret, encodedHash string) (bool, error) {
+	return VerifyContext(context.Background(), secret, encodedHash)
+}
+
+// VerifyContext, Verify gibidir; kapida beklerken ctx iptal edilirse
+// (istemci koptu) beklemeyi birakir ve ErrBusy doner.
+func VerifyContext(ctx context.Context, secret, encodedHash string) (bool, error) {
 	salt, want, err := decodeHash(encodedHash)
 	if err != nil {
 		return false, err
 	}
+	if err := acquire(ctx, true); err != nil {
+		return false, err
+	}
 	got := argon2.IDKey([]byte(secret), salt, argonTime, argonMemory, argonThreads, argonKeyLen)
+	release()
 	return subtle.ConstantTimeCompare(got, want) == 1, nil
 }
 
@@ -136,9 +147,21 @@ func Verify(secret, encodedHash string) (bool, error) {
 // hashSecret, "argon2id$<salt-b64>$<hash-b64>" bicimini uretir.
 // HashSecret, verilen gizli kismin argon2id hash'ini uretir.
 func HashSecret(secret string) (string, error) {
+	return hashSecret(secret, true)
+}
+
+// hashSecret, gated false ise kapidan gecmez: yalniz surec basina bir kez
+// uretilen dummyHash icin (dolu kapida VerifyDummy kendi kendini beklemesin).
+func hashSecret(secret string, gated bool) (string, error) {
 	salt := make([]byte, saltLen)
 	if _, err := rand.Read(salt); err != nil {
 		return "", fmt.Errorf("tuz uretilemedi: %w", err)
+	}
+	// Hash uretimi kimlikli ve seyrek yollardadir (token/parola olusturma):
+	// reddedilmez, yalniz kapida sira bekler; bellek siniri burada da gecerli.
+	if gated {
+		_ = acquire(context.Background(), false)
+		defer release()
 	}
 	sum := argon2.IDKey([]byte(secret), salt, argonTime, argonMemory, argonThreads, argonKeyLen)
 	return "argon2id$" +
@@ -163,7 +186,7 @@ func decodeHash(encoded string) (salt, sum []byte, err error) {
 // dummyHash, VerifyDummy icin bir kez uretilen gecerli bicimli hash.
 // sync.OnceValue ile tembel hesaplanir; paket yuklenirken maliyet olusmaz.
 var dummyHash = sync.OnceValue(func() string {
-	h, err := HashSecret("gecersiz-token-icin-sabit-deger")
+	h, err := hashSecret("gecersiz-token-icin-sabit-deger", false)
 	if err != nil {
 		// Bu yalnizca crypto/rand basarisiz olursa olur; o durumda zaten
 		// gercek token uretimi de calismaz.
@@ -178,7 +201,17 @@ var dummyHash = sync.OnceValue(func() string {
 // yanit suresinden ayirt etmek mumkun olurdu — gecerlide argon2 calisir
 // (~10ms), gecersizde hic calismaz. Saldirgan bu farkla gecerli tokenID'leri
 // numaralandirabilirdi. Ayni maliyette sahte bir dogrulama yaparak iki yolu
-// esitliyoruz. Sonuc bilerek yok sayilir.
-func VerifyDummy(secret string) {
-	_, _ = Verify(secret, dummyHash())
+// esitliyoruz. Sonuc bilerek yok sayilir; yalniz kapi doluysa ErrBusy doner
+// (cagiran gecerli tokendaki gibi 503 yazar, iki yol yine ayirt edilemez).
+func VerifyDummy(secret string) error {
+	return VerifyDummyContext(context.Background(), secret)
+}
+
+// VerifyDummyContext, VerifyDummy'nin baglamli bicimi.
+func VerifyDummyContext(ctx context.Context, secret string) error {
+	_, err := VerifyContext(ctx, secret, dummyHash())
+	if errors.Is(err, ErrBusy) {
+		return err
+	}
+	return nil
 }

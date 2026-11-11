@@ -1,12 +1,14 @@
 package ingress
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -161,17 +163,34 @@ func (h *Handler) writeBasicCookie(w http.ResponseWriter, r *http.Request, tun s
 
 // checkBasicCreds, kullanici adini sabit zamanli, parolayi argon2 ile dogrular.
 // Kullanici adi yanlis olsa da argon2 calisir (zamanlama farki sizmasin).
-func checkBasicCreds(cfg basicConfig, user, pass string) bool {
+//
+// Authorization: Basic ile gelen istemciler (curl, API) parolayi HER istekte
+// gonderir; onceden her istek 32 MB argon2 calistiriyordu. Basarili (kullanici,
+// parola, hash) uclusu kisa sure onbelleklenir (auth.VerifyCached); parola
+// degisince hash degistiginden eski kayit gecersizdir. argon2 kapisi doluysa
+// auth.ErrBusy doner (cagiran 503 yazar).
+func checkBasicCreds(ctx context.Context, cfg basicConfig, user, pass string) (bool, error) {
 	if cfg.Username == "" || cfg.PasswordHash == "" {
-		return false
+		return false, nil
 	}
 	userOK := subtle.ConstantTimeCompare([]byte(user), []byte(cfg.Username)) == 1
 	if !userOK {
-		auth.VerifyDummy(pass)
-		return false
+		return false, auth.VerifyDummyContext(ctx, pass)
 	}
-	valid, _ := auth.Verify(pass, cfg.PasswordHash)
-	return valid
+	valid, err := auth.VerifyCached(ctx, "basic:"+cfg.Username, pass, cfg.PasswordHash)
+	if errors.Is(err, auth.ErrBusy) {
+		return false, err
+	}
+	return valid, nil
+}
+
+// serveBasicBusy, argon2 kapisi doluyken 503 yazar. 401 degil: parola yanlis
+// degil, sunucu gecici olarak yogun; basarisiz deneme kotasi da harcanmaz.
+func serveBasicBusy(w http.ResponseWriter, r *http.Request) {
+	auth.ReportFailure(nil, auth.KindBasic, auth.ReasonBusy, clientIP(r))
+	w.Header().Set("Retry-After", "2")
+	writeError(w, r, http.StatusServiceUnavailable, protocol.CodeRateLimited,
+		"Sunucu su an yogun. Lutfen biraz sonra tekrar deneyin.")
 }
 
 // --- basarisiz deneme siniri ------------------------------------------------
@@ -258,10 +277,16 @@ func (h *Handler) enforceBasic(w http.ResponseWriter, r *http.Request, tun store
 			serveBasicLimited(w, r, wantsHTMLPage(r))
 			return false
 		}
-		if checkBasicCreds(cfg, user, pass) {
+		ok, err := checkBasicCreds(r.Context(), cfg, user, pass)
+		if err != nil {
+			serveBasicBusy(w, r)
+			return false
+		}
+		if ok {
 			return true
 		}
 		h.basicFailed(key)
+		auth.ReportFailure(nil, auth.KindBasic, auth.ReasonInvalid, clientIP(r))
 		h.recordAccess(tun, r, accesslog.MethodBasic, "", user, false, accesslog.ReasonBadCredentials)
 		failedHeader = true
 	}
@@ -336,8 +361,14 @@ func (h *Handler) handleBasicLogin(w http.ResponseWriter, r *http.Request, tun s
 		serveLimitedPage(w, r)
 		return
 	}
-	if !checkBasicCreds(cfg, user, pass) {
+	ok, err := checkBasicCreds(r.Context(), cfg, user, pass)
+	if err != nil {
+		serveBasicBusy(w, r)
+		return
+	}
+	if !ok {
 		h.basicFailed(key)
+		auth.ReportFailure(nil, auth.KindBasic, auth.ReasonInvalid, clientIP(r))
 		h.recordAccess(target, r, accesslog.MethodBasic, "", ident, false, accesslog.ReasonBadCredentials)
 		renderAccessPage(w, r, http.StatusUnauthorized, basicPageData(r, rd, user, true))
 		return

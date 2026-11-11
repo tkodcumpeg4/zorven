@@ -116,10 +116,20 @@ func (cs *clientSession) handleWSOpen(m protocol.WSOpen) {
 	// Basari: ONCE kaydet, SONRA ws_accept gonder. Tarayici accept'i alir almaz
 	// veri yollar; kayit sonra olsaydi ilk cerceveler sessizce dusurulurdu
 	// (stream.go ile ayni yaris). Accept gonderilemezse kaydi geri al.
-	cs.registerWS(m.ReqID, conn)
+	// Kredi (sunucu onerdiyse): iki yonde de pencere; eski sunucu onermez.
+	var caps []string
+	var local net.Conn = conn
+	if credit, _, accepted := cs.negotiateStreamCaps(m.Caps, false); credit {
+		local = newFlowConn(conn, m.ReqID, true, false)
+		caps = accepted
+	}
+	cs.registerWS(m.ReqID, local)
 	cs.noteConn(m.ReqID, m.TunnelID)
 	cs.tm.request(m.TunnelID)
-	if err := cs.sendWSAccept(m.ReqID, resp.StatusCode, resp.Header, "", ""); err != nil {
+	if err := cs.sendControl(context.Background(), protocol.WSAccept{
+		Type: protocol.TypeWSAccept, ReqID: m.ReqID, Status: resp.StatusCode,
+		Headers: resp.Header, Caps: caps,
+	}, protocol.TypeWSAccept); err != nil {
 		cs.closeWS(m.ReqID)
 		return
 	}
@@ -130,10 +140,14 @@ func (cs *clientSession) handleWSOpen(m protocol.WSOpen) {
 
 	// yerel -> sunucu (br: hijack sonrasi tamponlanmis baytlari da kapsar).
 	go func() {
+		defer cs.releaseSend(local, m.ReqID)
 		buf := make([]byte, 32*1024)
 		for {
 			n, rerr := br.Read(buf)
 			if n > 0 {
+				if cs.acquireSend(local, m.ReqID, n) != nil {
+					break // akis kapandi
+				}
 				if serr := cs.sendFrame(context.Background(), protocol.BodyFrame{
 					FrameType: protocol.FrameWSData, ReqID: m.ReqID, Payload: buf[:n],
 				}); serr != nil {
@@ -167,7 +181,7 @@ func (cs *clientSession) routeWSData(reqID uint64, payload []byte) {
 		if cs.wsQ == nil {
 			cs.wsQ = make(map[uint64]*writeQueue)
 		}
-		q = newConnWriteQueue(conn, func(err error) {
+		q = cs.newLocalWriteQueue(conn, func(err error) {
 			cs.log.Warn("ws yazma kuyrugu basarisiz, akis kapatiliyor", "req_id", reqID, "hata", err)
 			_ = cs.sendControl(context.Background(), protocol.WSClose{Type: protocol.TypeWSClose, ReqID: reqID}, protocol.TypeWSClose)
 			cs.closeWS(reqID)

@@ -14,6 +14,12 @@ func TestAbuseReporterIdentityAndCounts(t *testing.T) {
 	in := store.AbuseReport{FQDN: "evil.example.test", Reason: "phishing", Category: "phishing",
 		ReporterIP: "203.0.113.9", ReporterID: "0123456789abcdef0123456789abcdef",
 		ReporterUA: "UA/1", ReporterTLS: "t13d", ReporterLang: "tr"}
+	// freshStore abuse_reports'u bosaltmiyor: ayni DB'de ikinci kosuda onceki kaydin
+	// sayilari 2'ye cikariyordu. Testin kendi anahtarlarini once temizle (idempotent).
+	if _, err := s.pool.Exec(ctx, `DELETE FROM abuse_reports WHERE fqdn = $1 OR reporter_ip = $2 OR reporter_id = $3`,
+		in.FQDN, in.ReporterIP, in.ReporterID); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := s.CreateAbuseReportFull(ctx, in); err != nil {
 		t.Fatal(err)
 	}

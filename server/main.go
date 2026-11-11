@@ -8,16 +8,20 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -35,6 +39,7 @@ import (
 	"github.com/tkodcumpeg4/zorven/server/entitlements"
 	"github.com/tkodcumpeg4/zorven/server/events"
 	"github.com/tkodcumpeg4/zorven/server/ingress"
+	"github.com/tkodcumpeg4/zorven/server/internal/envnum"
 	"github.com/tkodcumpeg4/zorven/server/ipfilter"
 	"github.com/tkodcumpeg4/zorven/server/mail"
 	"github.com/tkodcumpeg4/zorven/server/mcpserver"
@@ -58,8 +63,9 @@ import (
 )
 
 var (
-	dbDSN    string
-	logLevel string
+	dbDSN     string
+	logLevel  string
+	logFormat string
 
 	// tenantID, CLI komutlarinin hangi kiraci adina calisacagi.
 	// Kimlik dogrulama henuz kiraci secmiyor (Plan 3); varsayilan kiraci.
@@ -77,6 +83,7 @@ func main() {
 	root.PersistentFlags().StringVar(&dbDSN, "db-dsn", os.Getenv("ZORVEN_DB_DSN"),
 		"Postgres DSN (postgres://...); ZORVEN_DB_DSN ortam degiskeniyle de verilebilir")
 	root.PersistentFlags().StringVar(&logLevel, "log-level", "info", "debug | info | warn | error")
+	root.PersistentFlags().StringVar(&logFormat, "log-format", firstNonEmpty(os.Getenv("ZORVEN_LOG_FORMAT"), "text"), "text | json (ZORVEN_LOG_FORMAT)")
 
 	root.AddCommand(serveCmd(), clientCmd(), tunnelCmd(), certCmd(), adminKeyCmd(), importCmd())
 
@@ -106,6 +113,13 @@ func serveCmd() *cobra.Command {
 		Short: "Tunel sunucusunu baslatir",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			log := newLogger()
+			// Y8: dolu ama gecersiz ZORVEN_SECRET_KEY baslangicta durdurur (once sessizce
+			// "tanimsiz" sayilip sirlar duz metin saklaniyordu).
+			if err := normalizeSecretKeyEnv(os.Getenv, os.Setenv); err != nil {
+				return err
+			}
+			logMemoryLimit(log)
+			obs.SetBuildInfo(protocol.Version)
 			st, err := openStore(cmd.Context())
 			if err != nil {
 				return err
@@ -129,9 +143,26 @@ func serveCmd() *cobra.Command {
 Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz.`)
 			}
 
-			// Ctrl+C ile duzgun kapanis.
-			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			// Ctrl+C / SIGTERM ile duzgun kapanis. Iki ayri baglam (Y6):
+			//   sigCtx: sinyal geldigi an iptal olur; yalniz dinleyicilerin kapanisini tetikler.
+			//   ctx:    arka plan isleri (persister, job, reload, mail). Ana HTTP sunucusu
+			//           yoldaki istekleri BITIRDIKTEN sonra iptal edilir; havuz (st.Close,
+			//           en ilk defer) en son kapanir. Eskiden tek baglam vardi: sinyalde
+			//           isler ve OnTunnelChange'in router.Reload'u hemen olur, RunE donup
+			//           havuz kapanir, yoldaki istekler "closed pool" ile 401/403/500 alirdi.
+			sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
+			ctx, cancelBG := context.WithCancel(context.Background())
+			defer cancelBG()
+			// persistWG: kapanista son toplu yazimlarini (istek/erisim/MCP loglari) havuz
+			// kapanmadan bitirmesi beklenen isler.
+			var persistWG sync.WaitGroup
+			goPersist := func(name string, run func(context.Context)) {
+				persistWG.Add(1)
+				// Persister bellek ici tampon tutar; panikte tutarlilik garanti edilemez:
+				// loglayip sayar ve sureci kontrollu sonlandirir (compose yeniden baslatir).
+				obs.GoFatal(ctx, log, name, func(ctx context.Context) { defer persistWG.Done(); run(ctx) })
+			}
 
 			hub := tunnel.NewHub()
 
@@ -199,7 +230,7 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 			// Aktif saglik denetleyicisi (FAZ 4 / F21): yalnizca yuk dengeleme
 			// kaydinda saglik denetimi acik tunellere istek atar.
 			healthChecker := &ingress.HealthChecker{Router: router, Hub: hub, Log: log}
-			go healthChecker.Run(ctx)
+			obs.GoRestart(ctx, log, "health_checker", func(ctx context.Context) { healthChecker.Run(ctx) })
 
 			requests := reqlog.New(5000)
 			captures := reqlog.NewCaptureStore(0)            // FAZ 2: opt-in istek yakalama deposu
@@ -212,23 +243,28 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 			logPersister = reqlog.NewPersister(func(pctx context.Context, batch []reqlog.Entry) error {
 				return st.InsertRequestLogs(pctx, batch)
 			}, log)
-			go logPersister.Run(ctx)
+			obs.RegisterCounter("zorven_reqlog_persist_dropped_total",
+				"kalici yazilamadan atilan istek logu sayisi (kuyruk dolu ya da DB yeniden denemeleri tukendi; artan sayac)",
+				func() float64 { return float64(logPersister.Dropped()) })
+			goPersist("reqlog_persister", logPersister.Run)
 
 			// MCP tunel modu cagri loglari (yalniz ust veri), toplu yazim.
 			mcpLogger := ingress.NewMCPLogger(st.InsertMCPCalls, log)
-			go mcpLogger.Run(ctx)
+			goPersist("mcp_logger", mcpLogger.Run)
 
 			// Ziyaretci erisim olaylari (Basic/OAuth giris istatistikleri): istek
 			// yolunu bloklamadan toplu yazilir.
 			accessPersister := accesslog.NewPersister(func(pctx context.Context, batch []accesslog.Event) error {
 				return st.InsertAccessEvents(pctx, batch)
 			}, log)
-			go accessPersister.Run(ctx)
+			goPersist("access_persister", accessPersister.Run)
 
 			// Log saklama temizligi: sabit sure, ZORVEN_LOG_RETENTION_DAYS (vars. 30);
 			// acilistan 1 dk sonra, sonra saatlik.
 			if pr, ok := st.(retention.Pruner); ok {
-				go retention.Run(ctx, pr, log, time.Minute, time.Hour)
+				obs.GoRestart(ctx, log, "retention", func(ctx context.Context) {
+					retention.Run(ctx, pr, log, time.Minute, time.Hour)
+				})
 			}
 
 			entitlementSvc := entitlements.NewService(st)
@@ -267,7 +303,8 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 			}
 			netMgr := netctl.New(netStore, api.NewNetDirectory(st), nil, log)
 			netMgr.Usage = bandwidthRecorder
-			go netMgr.Run(ctx)
+			// Ozel ag yoneticisi (WireGuard esleri, IPAM) durumludur: panikte kontrollu cikis.
+			obs.GoFatal(ctx, log, "net_manager", func(ctx context.Context) { netMgr.Run(ctx) })
 			setupNetDirect(ctx, netMgr, os.Getenv, log) // W2: STUN + dogrudan P2P yol koordinasyonu
 
 			apiSrv := &api.Server{
@@ -404,10 +441,10 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 			control := http.NewServeMux()
 			control.Handle("/_tunnel/v1/connect", tunnelHandler)
 			// FAZ 6.4: metrik uyarı değerlendiricisi (arka planda periyodik).
-			go apiSrv.RunAlertEvaluator(ctx, time.Minute)
+			obs.GoRestart(ctx, log, "alert_evaluator", func(ctx context.Context) { apiSrv.RunAlertEvaluator(ctx, time.Minute) })
 			// Kopuk ajan operator alarmi. ZORVEN_OFFLINE_ALERT_MIN=0 kapatir.
 			if w := agentOfflineWatchFromEnv(false, hub); w != nil {
-				go apiSrv.RunAgentOfflineWatch(ctx, w, time.Minute)
+				obs.GoRestart(ctx, log, "agent_offline_watch", func(ctx context.Context) { apiSrv.RunAgentOfflineWatch(ctx, w, time.Minute) })
 			}
 			apiRoutes := apiSrv.Routes()
 			control.Handle("/api/v1/", apiRoutes)
@@ -450,11 +487,18 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 			// hiz siniri (30 rps, burst 60). Normal kullanimi engellemez; kotuye
 			// kullanimi ve kazara sonsuz donguleri sinirlar.
 			apiLimiter := ratelimit.New(30, 60)
+			// Basarisiz (argon2 gerektiren) kimlik denemeleri icin IP basina kota (K1):
+			// 20 deneme, sonra 6 sn'de bir. Middleware nil'de ayni varsayilani kendi
+			// kurardi; burada acik kurulur ki Close kapanista cagrilsin ve deger tek
+			// yerden okunsun.
+			authFailLimiter := ratelimit.New(1.0/6, 20)
+			defer authFailLimiter.Close()
 
 			guarded := &api.Middleware{
 				Key:            key,
 				Limiter:        adminLimiter,
 				APILimiter:     apiLimiter,
+				FailLimiter:    authFailLimiter,
 				Log:            log,
 				Next:           control,
 				Store:          st,
@@ -520,7 +564,7 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 					rawMgr.CloseDoorConns(tunnelID, ip)
 				}
 			}
-			go doorSvc.Run(ctx)
+			obs.GoRestart(ctx, log, "door", func(ctx context.Context) { doorSvc.Run(ctx) })
 			// Diger IP ailesi yan kanali (door4/door6): tokeni imzalama anahtari asagida
 			// (visitorSecret cozuldukten sonra) verilir; hostlar env ile ayarlanir.
 			doorV4Host, doorV6Host := doorAddrHosts(apiSrv.PlatformDomain,
@@ -689,7 +733,7 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				proxy.ReevaluateVisitors(tenantID)
 			}
 			apiSrv.GeoDBLoaded = router.GeoLoaded
-			go proxy.RunVisitorReevaluator(ctx, time.Minute)
+			obs.GoRestart(ctx, log, "visitor_reevaluator", func(ctx context.Context) { proxy.RunVisitorReevaluator(ctx, time.Minute) })
 			rawMgr.Start(ctx)
 
 			// Gecici tunel supurucusu (FAZ 2 / F07): suresi dolan tunelleri
@@ -706,7 +750,7 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 					log.Warn("ZORVEN_EPHEMERAL_RETAIN gecersiz, varsayilan kullaniliyor", "deger", v)
 				}
 			}
-			go func() {
+			obs.GoRestart(ctx, log, "ephemeral_sweeper", func(ctx context.Context) {
 				tk := time.NewTicker(time.Minute)
 				defer tk.Stop()
 				for {
@@ -737,53 +781,57 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 					log.Info("saklama suresi dolan gecici tunel silindi", "adet", len(deleted))
 					apiSrv.TunnelsExpired(deleted)
 				}
-			}()
+			})
 
 			// UDP istatistikleri (F24): dakikalik ozet yaz, 7 gunden eskiyi sil.
-			go rawMgr.RunUDPProbes(ctx)
-			go rawMgr.RunUDPStats(ctx, func(sctx context.Context, rows []rawproxy.UDPMinute) {
-				out := make([]store.UDPStatMinute, 0, len(rows))
-				for _, r := range rows {
-					out = append(out, store.UDPStatMinute{
-						TunnelID: r.TunnelID, TenantID: r.TenantID, Minute: r.Minute,
-						PacketsIn: r.PacketsIn, PacketsOut: r.PacketsOut, BytesIn: r.BytesIn, BytesOut: r.BytesOut,
-						FlowsNew: r.FlowsNew, FlowsPeak: r.FlowsPeak,
-						DroppedRate: r.DroppedRate, DroppedSize: r.DroppedSize, DroppedFlows: r.DroppedFlows,
-						RTTP50Ms: r.RTTP50Ms, RTTP95Ms: r.RTTP95Ms, ProbeLossPct: r.ProbeLossPct,
-						DroppedDatagrams: r.DroppedDatagrams,
-					})
-				}
-				if err := st.InsertUDPStats(sctx, out); err != nil {
-					log.Warn("UDP istatistikleri yazilamadi", "hata", err)
-				}
-				if time.Now().Minute() == 0 {
-					if _, err := st.PruneUDPStats(sctx, time.Now().Add(-7*24*time.Hour)); err != nil {
-						log.Warn("eski UDP istatistikleri silinemedi", "hata", err)
+			obs.GoRestart(ctx, log, "udp_probes", func(ctx context.Context) { rawMgr.RunUDPProbes(ctx) })
+			obs.GoRestart(ctx, log, "udp_stats", func(ctx context.Context) {
+				rawMgr.RunUDPStats(ctx, func(sctx context.Context, rows []rawproxy.UDPMinute) {
+					out := make([]store.UDPStatMinute, 0, len(rows))
+					for _, r := range rows {
+						out = append(out, store.UDPStatMinute{
+							TunnelID: r.TunnelID, TenantID: r.TenantID, Minute: r.Minute,
+							PacketsIn: r.PacketsIn, PacketsOut: r.PacketsOut, BytesIn: r.BytesIn, BytesOut: r.BytesOut,
+							FlowsNew: r.FlowsNew, FlowsPeak: r.FlowsPeak,
+							DroppedRate: r.DroppedRate, DroppedSize: r.DroppedSize, DroppedFlows: r.DroppedFlows,
+							RTTP50Ms: r.RTTP50Ms, RTTP95Ms: r.RTTP95Ms, ProbeLossPct: r.ProbeLossPct,
+							DroppedDatagrams: r.DroppedDatagrams,
+						})
 					}
-				}
+					if err := st.InsertUDPStats(sctx, out); err != nil {
+						log.Warn("UDP istatistikleri yazilamadi", "hata", err)
+					}
+					if time.Now().Minute() == 0 {
+						if _, err := st.PruneUDPStats(sctx, time.Now().Add(-7*24*time.Hour)); err != nil {
+							log.Warn("eski UDP istatistikleri silinemedi", "hata", err)
+						}
+					}
+				})
 			})
 
 			// TCP istatistikleri: dakikalik ozet yaz, 7 gunden eskiyi sil.
-			go rawMgr.RunTCPStats(ctx, func(sctx context.Context, rows []rawproxy.TCPMinute) {
-				out := make([]store.TCPStatMinute, 0, len(rows))
-				for _, r := range rows {
-					out = append(out, store.TCPStatMinute{
-						TunnelID: r.TunnelID, TenantID: r.TenantID, Minute: r.Minute,
-						ConnsNew: r.ConnsNew, ConnsPeak: int(r.ConnsPeak), ConnsRejected: r.Rejected,
-						RejectedIP: r.RejectedIP, RejectedDoor: r.RejectedDoor,
-						RejectedOffline: r.RejectedOffline, RejectedDial: r.RejectedDial,
-						BytesIn: r.BytesIn, BytesOut: r.BytesOut,
-						DurSumMs: r.DurSumMs, DurCount: r.DurCount, DurMaxMs: r.DurMaxMs,
-					})
-				}
-				if err := st.InsertTCPStats(sctx, out); err != nil {
-					log.Warn("TCP istatistikleri yazilamadi", "hata", err)
-				}
-				if time.Now().Minute() == 0 {
-					if _, err := st.PruneTCPStats(sctx, time.Now().Add(-7*24*time.Hour)); err != nil {
-						log.Warn("eski TCP istatistikleri silinemedi", "hata", err)
+			obs.GoRestart(ctx, log, "tcp_stats", func(ctx context.Context) {
+				rawMgr.RunTCPStats(ctx, func(sctx context.Context, rows []rawproxy.TCPMinute) {
+					out := make([]store.TCPStatMinute, 0, len(rows))
+					for _, r := range rows {
+						out = append(out, store.TCPStatMinute{
+							TunnelID: r.TunnelID, TenantID: r.TenantID, Minute: r.Minute,
+							ConnsNew: r.ConnsNew, ConnsPeak: int(r.ConnsPeak), ConnsRejected: r.Rejected,
+							RejectedIP: r.RejectedIP, RejectedDoor: r.RejectedDoor,
+							RejectedOffline: r.RejectedOffline, RejectedDial: r.RejectedDial,
+							BytesIn: r.BytesIn, BytesOut: r.BytesOut,
+							DurSumMs: r.DurSumMs, DurCount: r.DurCount, DurMaxMs: r.DurMaxMs,
+						})
 					}
-				}
+					if err := st.InsertTCPStats(sctx, out); err != nil {
+						log.Warn("TCP istatistikleri yazilamadi", "hata", err)
+					}
+					if time.Now().Minute() == 0 {
+						if _, err := st.PruneTCPStats(sctx, time.Now().Add(-7*24*time.Hour)); err != nil {
+							log.Warn("eski TCP istatistikleri silinemedi", "hata", err)
+						}
+					}
+				})
 			})
 
 			// Hostname ayrimi (api_contract.md §0): control_hostname kontrol
@@ -854,7 +902,7 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				}(),
 			})
 			apiSrv.Captcha = captchaSvc
-			go captchaSvc.Run(ctx)
+			obs.GoRestart(ctx, log, "captcha", func(ctx context.Context) { captchaSvc.Run(ctx) })
 			if captchaSvc.PlatformEnabled() {
 				log.Info("CAPTCHA platform sitesi etkin")
 			}
@@ -1001,7 +1049,7 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				proxy.MCPUsers = mcpUserInfo
 				apiSrv.MCPOAuthReady = issuer != ""
 				apiSrv.MCPRevokeGrants = srv.RevokeByResource
-				go func() {
+				obs.GoRestart(ctx, log, "oauth_cleanup", func(ctx context.Context) {
 					t := time.NewTicker(time.Hour)
 					defer t.Stop()
 					for {
@@ -1014,7 +1062,7 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 							}
 						}
 					}
-				}()
+				})
 				log.Info("OAuth yetkilendirme sunucusu etkin (MCP ozel baglayici)", "issuer", issuer, "consent", consentBase)
 			}
 			mcpHandler := mcpserver.New(mcpserver.Config{
@@ -1029,6 +1077,7 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 			})
 
 			cspMode := cspModeFromEnvs(os.Getenv("ZORVEN_CSP_MODE"), os.Getenv("ZORVEN_CSP_REPORT_ONLY"))
+			var controlAPIObs http.Handler
 			mux := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				// Mail istemcisi otomatik yapilandirma (Thunderbird autoconfig, Outlook
 				// Autodiscover): public, IP basina hiz sinirli; yalnizca kendi hostlarinda.
@@ -1056,6 +1105,14 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 					return
 				}
 				if ingress.HostMatchesAny(r.Host, controlHosts) || ingress.IsIPHost(r.Host) {
+					// API metrikleri + istek kimligi + panik kurtarma (O17, A5 #6/#7): /api/*
+					// istekleri bir kez InstrumentAPI'den gecip ayni dagiticiya geri girer
+					// (baglam isareti tekrar sarmayi onler). Kimlik dogrulama reddi (401/429)
+					// de boylece sayilir.
+					if strings.HasPrefix(r.URL.Path, "/api/") && r.Context().Value(apiObsKey{}) == nil {
+						controlAPIObs.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), apiObsKey{}, true)))
+						return
+					}
 					w.Header().Set("X-Content-Type-Options", "nosniff")
 					w.Header().Set("X-Frame-Options", "DENY")
 					w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
@@ -1147,6 +1204,16 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				}
 				proxyObs.ServeHTTP(w, r)
 			})
+			controlAPIObs = obs.InstrumentAPI(mux, func(r *http.Request) string {
+				// Rota etiketi: ServeMux kalibi (ham yol DEGIL; kardinalite sabit).
+				if _, p := apiRoutes.Handler(r); p != "" {
+					return p
+				}
+				if strings.HasPrefix(r.URL.Path, "/api/auth/") {
+					return "/api/auth/*"
+				}
+				return ""
+			}, log)
 
 			var rootHandler http.Handler = mux
 
@@ -1162,6 +1229,8 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				ReadHeaderTimeout: 5 * time.Second,
 				IdleTimeout:       60 * time.Second,
 				MaxHeaderBytes:    1 << 20, // 1 MB baslik siniri (slowloris/DoS korumasi)
+				// A5 #3: TLS el sikisma hatalari std log yerine slog'a (DEBUG + dakikada bir WARN + sayac).
+				ErrorLog: newHTTPErrorLog(log),
 				// B3: kapanan baglantinin TLS parmak izi girdisini serbest birak.
 				ConnState: func(c net.Conn, st http.ConnState) {
 					if st == http.StateClosed || st == http.StateHijacked {
@@ -1194,7 +1263,7 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				// gelince sunucuyu yeniden baslatmadan yeniden yukle. Tek dugumde de calisir.
 				reloader := &tlscert.FileReloader{CertFile: tlsCert, KeyFile: tlsKey, Apply: dualCertMgr.SetDefaultCert, Log: log}
 				reloader.Prime()
-				go reloader.Run(ctx, 30*time.Second)
+				obs.GoRestart(ctx, log, "tls_reloader", func(ctx context.Context) { reloader.Run(ctx, 30*time.Second) })
 				inboundCertMgr.Store(dualCertMgr)
 
 				// Mail istemcisi erisimi: IMAP (993) + kimlik dogrulamali SMTP gonderim
@@ -1289,7 +1358,7 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 			// yoklama tutuluyor: `rpshell-server tunnel add` AYRI bir surecte
 			// calisir ve dogrudan veritabanina yazar; o degisikligi yalnizca yoklama
 			// yakalar. SQLite WAL es zamanli okuyucu/yaziciya izin verdigi icin guvenli.
-			go func() {
+			obs.GoRestart(ctx, log, "route_poll", func(ctx context.Context) {
 				ticker := time.NewTicker(30 * time.Second)
 				defer ticker.Stop()
 				for {
@@ -1302,15 +1371,9 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 						}
 					}
 				}
-			}()
+			})
 
-			go func() {
-				<-ctx.Done()
-				log.Info("kapatiliyor...")
-				shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-				defer cancel()
-				srv.Shutdown(shutCtx)
-			}()
+			// Kapanis ana sunucunun Serve donusunde serveGraceful icinde beklenir (asagida).
 
 			// HTTP -> HTTPS yonlendirmesi (api_contract.md §3).
 			// Varsayilan olarak KAPALI: :80 baglamak yonetici yetkisi ister ve
@@ -1348,7 +1411,7 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 					}
 				}()
 				go func() {
-					<-ctx.Done()
+					<-sigCtx.Done()
 					shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 					defer cancel()
 					redirect.Shutdown(shutCtx)
@@ -1363,9 +1426,10 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 			log.Info("hiz sinirlari",
 				"auth_sn", authRate, "auth_burst", authBurst,
 				"istek_sn", reqRate, "istek_burst", reqBurst,
-				"admin_sn", adminRate, "admin_burst", adminBurst)
+				"admin_sn", adminRate, "admin_burst", adminBurst,
+				"argon2_kapasite", auth.GateCapacity())
 
-			var srvErr error
+			var serve func() error
 			if useTLS {
 				// :443'ü SNI'ye göre ayır (FAZ 3 / D2, Mod B): ServerName bir SNI-modu
 				// ham TCP-tuneline eşleşiyorsa bağlantı rawMgr'a köprülenir, değilse
@@ -1396,13 +1460,24 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 					}, true
 				}
 				demux := rawproxy.NewDemuxListener(baseLn, srv.TLSConfig, sniLookup, rawMgr.HandleSNIConn, log)
-				srvErr = srv.ServeTLS(demux, "", "")
+				serve = func() error { return srv.ServeTLS(demux, "", "") }
 			} else {
-				srvErr = srv.ListenAndServe()
+				serve = srv.ListenAndServe
 			}
-			if errors.Is(srvErr, http.ErrServerClosed) {
-				return nil
+			// Y6 kapanis sirasi: (1) sinyal -> Shutdown (yeni baglanti yok, yoldaki istekler
+			// biter; 10 sn sonra kalanlar zorla kapanir), (2) arka plan isleri durur ve son
+			// toplu yazimlar beklenir, (3) defer'ler: sinirlayicilar, bant genisligi, EN SON
+			// havuz (st.Close ilk defer oldugu icin en son calisir).
+			go func() {
+				<-sigCtx.Done()
+				obs.SetDraining(true) // /readyz kapanis boyunca 503: dis izleme/yuk dengeleyici trafigi ceker
+			}()
+			srvErr := serveGraceful(sigCtx, srv, serve, shutdownGrace, log)
+			if sigCtx.Err() != nil {
+				closeAgentSessions(hub, 3*time.Second, log)
 			}
+			cancelBG()
+			waitTimeout(&persistWG, persistDrainTimeout)
 			return srvErr
 		},
 	}
@@ -1804,7 +1879,94 @@ func newLogger() *slog.Logger {
 	if err := lvl.UnmarshalText([]byte(logLevel)); err != nil {
 		lvl = slog.LevelInfo
 	}
-	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl}))
+	l := slog.New(obs.CountingHandler(newLogHandler(os.Stderr, logFormat, lvl)))
+	// A5 #11: paketlerdeki slog.Warn/Info (varsayilan logger) ve std log.Printf cagrilari
+	// da ayni bicimde ve --log-level'e uyarak ciksin; aksi halde "2026/11/11 04:37 WARN"
+	// gibi ikinci bir bicim olusuyor ve seviye filtresi isliyordu.
+	slog.SetDefault(l)
+	return l
+}
+
+// newLogHandler, --log-format'a gore slog isleyicisi: "json" (log toplayicilar
+// icin satir basina bir JSON nesnesi; alan adlari koddaki slog anahtarlaridir, bkz.
+// docs/operasyon-gozlemlenebilirlik.md) ya da "text" (varsayilan, eski bicim).
+// Bilinmeyen deger text'e duser ve bir kez uyarilir: yanlis yazilmis bir bayrak
+// sunucuyu acilmaz hale getirmemeli.
+func newLogHandler(w io.Writer, format string, lvl slog.Level) slog.Handler {
+	opts := &slog.HandlerOptions{Level: lvl}
+	switch strings.ToLower(strings.TrimSpace(format)) {
+	case "json":
+		return slog.NewJSONHandler(w, opts)
+	case "", "text":
+		return slog.NewTextHandler(w, opts)
+	}
+	h := slog.NewTextHandler(w, opts)
+	slog.New(h).Warn("bilinmeyen log bicimi, text kullaniliyor", "log_format", format)
+	return h
+}
+
+// normalizeSecretKeyEnv, ZORVEN_SECRET_KEY'i dogrular (bos: dokunmaz; dolu ama gecersiz:
+// hata) ve gecerli ama standart olmayan kodlamadaki (URL-safe/dolgusuz) anahtari standart
+// base64'e cevirip ortama geri yazar. Neden: anahtari okuyan diger bilesenler yalniz
+// standart base64 ile cozebilir; tek bicime cevirmek sessiz yarim sifrelemeyi onler.
+func normalizeSecretKeyEnv(get func(string) string, set func(string, string) error) error {
+	if err := pgstore.CheckSecretKeyEnv(get); err != nil {
+		return err
+	}
+	raw := strings.TrimSpace(get("ZORVEN_SECRET_KEY"))
+	if raw == "" {
+		return nil
+	}
+	key, err := pgstore.ParseSecretKey(raw)
+	if err != nil {
+		return err
+	}
+	if std := base64.StdEncoding.EncodeToString(key); std != raw {
+		return set("ZORVEN_SECRET_KEY", std)
+	}
+	return nil
+}
+
+// logMemoryLimit, etkin Go bellek sinirini (GOMEMLIMIT) ve varsa cgroup bellek sinirini
+// baslangic loguna yazar. Otomatik ayar YAPILMAZ (bilincli: yeni bagimlilik yok ve
+// sinir isletmecinin karari); amac compose'ta GOMEMLIMIT unutuldugunda logdan gorulmesi.
+func logMemoryLimit(log *slog.Logger) {
+	lim := debug.SetMemoryLimit(-1) // -1: degistirmeden oku
+	attrs := []any{"gomemlimit_env", os.Getenv("GOMEMLIMIT") != ""}
+	if lim == math.MaxInt64 {
+		attrs = append(attrs, "gomemlimit", "sinirsiz")
+	} else {
+		attrs = append(attrs, "gomemlimit_mib", lim>>20)
+	}
+	if cg, ok := cgroupMemoryLimit(); ok {
+		attrs = append(attrs, "cgroup_mib", cg>>20)
+		if lim == math.MaxInt64 {
+			log.Warn("cgroup bellek siniri var ama GOMEMLIMIT tanimsiz: cop toplayici sinira yaklasildigini bilmez", attrs...)
+			return
+		}
+	}
+	log.Info("bellek siniri", attrs...)
+}
+
+// cgroupMemoryLimit, cgroup v2 (memory.max) ya da v1 (memory.limit_in_bytes) sinirini okur.
+func cgroupMemoryLimit() (int64, bool) {
+	for _, p := range []string{"/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"} {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		v := strings.TrimSpace(string(b))
+		if v == "max" {
+			return 0, false
+		}
+		n, err := strconv.ParseInt(v, 10, 64)
+		// v1 sinirsizda sayfa hizali dev bir deger yazar; 1 PiB ustu "sinir yok" sayilir.
+		if err != nil || n <= 0 || n >= 1<<50 {
+			return 0, false
+		}
+		return n, true
+	}
+	return 0, false
 }
 
 // --- cert ------------------------------------------------------------------
@@ -1939,18 +2101,10 @@ func splitCSV(s string) []string {
 	return out
 }
 
-// envIntDefault, tamsayi ortam degiskenini okur; bos/gecersiz/negatif ise def doner.
-// 0 gecerlidir (UDP PPS icin sinirsiz).
+// envIntDefault, tamsayi ortam degiskenini okur; bos ise def, gecersiz/negatif/asiri
+// buyuk ise WARN + def (envnum ortak kurali). 0 gecerlidir (UDP PPS icin sinirsiz).
 func envIntDefault(name string, def int) int {
-	v := strings.TrimSpace(os.Getenv(name))
-	if v == "" {
-		return def
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil || n < 0 {
-		return def
-	}
-	return n
+	return envnum.Int(os.Getenv, name, def, 0, 1<<30)
 }
 
 // registerObsGauges: metriklerde kullanilan anlik degerler.
@@ -1968,12 +2122,13 @@ func registerObsGauges(st store.Store, hub *tunnel.Hub, router *ingress.Router) 
 	obs.RegisterGauge("zorven_db_pool_idle_conns", "pgx havuzu: bosta baglanti.", stat(func(_, i, _, _ int32, _ int64) float64 { return float64(i) }))
 	obs.RegisterGauge("zorven_db_pool_acquired_conns", "pgx havuzu: kullanimdaki baglanti.", stat(func(_, _, a, _ int32, _ int64) float64 { return float64(a) }))
 	obs.RegisterGauge("zorven_db_pool_max_conns", "pgx havuzu: izin verilen en fazla baglanti.", stat(func(_, _, _, m int32, _ int64) float64 { return float64(m) }))
-	obs.RegisterGauge("zorven_db_pool_empty_acquires_total", "pgx havuzu: bosta baglanti bulunamadigi icin beklenen alim sayisi (sayac).", stat(func(_, _, _, _ int32, e int64) float64 { return float64(e) }))
+	obs.RegisterCounter("zorven_db_pool_empty_acquires_total", "pgx havuzu: bosta baglanti bulunamadigi icin beklenen alim sayisi (sayac).", stat(func(_, _, _, _ int32, e int64) float64 { return float64(e) }))
 }
 
-// setupObsReadiness: /readyz girdileri.
+// setupObsReadiness: /readyz girdileri. Tek dugumde API ve kimlik dogrulama DB'siz
+// calismaz: RequireDB acik.
 func setupObsReadiness(st store.Store) {
-	r := obs.Readiness{}
+	r := obs.Readiness{RequireDB: true}
 	if v := strings.TrimSpace(os.Getenv("ZORVEN_READY_MAX_STALE")); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d > 0 {
 			r.MaxStale = d
@@ -1984,3 +2139,7 @@ func setupObsReadiness(st store.Store) {
 	}
 	obs.SetReadiness(r)
 }
+
+// apiObsKey, istegin InstrumentAPI sarmalayicisindan bir kez gectigini isaretler
+// (ayni dagiticiya geri giriste yeniden sarmayi onler).
+type apiObsKey struct{}

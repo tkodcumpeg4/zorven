@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -25,7 +24,8 @@ func (m *mockTokenStore) GetAPITokenByTokenID(_ context.Context, tokenID string)
 	if tokenID == m.tok.TokenID {
 		return m.tok, nil
 	}
-	return store.APIToken{}, errors.New("not found")
+	// Gercek depo gibi ErrNotFound: baska bir hata artik 503 store_unavailable.
+	return store.APIToken{}, store.ErrNotFound
 }
 func (m *mockTokenStore) TouchAPITokenLastUsed(context.Context, string) error { return nil }
 func (m *mockTokenStore) GetDefaultProject(context.Context, string) (store.Project, error) {

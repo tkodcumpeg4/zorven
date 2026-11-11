@@ -279,11 +279,21 @@ func (ul *udpListener) close() {
 
 func (ul *udpListener) readLoop() {
 	buf := make([]byte, udpReadBuf)
+	var bo acceptBackoff
 	for {
 		n, src, err := ul.conn.ReadFromUDP(buf)
 		if err != nil {
-			return // dinleyici kapandi
+			if isClosedErr(err) {
+				return // dinleyici kapandi
+			}
+			// Gecici okuma hatasi (ENOBUFS/ENOMEM, ICMP kaynakli ECONNREFUSED vb.):
+			// eskiden dongu sessizce bitiyor ve UDP portu sagir kaliyordu.
+			wait := bo.next()
+			acceptLog.warn(ul.m.Log, "rawproxy: UDP okuma hatasi, yeniden denenecek", err, wait)
+			time.Sleep(wait)
+			continue
 		}
+		bo.reset()
 		ul.handle(src, buf[:n])
 	}
 }

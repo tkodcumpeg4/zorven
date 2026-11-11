@@ -20,7 +20,7 @@ func (s *Store) ListPathRouteEntries(ctx context.Context) ([]store.HostRoute, er
 		`SELECT pr.fqdn, t.tenant_id, t.id, t.client_id, t.target, t.enabled,
 		        t.proto, t.exposure,
 		        COALESCE(ap.mode,'none'), COALESCE(ap.config,'{}'::jsonb), COALESCE(ap.enabled,false),
-		        COALESCE(sub.plan,'free'), t.frozen, (t.expired_at IS NOT NULL),
+		        COALESCE(sub.plan,'free'), t.frozen, (t.expired_at IS NOT NULL), CASE WHEN t.ephemeral THEN t.expires_at END,
 		        COALESCE(rep.clients, '{}') AS replica_clients,
 		        COALESCE(tp.config,'{}'::jsonb), COALESCE(tp.enabled,false),
 		        COALESCE(mc.config,'{}'::jsonb), COALESCE(mc.enabled,false),
@@ -58,7 +58,7 @@ func (s *Store) ListPathRouteEntries(ctx context.Context) ([]store.HostRoute, er
 		var r store.HostRoute
 		if err := rows.Scan(&r.FQDN, &r.TenantID, &r.TunnelID, &r.ClientID,
 			&r.Target, &r.Enabled, &r.Proto, &r.Exposure,
-			&r.AccessMode, &r.AccessConfig, &r.AccessEnabled, &r.Plan, &r.Frozen, &r.Expired,
+			&r.AccessMode, &r.AccessConfig, &r.AccessEnabled, &r.Plan, &r.Frozen, &r.Expired, &r.ExpiresAt,
 			&r.ReplicaClientIDs, &r.TrafficConfig, &r.TrafficEnabled,
 			&r.MCPConfig, &r.MCPEnabled, &r.MCPKeys,
 			&r.MTLSEnabled, &r.MTLSCAPem, &r.SecurityConfig, &r.PathPrefix); err != nil {

@@ -1,7 +1,21 @@
+# Konteyner log siniri (Y9): json-file surucusu varsayilan olarak dosyayi SINIRSIZ
+# buyutur; log seli (tarayici el sikismalari, IP reddi) diski doldurabilirdi. Servis
+# basina en fazla 5 x 20 MB. Tek tanim, tum servislerde `logging: *default-logging`.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
 services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
+    logging: *default-logging
+    # O20: setuid ikililerle yetki kazanimi kapali. Yetenekler DUSURULMEZ: giris betigi
+    # root'tan gosu ile postgres kullanicisina gecer ve veri dizinini chown eder.
+    security_opt:
+      - no-new-privileges:true
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-rpshell}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD gerekli (deploy/.env)}
@@ -22,6 +36,40 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile
     restart: unless-stopped
+    logging: *default-logging
+    # O20 konteyner sertlestirme (root kullanici su an korunuyor; USER gecisi ayri plan).
+    # Sunucu ham soket, TUN, chown, setuid KULLANMAZ (kod taramasi); gereken tek yetenek
+    # 80/443/25/587/465/993'e baglanmak (NET_BIND_SERVICE). DAC_OVERRIDE + FOWNER gecis
+    # suresince tutulur: bind mount'lardaki (or. ./certs) dosyalar baska
+    # bir uid'e ait ve 0600 olabilir; root bunlari yalniz bu yeteneklerle okuyabilir.
+    # Dusenler: NET_RAW, MKNOD, SETUID/SETGID, SYS_CHROOT, KILL, SETFCAP, SETPCAP, FSETID, AUDIT_WRITE, CHOWN.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+      - DAC_OVERRIDE
+      - FOWNER
+    # Bellek (O7): GOMEMLIMIT cop toplayiciya yumusak tavan verir (patlamadan sonra
+    # bellek hizla geri verilir); mem_limit sert tavandir ve GOMEMLIMIT'in USTUNDE
+    # olmali (aksi halde GC devreye girmeden OOM). Varsayilanlar ~3 GB'lik tek makine
+    # icindir; ikisi de .env ile degistirilebilir.
+    mem_limit: ${ZORVEN_MEM_LIMIT:-2g}
+    # Y6: SIGTERM'de sunucu yoldaki istekleri 10 sn'ye kadar bekler, sonra son log
+    # yazimlarini (<=12 sn) bitirip havuzu kapatir. Docker varsayilani 10 sn sonra SIGKILL
+    # gonderir ve bu sirayi keserdi.
+    stop_grace_period: 30s
+    # Saglik (canlilik): statik /api/v1/health. DB'ye BAKMAZ: kisa bir Postgres
+    # kesintisinde konteyner "unhealthy" olup yeniden baslatilmasin (veri yolu DB'siz
+    # calismaya devam eder). Hazir olma (DB dahil) icin /readyz dis izlemede kullanilir:
+    # curl -fsk https://<host>/readyz  (DB erisilemezken ve kapanista 503).
+    healthcheck:
+      test: ["CMD", "curl", "-fsk", "-o", "/dev/null", "--max-time", "4", "https://127.0.0.1:443/api/v1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
     depends_on:
       postgres:
         condition: service_healthy
@@ -64,6 +112,20 @@ services:
       # Veritabani havuzu: ust sinir ve sorgu zaman asimi (migration/retention muaf).
       - ZORVEN_DB_MAX_CONNS=${ZORVEN_DB_MAX_CONNS:-20}
       - ZORVEN_DB_STATEMENT_TIMEOUT_MS=${ZORVEN_DB_STATEMENT_TIMEOUT_MS:-15000}
+      # Go cop toplayici yumusak bellek tavani (mem_limit'in altinda kalmali).
+      - GOMEMLIMIT=${ZORVEN_GOMEMLIMIT:-1500MiB}
+      # Kurtarilmayan panik/fatal'da TUM goroutine yiginlari loga (varsayilan yalniz
+      # paniklenen goroutine); kilitlenme/yaris teshisi icin. Log boyutu x-logging ile sinirli.
+      - GOTRACEBACK=${ZORVEN_GOTRACEBACK:-all}
+      # Log bicimi: text (varsayilan) | json (log toplayici icin).
+      - ZORVEN_LOG_FORMAT=${ZORVEN_LOG_FORMAT:-text}
+      # Metrik + /readyz + (ZORVEN_PPROF=1 ise) pprof dinleyicisi. Yalniz konteyner ici
+      # loopback; port yayinlanmaz. Okuma: docker compose exec zorven-primary
+      #   curl -s -H "Authorization: Bearer $ZORVEN_METRICS_TOKEN" http://127.0.0.1:9102/metrics
+      # Loopback disi adres verilirse ZORVEN_METRICS_TOKEN ZORUNLU (yoksa dinleyici acilmaz).
+      - ZORVEN_METRICS_ADDR=${ZORVEN_METRICS_ADDR:-127.0.0.1:9102}
+      - ZORVEN_METRICS_TOKEN=${ZORVEN_METRICS_TOKEN:-}
+      - ZORVEN_PPROF=${ZORVEN_PPROF:-}
       - ZORVEN_PLATFORM_DOMAIN=${PLATFORM_DOMAIN:-localhost}
       # Kopuk ajan operator alarmi (bos: yalniz WARN log); esik dakika (0 kapatir).
       - ZORVEN_OPS_ALERT_EMAIL=${ZORVEN_OPS_ALERT_EMAIL:-}
@@ -141,6 +203,20 @@ services:
       context: ../web
       dockerfile: Dockerfile
     restart: unless-stopped
+    logging: *default-logging
+    # O20: Nitro yalniz 3000'i (ayricaliksiz port) dinler, dosya sahipligi degistirmez;
+    # hicbir yetenek gerekmez.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # Nitro'nun 3000 portu dinlemede mi (imajda curl/wget varsayimi yok; node her zaman var).
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('net').connect(3000,'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     depends_on:
       postgres:
         condition: service_healthy
@@ -175,6 +251,8 @@ services:
   mail:
     image: boky/postfix:latest
     restart: unless-stopped
+    logging: *default-logging
+    # Saglik kontrolu imajin kendi HEALTHCHECK'i (/scripts/healthcheck.sh, 30 sn); ezilmez.
     hostname: mail.${PLATFORM_DOMAIN:-localhost}
     environment:
       # Hem <alan-adi> (auth mailleri) hem mail.<alan-adi> (webmail giden) izinli.

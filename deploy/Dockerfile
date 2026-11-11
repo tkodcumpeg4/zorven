@@ -3,7 +3,11 @@
 # `server` modülü `replace .../shared => ../shared` içerdiği için, sunucuyu
 # yalnızca `server/` + `shared/` ile (client/desktop bağımlılıkları olmadan)
 # derleyebiliriz. Bu, imajı çok daha küçük ve hızlı yapar.
-FROM golang:1.26.6-alpine AS builder
+# Surum go.mod/go.work'teki toolchain satiriyla AYNI olmali: asagidaki
+# `go work init` uretilen go.work'e toolchain satiri yazmaz ve golang imaji
+# GOTOOLCHAIN=local ile gelir; yani derlemeyi imajdaki Go yapar. Eski imaj
+# eski stdlib (bilinen zafiyetler) ile ikili uretir.
+FROM golang:1.27.4-alpine AS builder
 
 WORKDIR /app
 

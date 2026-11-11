@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/tkodcumpeg4/zorven/server/auth"
+	"github.com/tkodcumpeg4/zorven/server/entitlements"
 	"github.com/tkodcumpeg4/zorven/server/store"
 )
 
@@ -314,6 +315,11 @@ func (s *Server) createMemberToken(w http.ResponseWriter, r *http.Request) {
 		name = "Ekip İstemcisi"
 	}
 
+	unlock, ok := s.lockQuota(w, r, tenantID, entitlements.QuotaClients)
+	if !ok {
+		return
+	}
+	defer unlock()
 	if s.Entitlements != nil {
 		if err := s.Entitlements.CanCreateClient(r.Context(), tenantID); err != nil {
 			writeEntitlementError(w, err)
@@ -328,10 +334,12 @@ func (s *Server) createMemberToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	c, err := s.Store.CreateMemberClient(r.Context(), tenantID, userID, name, tokenID, hash)
+	unlock()
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
+	s.audit(r, "client.create", c.ID, c.Name)
 
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"client": s.enrich(c),

@@ -63,8 +63,10 @@ func validatePolicyRule(r rawPolicyRule) error {
 		if strings.TrimSpace(a.Location) == "" {
 			return fmt.Errorf("redirect icin location gerekli")
 		}
-		if a.Status != 0 && (a.Status < 300 || a.Status > 399) {
-			return fmt.Errorf("redirect status 300-399 olmali")
+		// Calisma zamani 301/302/307/308 disini 302'ye indiriyor; 300-399 kabul
+		// etmek 303/399'u "kaydedildi" gosterip sessizce degistiriyordu (A4 #12).
+		if err := validateRedirect(a.Location, a.Status); err != nil {
+			return err
 		}
 	case "require_mtls":
 	case "challenge":
@@ -72,6 +74,14 @@ func validatePolicyRule(r rawPolicyRule) error {
 		if len(a.Request.Set) == 0 && len(a.Request.Remove) == 0 &&
 			len(a.Response.Set) == 0 && len(a.Response.Remove) == 0 {
 			return fmt.Errorf("set_header icin en az bir baslik tanimlanmali")
+		}
+		// Bos/CRLF ad ajanin net/http istemcisinde "invalid header field name" ile
+		// tunelin tum isteklerini 502 yapar; ingress atliyor ama kayitta reddet.
+		if err := a.Request.validate("request"); err != nil {
+			return err
+		}
+		if err := a.Response.validate("response"); err != nil {
+			return err
 		}
 	case "rate_limit":
 		if a.Requests <= 0 {

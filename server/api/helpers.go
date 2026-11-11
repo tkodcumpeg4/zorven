@@ -10,11 +10,22 @@ import (
 
 // writeJSONError, api_contract.md §1 hata bicimini yazar.
 func writeJSONError(w http.ResponseWriter, status int, code, msg string) {
+	e := map[string]string{"code": code, "message": msg}
+	// 5xx: destek/korelasyon icin istek kimligi govdede de doner (A5 #7); kimlik
+	// ara katmanin yanit basligina yazdigi degerdir (dogrulanmis ya da uretilmis).
+	if status >= 500 {
+		if rid := requestIDOf(w); rid != "" {
+			e["request_id"] = rid
+		}
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]any{
-		"error": map[string]string{"code": code, "message": msg},
-	})
+	json.NewEncoder(w).Encode(map[string]any{"error": e})
+}
+
+// requestIDOf, yanitin X-Request-Id basligi (API ara katmani yazar; yoksa "").
+func requestIDOf(w http.ResponseWriter) string {
+	return w.Header().Get("X-Request-Id")
 }
 
 // clientIP, hiz sinirlama anahtari. X-Forwarded-For BILEREK kullanilmiyor —

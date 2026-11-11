@@ -2,7 +2,7 @@ module github.com/tkodcumpeg4/zorven/desktop
 
 go 1.26.0
 
-toolchain go1.27.3
+toolchain go1.27.4
 
 require (
 	fyne.io/systray v1.12.2
@@ -10,7 +10,7 @@ require (
 	github.com/tkodcumpeg4/zorven/client v0.0.0
 	github.com/tkodcumpeg4/zorven/shared v0.0.0
 	github.com/wailsapp/wails/v2 v2.15.0
-	golang.org/x/sys v0.48.0
+	golang.org/x/sys v0.49.0
 )
 
 require (
@@ -51,10 +51,10 @@ require (
 	github.com/vishvananda/netns v0.0.5 // indirect
 	github.com/wailsapp/go-webview2 v1.0.22 // indirect
 	github.com/wailsapp/mimetype v1.4.1 // indirect
-	golang.org/x/crypto v0.57.0 // indirect
+	golang.org/x/crypto v0.58.0 // indirect
 	golang.org/x/image v0.45.0 // indirect
-	golang.org/x/net v0.60.0 // indirect
-	golang.org/x/text v0.42.0 // indirect
+	golang.org/x/net v0.62.0 // indirect
+	golang.org/x/text v0.43.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
 	golang.zx2c4.com/wireguard v0.0.0-20261006164505-2631ce99a06f // indirect

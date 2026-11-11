@@ -52,6 +52,15 @@ func dashboardHandler() http.Handler {
 		if p == "" {
 			p = "index.html"
 		}
+		// Panel bir uygulamadir, arama motorlari icin degil: robots.txt tum
+		// taramayi kapatir (onceden SPA kabugu 200 ile donuyordu = soft-404),
+		// HTML yanitlar X-Robots-Tag: noindex tasir. Tanitim sitesi ayri host.
+		if p == "robots.txt" {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.Header().Set("Cache-Control", "public, max-age=3600")
+			w.Write([]byte("User-agent: *\nDisallow: /\n"))
+			return
+		}
 
 		data, err := fs.ReadFile(sub, p)
 		if err != nil && (strings.HasPrefix(p, "_nuxt/") || path.Ext(p) == ".js" || path.Ext(p) == ".css") {
@@ -71,6 +80,9 @@ func dashboardHandler() http.Handler {
 			ct = http.DetectContentType(data)
 		}
 		w.Header().Set("Content-Type", ct)
+		if strings.HasSuffix(p, ".html") {
+			w.Header().Set("X-Robots-Tag", "noindex")
+		}
 		if strings.HasPrefix(p, "_nuxt/") {
 			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		} else if strings.HasSuffix(p, ".html") {

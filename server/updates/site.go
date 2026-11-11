@@ -365,7 +365,7 @@ func (s *Site) servePost(w http.ResponseWriter, r *http.Request, lang, slug stri
 		canon = s.abs(PostPath(used, p.Slug)) // ceviri yoksa kanonik asil dildir
 	}
 	s.render(w, r, lang, http.StatusOK, headInfo{
-		title: title + " | Zorven", desc: Excerpt(body, 160), canonical: canon, alts: alts,
+		title: seoTitle(title) + " | Zorven", desc: Excerpt(body, 160), canonical: canon, alts: alts,
 		ogLocale: t.OGLocale, rss: s.abs(ListPath(lang) + "/rss.xml"),
 	}, b.String())
 }
@@ -455,4 +455,23 @@ func (s *Site) serveSitemap(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodHead {
 		_, _ = w.Write([]byte(b.String()))
 	}
+}
+
+// seoTitle, <title> icin yazi basligini kisaltir: arama sonuclarinda ~60 karakter
+// gosterilir; uzun surum notu basliklari ("Zorven 0.3.4: tunellerde gRPC, yeni ...")
+// kesilerek anlamsiz gorunuyordu. Kelime sinirindan kisaltir, "…" ekler.
+func seoTitle(t string) string {
+	const max = 56
+	r := []rune(strings.TrimSpace(t))
+	if len(r) <= max {
+		return string(r)
+	}
+	cut := max
+	for i := max; i > max/2; i-- {
+		if r[i] == ' ' || r[i] == ',' || r[i] == ':' || r[i] == ';' {
+			cut = i
+			break
+		}
+	}
+	return strings.TrimRight(string(r[:cut]), " ,:;") + "…"
 }

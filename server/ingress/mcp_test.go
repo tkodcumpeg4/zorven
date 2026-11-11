@@ -387,7 +387,7 @@ func TestMCP_ValidTokenForwardsWithIdentityAndStripsForgedHeaders(t *testing.T) 
 			n++
 		}
 	}
-	if n != 7 { // user, user-id, client-id, scopes, tunnel-id, auth-method, identity
+	if n != 8 { // user, user-id, client-id, scopes, tunnel-id, auth-method, identity, request-id (A5 #7)
 		t.Fatalf("x-zorven-* sayisi %d: %v", n, h)
 	}
 }

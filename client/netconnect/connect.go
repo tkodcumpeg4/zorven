@@ -42,22 +42,42 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("dinlenemedi (%s): %w", s.Listen, err)
 	}
+	return s.serve(ctx, ln)
+}
+
+// serve, kabul dongusu (testler sahte dinleyiciyle cagirir).
+func (s *Server) serve(ctx context.Context, ln net.Listener) error {
 	go func() {
 		<-ctx.Done()
 		ln.Close()
 	}()
+	var delay time.Duration
+	var lastLog time.Time
 	for {
 		c, err := ln.Accept()
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
-			var ne net.Error
-			if errors.As(err, &ne) && ne.Timeout() {
-				continue
+			if errors.Is(err, net.ErrClosed) {
+				return err
 			}
-			return err
+			// Gecici hata (EMFILE/ENFILE, ECONNABORTED, zaman asimi): eskiden
+			// zaman asimi disindaki her hatada dinleyici kapanip komut bitiyordu.
+			// 5 ms'den 1 sn'ye ussel bekleyip devam et; log 10 sn'de bir satir.
+			delay = min(max(delay*2, 5*time.Millisecond), time.Second)
+			if s.Log != nil && time.Since(lastLog) >= 10*time.Second {
+				s.Log.Warn("yerel dinleyici baglanti kabul edemedi, yeniden denenecek", "dinleyici", s.Listen, "hata", err, "bekleme", delay)
+				lastLog = time.Now()
+			}
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(delay):
+			}
+			continue
 		}
+		delay = 0
 		go s.handle(ctx, c)
 	}
 }

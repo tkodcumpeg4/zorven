@@ -7,6 +7,8 @@ package rawproxy
 
 import (
 	"context"
+	"errors"
+	"io"
 	"log/slog"
 	"net"
 	"strconv"
@@ -234,12 +236,23 @@ func (m *Manager) Reload() {
 	}
 }
 
+// acceptLoop, rezerve port dinleyicisinden kabul eder. Gecici hatada bekleyip
+// devam eder; eskiden ilk hatada sessizce cikiyordu ve m.tcpLn kaydi durdugu
+// icin Reload portu bir daha acmiyordu (tunel kalici olarak sagir kaliyordu).
 func (m *Manager) acceptLoop(ln net.Listener, port listenKey) {
+	var bo acceptBackoff
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			return // dinleyici kapandi
+			if isClosedErr(err) {
+				return // dinleyici kapandi (Reload/closeAll)
+			}
+			wait := bo.next()
+			acceptLog.warn(m.Log, "rawproxy: TCP kabul hatasi, yeniden denenecek", err, wait, "port", port.port)
+			time.Sleep(wait)
+			continue
 		}
+		bo.reset()
 		go m.handleTCP(conn, port)
 	}
 }
@@ -351,7 +364,7 @@ func (m *Manager) bridgeTCP(conn net.Conn, ti TunnelInfo) {
 			return
 		}
 	} else {
-		stream, err = sess.OpenStream(ctx, ti.TunnelID, "tcp", conn.RemoteAddr().String())
+		stream, err = sess.OpenStreamHalf(ctx, ti.TunnelID, "tcp", conn.RemoteAddr().String())
 	}
 	if err != nil {
 		st.reject(TCPRejectDial)
@@ -409,7 +422,23 @@ func (m *Manager) bridgeTCP(conn net.Conn, ti TunnelInfo) {
 		}()
 	}
 
-	// ziyaretci -> ajan
+	// Akis iptal edilirse (sunucu kuyrugu tasti, oturum dustu) ziyaretciye bloklu
+	// bir yazim olabilir (okumayan ziyaretci): baglantiyi kapatmak yazimi cozer.
+	if an, ok := stream.(abortNotifier); ok {
+		go func() {
+			select {
+			case <-an.Aborted():
+				conn.Close()
+			case <-ctx.Done():
+			}
+		}()
+	}
+	hs, _ := stream.(halfStream)
+
+	// ziyaretci -> ajan. Ziyaretci yazmayi duzgun bitirirse (EOF) ve akis yari
+	// kapamayi destekliyorsa akis YIKILMAZ: ajana yalniz yazma yonunun bittigi
+	// bildirilir, yanit akmaya devam eder (O12).
+	visitorEOF := make(chan bool, 1) // deger: yari kapama pazarlandi mi
 	go func() {
 		defer meter.Flush() // bridge donduktan sonra gelen son baytlar da yazilir
 		buf := make([]byte, 32*1024)
@@ -427,6 +456,10 @@ func (m *Manager) bridgeTCP(conn net.Conn, ti TunnelInfo) {
 				touch()
 			}
 			if rerr != nil {
+				if errors.Is(rerr, io.EOF) && hs != nil && ctx.Err() == nil {
+					visitorEOF <- hs.CloseWrite()
+					return
+				}
 				break
 			}
 		}
@@ -434,6 +467,13 @@ func (m *Manager) bridgeTCP(conn net.Conn, ti TunnelInfo) {
 	}()
 
 	// ajan -> ziyaretci
+	var remoteEOF <-chan struct{}
+	if hs != nil {
+		remoteEOF = hs.RemoteEOF()
+	}
+	var vEOF <-chan bool = visitorEOF
+	var linger <-chan time.Time
+	remoteDone, visitorDone := false, false
 	for {
 		select {
 		case data := <-stream.FromLocal():
@@ -447,12 +487,57 @@ func (m *Manager) bridgeTCP(conn net.Conn, ti TunnelInfo) {
 			if werr != nil {
 				return
 			}
+		case <-remoteEOF:
+			// Ajan tarafi yazmayi bitirdi; kuyruktaki tum veri yukarida yazildi
+			// (RemoteEOF sirali kapanir). Ziyaretciye de FIN gonder, okumaya devam.
+			remoteEOF = nil
+			remoteDone = true
+			if visitorDone {
+				return
+			}
+			cw, ok := conn.(interface{ CloseWrite() error })
+			if !ok || cw.CloseWrite() != nil {
+				return
+			}
+		case half := <-vEOF:
+			vEOF = nil
+			visitorDone = true
+			if remoteDone {
+				return
+			}
+			if !half {
+				// Eski ajan: StreamClose aldi, hedefe CloseWrite yapip ~3 sn yanit
+				// akitir, sonra kendisi kapatir. Gelmezse burada keseriz.
+				t := time.NewTimer(legacyHalfCloseLinger)
+				defer t.Stop()
+				linger = t.C
+			}
+		case <-linger:
+			return
 		case <-stream.Closed():
+			// Duzgun kapanista Closed, FromLocal'daki tum veri alindiktan SONRA
+			// kapanir (tunnel/streamq.go); burada kayip yok.
 			return
 		case <-ctx.Done():
 			return
 		}
 	}
+}
+
+// legacyHalfCloseLinger, yari kapamayi bilmeyen ajanda ziyaretci EOF'undan sonra
+// yanitin akmasi icin beklenen ust sure (ajanin 3 sn'lik bekleme suresi + pay).
+const legacyHalfCloseLinger = 5 * time.Second
+
+// halfStream, yari kapamayi destekleyen akis (*tunnel.RawStream). Uygulamayan
+// akislarda (kume aktarimi, test sahteleri) ziyaretci EOF'u akisi kapatir.
+type halfStream interface {
+	CloseWrite() bool
+	RemoteEOF() <-chan struct{}
+}
+
+// abortNotifier, iptali ayrica bildiren akis (*tunnel.RawStream).
+type abortNotifier interface {
+	Aborted() <-chan struct{}
 }
 
 func (m *Manager) closeAll() {

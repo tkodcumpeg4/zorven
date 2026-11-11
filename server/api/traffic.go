@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/tkodcumpeg4/zorven/server/ingress"
 	"github.com/tkodcumpeg4/zorven/server/store"
 )
 
@@ -66,6 +67,12 @@ func (s *Server) setTunnelTraffic(w http.ResponseWriter, r *http.Request) {
 		var probe map[string]any
 		if err := json.Unmarshal(body.Config, &probe); err != nil {
 			writeJSONError(w, http.StatusUnprocessableEntity, "invalid_config", "config gecerli bir JSON nesnesi olmalidir")
+			return
+		}
+		// Baslik adi/degeri, Location ve durum kodu (A4 #12): bos ad tunelin tum
+		// isteklerini 502 yapiyordu, CRLF Location ve 999 sessizce kabul ediliyordu.
+		if err := ingress.ValidateTrafficConfig(body.Config); err != nil {
+			writeJSONError(w, http.StatusUnprocessableEntity, "invalid_config", err.Error())
 			return
 		}
 	}

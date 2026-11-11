@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/pprof"
 	"strings"
@@ -25,9 +26,21 @@ type Readiness struct {
 	// MaxStale, yonlendirme verisinin (DB'den son basarili Reload ya da diskteki
 	// goruntunun veri zamani) kabul edilen en buyuk yasi. 0 = DefaultMaxStale.
 	MaxStale time.Duration
+	// RequireDB, DB erisilemezken hazir olmayi (503) bozar. standalone/primary'de
+	// true: yonetim API'si, kimlik dogrulama ve tunel olusturma DB'siz calismaz;
+	// "ready" demek dis izlemeyi yaniltiyordu (A5 #2). Edge'de false: veri yolu
+	// diskteki goruntuyle DB'siz hizmet verir, hazirlik yalniz yonlendirme yasina bakar.
+	RequireDB bool
 }
 
-var readiness atomic.Pointer[Readiness]
+var (
+	readiness atomic.Pointer[Readiness]
+	draining  atomic.Bool
+)
+
+// SetDraining, kapanis basladiginda cagrilir: /readyz 503 doner ki yuk dengeleyici ve
+// dis izleme yoldaki istekler biterken yeni trafigi baska yere ceksin.
+func SetDraining(v bool) { draining.Store(v) }
 
 // SetReadiness, /readyz girdilerini ayarlar (main.go kurar).
 func SetReadiness(r Readiness) { readiness.Store(&r) }
@@ -36,9 +49,12 @@ func SetReadiness(r Readiness) { readiness.Store(&r) }
 // sir, hata metni, DSN, host adi yazilmaz.
 //
 // Hazir degil (503) kosullari: yonlendirme verisi hic yuklenmedi ya da MaxStale'den
-// eski, varsayilan sertifikanin suresi dolmus. DB erisimi tek basina hazirligi
-// BOZMAZ (goruntu/son basarili tablo ile hizmet surer) ama govdede gorunur;
-// uyari icin zorven_route_snapshot_age_seconds ve reload metrikleri kullanilir.
+// eski, varsayilan sertifikanin suresi dolmus, surec kapaniyor (SetDraining) ya da
+// RequireDB iken DB erisilemiyor. RequireDB=false (edge) iken DB erisimi tek basina
+// hazirligi BOZMAZ (goruntu/son basarili tablo ile hizmet surer) ama govdede gorunur.
+//
+// Canlilik (liveness) icin /api/v1/health kullanilir (statik): konteyner saglik
+// kontrolu oraya bakar ki kisa bir DB kesintisinde konteyner yeniden baslatilmasin.
 func ReadyHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -81,14 +97,16 @@ func ReadyHandler() http.Handler {
 			certOK = certDays > 0
 		}
 
-		ready := routesOK && certOK
+		drain := draining.Load()
+		ready := routesOK && certOK && !drain && (dbOK || !cfg.RequireDB)
 		body := map[string]any{
 			"ready": ready,
 			"checks": map[string]any{
-				"db":     map[string]any{"ok": dbOK},
-				"routes": map[string]any{"ok": routesOK, "source": source, "age_seconds": age},
-				"cert":   map[string]any{"ok": certOK, "days_remaining": certDays},
-				"reload": map[string]any{"last_success_age_seconds": ageSeconds(LastReloadOK())},
+				"draining": drain,
+				"db":       map[string]any{"ok": dbOK, "required": cfg.RequireDB},
+				"routes":   map[string]any{"ok": routesOK, "source": source, "age_seconds": age},
+				"cert":     map[string]any{"ok": certOK, "days_remaining": certDays},
+				"reload":   map[string]any{"last_success_age_seconds": ageSeconds(LastReloadOK())},
 			},
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -169,12 +187,22 @@ func requireToken(token string, next http.Handler) http.Handler {
 // Serve, cfg.Addr bos degilse ayri dinleyiciyi arka planda baslatir; ctx iptalinde
 // kapatir. Addr bos ise hicbir sey yapmaz (varsayilan KAPALI). Dinleme hatasi
 // sunucuyu durdurmaz, loglanir.
-func Serve(ctx context.Context, cfg Config, log *slog.Logger) {
+//
+// FAIL-CLOSED (A6 #1): loopback disi adreste token yoksa dinleyici HIC acilmaz ve
+// ERROR loglanir; false doner. /debug/pprof ve /metrics kimliksiz disari acilmasin
+// (pprof profili ve goroutine dokumu ic yapiyi ve yuku sizdirir). Ana sunucu
+// durdurulmaz: metrik dinleyicisi opsiyoneldir, bir yazim hatasi trafigi kesmemeli.
+func Serve(ctx context.Context, cfg Config, log *slog.Logger) bool {
 	if cfg.Addr == "" {
-		return
+		return false
 	}
 	if log == nil {
 		log = slog.Default()
+	}
+	if cfg.Token == "" && !isLoopbackAddr(cfg.Addr) {
+		log.Error("metrik dinleyicisi BASLATILMADI: loopback disi adres ZORVEN_METRICS_TOKEN gerektirir",
+			"adres", cfg.Addr)
+		return false
 	}
 	srv := &http.Server{
 		Addr:              cfg.Addr,
@@ -190,15 +218,23 @@ func Serve(ctx context.Context, cfg Config, log *slog.Logger) {
 	}()
 	go func() {
 		log.Info("metrik dinleyicisi basladi", "adres", cfg.Addr, "pprof", cfg.Pprof, "token", cfg.Token != "")
-		if cfg.Token == "" && !isLoopbackAddr(cfg.Addr) {
-			log.Warn("metrik dinleyicisi loopback disinda ve ZORVEN_METRICS_TOKEN tanimsiz", "adres", cfg.Addr)
-		}
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Error("metrik dinleyicisi durdu", "hata", err)
 		}
 	}()
+	return true
 }
 
+// isLoopbackAddr, "host:port" bicimindeki adresin yalniz loopback'e baglandigini soyler.
+// Bos host (":9100") TUM arayuzler demektir: loopback DEGIL.
 func isLoopbackAddr(a string) bool {
-	return strings.HasPrefix(a, "127.") || strings.HasPrefix(a, "localhost:") || strings.HasPrefix(a, "[::1]:")
+	host, _, err := net.SplitHostPort(a)
+	if err != nil {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

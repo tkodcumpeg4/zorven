@@ -2,30 +2,32 @@ package tunnel
 
 import (
 	"context"
-	"sync"
+	"errors"
+	"net/http"
 
 	"github.com/tkodcumpeg4/zorven/shared/protocol"
 )
 
 // wsBridge, tek bir yukseltilmis (upgraded) WebSocket akisini temsil eder.
-// Ingress goroutine'i bunu tutar: accept ile 101 sonucunu bekler, fromLocal'dan
+// Ingress goroutine'i bunu tutar: accept ile 101 sonucunu bekler, FromLocal'dan
 // yerel servisten gelen baytlari okuyup tarayiciya yazar.
 type wsBridge struct {
-	reqID     uint64
-	accept    chan protocol.WSAccept // tamponlu(1)
-	fromLocal chan []byte            // ajan -> sunucu (yerel -> tarayici)
-	closed    chan struct{}
-	closeOnce sync.Once
+	reqID    uint64
+	tunnelID string
+	accept   chan protocol.WSAccept // tamponlu(1)
+	q        *streamQueue           // ajan -> tarayici
+	send     creditGate             // tarayici -> ajan
+	acked    bool                   // yalniz okuma dongusu
 }
 
-func (b *wsBridge) close() {
-	b.closeOnce.Do(func() { close(b.closed) })
-}
+// maxWSPerTunnel, bir oturumda tek tunel icin eszamanli WS akisi tavani.
+// NEDEN: WS yukseltmesi kimlik gerektirmeyebilir (acik tunel); her akis
+// sunucuda goroutine, baglanti ve (kredi penceresi kadar) bellek tutar.
+// Tavan, mesru kullanimin (sekme basina birkac WS) cok ustunde tutuldu.
+const maxWSPerTunnel = 1000
 
-// wsFromLocalBuffer, yerel->tarayici yonunde bekleyebilecek cerceve sayisi.
-// WS trafigi ( or. HMR) dusuk hacimlidir; dolarsa akis kapatilir ki paylasilan
-// okuma dongusu ASLA bloklanmasin (head-of-line korumasi).
-const wsFromLocalBuffer = 1024
+// ErrTooManyStreams, tunelin eszamanli WS akisi tavani doluyken doner.
+var ErrTooManyStreams = errors.New("tunel icin cok fazla eszamanli WebSocket akisi")
 
 func (s *Session) ensureWSMap() {
 	if s.wsBridges == nil {
@@ -47,41 +49,65 @@ func (w *WSStream) ReqID() uint64 { return w.b.reqID }
 // Accept, yerel servisin 101 (veya hata) sonucunun bekleneceği kanal.
 func (w *WSStream) Accept() <-chan protocol.WSAccept { return w.b.accept }
 
-// FromLocal, yerel servisten gelen (tarayiciya yazilacak) ham baytlar.
-func (w *WSStream) FromLocal() <-chan []byte { return w.b.fromLocal }
+// FromLocal, yerel servisten gelen (tarayiciya yazilacak) ham baytlar. Kanal
+// tamponsuzdur; duzgun kapanista Closed() tum veri alindiktan sonra kapanir.
+func (w *WSStream) FromLocal() <-chan []byte { return w.b.q.out }
 
 // Closed, akis kapandiginda kapanan sinyal kanali.
-func (w *WSStream) Closed() <-chan struct{} { return w.b.closed }
+func (w *WSStream) Closed() <-chan struct{} { return w.b.q.closed }
 
-// Send, tarayicidan gelen baytlari yerel servise iletir.
+// Aborted, akis iptal edildiginde (tasma, oturum sonu, sunucu tarafli kapama)
+// kapanir; tuketici bloklu tarayici yazisini baglantiyi kapatarak cozmeli.
+func (w *WSStream) Aborted() <-chan struct{} { return w.b.q.aborted }
+
+// Send, tarayicidan gelen baytlari yerel servise iletir. Kredi pazarlandiysa
+// pencere bitince bekler.
 func (w *WSStream) Send(ctx context.Context, data []byte) error {
+	if err := w.b.send.acquire(ctx, w.b.q.closed, creditCost(len(data))); err != nil {
+		return err
+	}
 	return w.s.SendWSData(ctx, w.b.reqID, data)
 }
 
 // Close, akisi kapatir (ajana WSClose gonderir, koprüyu temizler).
-func (w *WSStream) Close(reason string) { w.s.CloseWS(w.b.reqID, reason) }
+func (w *WSStream) Close(reason string) { w.s.closeWSBridge(w.b, reason) }
 
 // OpenWS, ingress tarafindan cagrilir: yeni bir WS akisi tahsis eder, ajana
 // WSOpen gonderir ve akis tutamacini doner. Cagiran Accept() kanalindan 101
 // sonucunu beklemelidir.
 func (s *Session) OpenWS(ctx context.Context, tunnelID, path, query string, headers map[string][]string) (*WSStream, error) {
 	reqID := s.nextReqID.Add(1)
+	q := newStreamQueue(&s.streamMem, wsLegacyMaxMem, 0)
+	q.grant = func(n int) { s.sendStreamWindow(reqID, n) }
 	b := &wsBridge{
-		reqID:     reqID,
-		accept:    make(chan protocol.WSAccept, 1),
-		fromLocal: make(chan []byte, wsFromLocalBuffer),
-		closed:    make(chan struct{}),
+		reqID:    reqID,
+		tunnelID: tunnelID,
+		accept:   make(chan protocol.WSAccept, 1),
+		q:        q,
 	}
 	s.wsMu.Lock()
 	s.ensureWSMap()
+	n := 0
+	for _, o := range s.wsBridges {
+		if o.tunnelID == tunnelID {
+			n++
+		}
+	}
+	if n >= maxWSPerTunnel {
+		s.wsMu.Unlock()
+		q.abort()
+		return nil, ErrTooManyStreams
+	}
 	s.wsBridges[reqID] = b
 	s.wsMu.Unlock()
 
 	if err := s.Send(ctx, protocol.WSOpen{
 		Type: protocol.TypeWSOpen, ReqID: reqID, TunnelID: tunnelID,
 		Path: path, Query: query, Headers: headers,
+		Caps: []string{protocol.StreamCapCredit},
 	}, protocol.TypeWSOpen); err != nil {
 		s.removeWS(reqID)
+		q.abort()
 		return nil, err
 	}
 	return &WSStream{b: b, s: s}, nil
@@ -96,13 +122,26 @@ func (s *Session) SendWSData(ctx context.Context, reqID uint64, data []byte) err
 
 // CloseWS, ajana WSClose gonderir ve yerel koprüyu temizler.
 func (s *Session) CloseWS(reqID uint64, reason string) {
+	if b, ok := s.getWS(reqID); ok {
+		s.closeWSBridge(b, reason)
+		return
+	}
 	_ = s.Send(context.Background(), protocol.WSClose{
 		Type: protocol.TypeWSClose, ReqID: reqID, Reason: reason,
 	}, protocol.TypeWSClose)
-	if b, ok := s.getWS(reqID); ok {
-		b.close()
+}
+
+// closeWSBridge, kopruyu (haritadan kaldirilmis olsa bile) iptal eder.
+func (s *Session) closeWSBridge(b *wsBridge, reason string) {
+	_ = s.Send(context.Background(), protocol.WSClose{
+		Type: protocol.TypeWSClose, ReqID: b.reqID, Reason: reason,
+	}, protocol.TypeWSClose)
+	b.q.abort()
+	s.wsMu.Lock()
+	if s.wsBridges[b.reqID] == b {
+		delete(s.wsBridges, b.reqID)
 	}
-	s.removeWS(reqID)
+	s.wsMu.Unlock()
 }
 
 func (s *Session) getWS(reqID uint64) (*wsBridge, bool) {
@@ -121,34 +160,43 @@ func (s *Session) removeWS(reqID uint64) {
 // --- Okuma dongusunden cagrilan yonlendiriciler ---------------------------
 
 func (s *Session) routeWSAccept(acc protocol.WSAccept) {
-	if b, ok := s.getWS(acc.ReqID); ok {
-		select {
-		case b.accept <- acc:
-		default:
-		}
+	b, ok := s.getWS(acc.ReqID)
+	if !ok || b.acked {
+		return
+	}
+	b.acked = true
+	if acc.Code == "" && acc.Status == http.StatusSwitchingProtocols && protocol.HasCap(acc.Caps, protocol.StreamCapCredit) {
+		b.q.credit.Store(true)
+		b.send.enable()
+	}
+	select {
+	case b.accept <- acc:
+	default:
 	}
 }
 
 // routeWSData, ajandan gelen (yerel->tarayici) baytlari koprüye teslim eder.
-// Tampon dolarsa akisi kapatir; okuma dongusunu ASLA bloklamaz.
+// Tavan/kredi asilirsa akisi kapatir; okuma dongusunu ASLA bloklamaz.
+//
+// Payload KOPYALANMAZ: coder/websocket her mesaj icin taze tampon ayirir
+// (exchange.go writeBody ile ayni varsayim); bellek hesabi cap() ile yapilir.
 func (s *Session) routeWSData(reqID uint64, payload []byte) {
 	b, ok := s.getWS(reqID)
-	if !ok {
+	if !ok || len(payload) == 0 {
 		return
 	}
-	cp := make([]byte, len(payload))
-	copy(cp, payload)
-	select {
-	case b.fromLocal <- cp:
-	case <-b.closed:
-	default:
-		b.close() // tampon doldu: tarayici cok yavas — akisi kes
+	if err := b.q.push(payload); err != nil {
+		s.logStreamAbort("ws", reqID, b.tunnelID, err)
+		b.q.abort()
+		go s.closeWSBridge(b, "overflow")
 	}
 }
 
+// routeWSClose, ajan WS akisini kapatti: kalan veri tarayiciya yazildiktan
+// sonra Closed() kapanir.
 func (s *Session) routeWSClose(reqID uint64) {
 	if b, ok := s.getWS(reqID); ok {
-		b.close()
+		b.q.remoteClose()
 	}
 	s.removeWS(reqID)
 }
@@ -163,6 +211,6 @@ func (s *Session) closeAllWS() {
 	s.wsBridges = make(map[uint64]*wsBridge)
 	s.wsMu.Unlock()
 	for _, b := range bridges {
-		b.close()
+		b.q.abort()
 	}
 }

@@ -77,3 +77,38 @@ func TestSecretInvalidKeyRejected(t *testing.T) {
 		t.Fatalf("gecersiz anahtar reddedilmeliydi: %v", err)
 	}
 }
+
+func TestParseSecretKeyEncodings(t *testing.T) {
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(250 - i*3) // +/ ile -_ kodlamalarinin ayristigi baytlar
+	}
+	for name, enc := range map[string]*base64.Encoding{
+		"std": base64.StdEncoding, "url": base64.URLEncoding,
+		"rawstd": base64.RawStdEncoding, "rawurl": base64.RawURLEncoding,
+	} {
+		got, err := ParseSecretKey(" " + enc.EncodeToString(key) + "\n")
+		if err != nil || !bytes.Equal(got, key) {
+			t.Fatalf("%s: kabul edilmeliydi: err=%v", name, err)
+		}
+	}
+	for _, bad := range []string{"abc", "kısa", base64.StdEncoding.EncodeToString(make([]byte, 16))} {
+		if _, err := ParseSecretKey(bad); err == nil {
+			t.Fatalf("%q reddedilmeliydi", bad)
+		}
+	}
+}
+
+func TestCheckSecretKeyEnv(t *testing.T) {
+	get := func(v string) func(string) string { return func(string) string { return v } }
+	if err := CheckSecretKeyEnv(get("")); err != nil {
+		t.Fatalf("bos deger mevcut davranis (uyari) olmali, hata degil: %v", err)
+	}
+	if err := CheckSecretKeyEnv(get("abc")); err == nil {
+		t.Fatal("dolu ama gecersiz anahtar baslangicta reddedilmeli")
+	}
+	good := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
+	if err := CheckSecretKeyEnv(get(good)); err != nil {
+		t.Fatalf("URL-safe dolgusuz anahtar kabul edilmeli: %v", err)
+	}
+}

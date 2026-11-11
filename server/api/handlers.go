@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -184,7 +185,41 @@ func writeEntitlementError(w http.ResponseWriter, err error) {
 		})
 		return
 	}
-	writeJSONError(w, http.StatusForbidden, "entitlement_denied", err.Error())
+	if errors.Is(err, store.ErrNotFound) {
+		// Abonelik/plan kaydi yok: bir yetki reddi (eski davranis), kesinti degil.
+		writeJSONError(w, http.StatusForbidden, "entitlement_denied", "plan kaydi bulunamadi")
+		return
+	}
+	// O2: EntitlementError disindaki hatalar (DB kesintisi, "closed pool", eksik tablo)
+	// ham metinle 403 donuyordu: istemci "planiniz desteklemiyor" saniyor ve gercek
+	// kesintide metin DSN'deki kullanici/host:port'u sizdirabiliyordu. Artik 500 +
+	// genel mesaj + ERROR log (s.fail ile ayni bicim; serbest fonksiyon oldugu icin
+	// varsayilan logger, main slog.SetDefault ile ayni ciktiya baglar).
+	slog.Default().Error("API hatasi (yetki denetimi)", "hata", err, "request_id", requestIDOf(w))
+	writeJSONError(w, http.StatusInternalServerError, "internal", "beklenmeyen hata")
+}
+
+// quotaLocker, entitlements.Service.LockQuota (O1). Arayuz uzerinden tip denetimi:
+// EntitlementService arayuzunu genisletmek tum test sahtelerini kirardi.
+type quotaLocker interface {
+	LockQuota(ctx context.Context, tenantID, resource string) (func(), error)
+}
+
+// lockQuota, plan limiti denetimi + ekleme bolumunu kiraci basina siraya sokar (O1:
+// "say, sonra ekle" yarisi limit 2 iken 5 tunel actiriyordu). Kilit desteklenmiyorsa
+// bos unlock doner. Basarisizsa yaniti yazar ve false doner. Donen unlock ekleme
+// biter bitmez cagrilmali; yavas isler (yonlendirme tazeleme) kilit disinda kalir.
+func (s *Server) lockQuota(w http.ResponseWriter, r *http.Request, tenantID, resource string) (func(), bool) {
+	l, ok := s.Entitlements.(quotaLocker)
+	if !ok || s.Entitlements == nil {
+		return func() {}, true
+	}
+	unlock, err := l.LockQuota(r.Context(), tenantID, resource)
+	if err != nil {
+		s.fail(w, err)
+		return nil, false
+	}
+	return unlock, true
 }
 
 // GitHubAuth, ESKI Go-tarafi GitHub OAuth yapilandirmasi (yedek yol; panelin asil GitHub girisi ve
@@ -595,6 +630,8 @@ func (s *Server) adminNotifyUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	n := s.Hub.BroadcastUpdateAvailable(r.Context(), "")
+	// Platform genelinde yan etkili islem: platform kiracisinin gunlugune yazilir.
+	s.auditFor(r, store.DefaultTenantID, "admin.notify_update", "clients", fmt.Sprintf("notified=%d", n))
 	writeJSON(w, http.StatusOK, map[string]any{"notified": n})
 }
 
@@ -749,6 +786,9 @@ func (s *Server) adminSwitchTenant(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Denetim: platform admin'in baska bir kiraciya gecisi HEDEF kiracinin
+	// gunlugunde gorunur (kiraci sahibi "kim, ne zaman girdi" sorusunu yanitlayabilsin).
+	s.auditFor(r, t.ID, "admin.switch_tenant", t.ID, "slug="+t.Slug)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"success": true,
 		"tenant": map[string]string{
@@ -886,6 +926,11 @@ func (s *Server) createClient(w http.ResponseWriter, r *http.Request) {
 			"istek kiraci kapsami olmadan ulasti")
 		return
 	}
+	unlock, ok := s.lockQuota(w, r, tenantID, entitlements.QuotaClients)
+	if !ok {
+		return
+	}
+	defer unlock()
 	if s.Entitlements != nil {
 		if err := s.Entitlements.CanCreateClient(r.Context(), tenantID); err != nil {
 			writeEntitlementError(w, err)
@@ -894,10 +939,12 @@ func (s *Server) createClient(w http.ResponseWriter, r *http.Request) {
 	}
 	projID, _ := s.projectFor(r)
 	c, err := s.Store.CreateClientWithProject(r.Context(), tenantID, strings.TrimSpace(body.Name), tokenID, hash, projID)
+	unlock()
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
+	s.audit(r, "client.create", c.ID, c.Name)
 
 	// Token YALNIZCA burada doner; sunucu bundan sonra sadece hash'ini bilir.
 	writeJSON(w, http.StatusCreated, map[string]any{
@@ -952,6 +999,8 @@ func (s *Server) deleteClient(w http.ResponseWriter, r *http.Request) {
 	if sess, ok := s.Hub.Get(id); ok {
 		sess.Close("client deleted")
 	}
+	// A5 #12: cihaz silme denetim kaydina yazilir (token.revoke, tunnel.delete gibi).
+	s.audit(r, "client.delete", id, "")
 	// Client silinince tunelleri CASCADE ile gitti; yonlendirme tazelenmeli.
 	s.tunnelsChanged()
 	s.Events.PublishTenant(tenantID, events.TypeClientDisconnected, map[string]string{"client_id": id})
@@ -984,6 +1033,7 @@ func (s *Server) rotateToken(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	s.audit(r, "client.token_rotate", id, "")
 	// Eski token artik gecersiz — mevcut oturumu kopar ki yeni tokenla baglansin.
 	if sess, ok := s.Hub.Get(id); ok {
 		sess.Close("token rotated")
@@ -1108,6 +1158,13 @@ func (s *Server) createTunnel(w http.ResponseWriter, r *http.Request) {
 			"istek kiraci kapsami olmadan ulasti")
 		return
 	}
+	// O1: limit denetimi -> tunel + ad ekleme kiraci basina sirali; kilit ad baglama
+	// bittikten sonra (tunelsChanged/yonlendirme tazelemesinden ONCE) birakilir.
+	unlock, ok := s.lockQuota(w, r, tenantID, entitlements.QuotaTunnels)
+	if !ok {
+		return
+	}
+	defer unlock()
 	if s.Entitlements != nil {
 		if err := s.Entitlements.CanCreateTunnel(r.Context(), tenantID); err != nil {
 			writeEntitlementError(w, err)
@@ -1187,6 +1244,19 @@ func (s *Server) createTunnel(w http.ResponseWriter, r *http.Request) {
 		t.Hostnames = []store.Hostname{picked}
 	case autoFQDN != "":
 		h, err := s.Store.AddHostnameWithProject(r.Context(), tenantID, t.ID, autoFQDN, store.HostTypeScoped, projID)
+		if errors.Is(err, store.ErrHostnameTaken) {
+			// A4 #15: kalici tunel silinince kapsamli ad kiracida bos (tunnel_id NULL)
+			// kaliyor; ayni adla yeniden olusturma 409 aliyordu. Ad AYNI kiracinin bos,
+			// askida olmayan kapsamli adiysa yeniden baglanir. Baska kiracinin adi ya da
+			// baska tunele bagli ad icin 409 aynen kalir (rezervasyon korunur). Ayni
+			// kiracinin esanli olusturmalari kota kilidi altinda sirali.
+			if free, ferr := s.reusableScopedHostname(r.Context(), tenantID, autoFQDN); ferr == nil {
+				if aerr := s.Store.AttachHostname(r.Context(), tenantID, free.ID, t.ID); aerr == nil {
+					free.TunnelID = t.ID
+					h, err = free, nil
+				}
+			}
+		}
 		if err != nil {
 			s.rollbackNewTunnel(r, tenantID, t.ID)
 			if errors.Is(err, store.ErrHostnameTaken) {
@@ -1199,12 +1269,26 @@ func (s *Server) createTunnel(w http.ResponseWriter, r *http.Request) {
 		t.Hostnames = []store.Hostname{h}
 		s.autoScanHostname(r.Context(), autoFQDN)
 	}
+	unlock()
 
 	s.tunnelsChanged()
 	s.pushClientConfig(body.ClientID)
 	s.Events.PublishTenant(tenantID, events.TypeTunnelCreated, t)
 	s.audit(r, "tunnel.create", t.ID, body.Target)
 	writeJSON(w, http.StatusCreated, t)
+}
+
+// reusableScopedHostname, fqdn kiracinin KENDI bos (tunele bagli olmayan), askida
+// olmayan kapsamli adiysa onu doner; aksi halde ErrNotFound.
+func (s *Server) reusableScopedHostname(ctx context.Context, tenantID, fqdn string) (store.Hostname, error) {
+	h, err := s.Store.GetHostnameByFQDN(ctx, fqdn)
+	if err != nil {
+		return store.Hostname{}, err
+	}
+	if h.TenantID != tenantID || h.TunnelID != "" || h.Type != store.HostTypeScoped {
+		return store.Hostname{}, store.ErrNotFound
+	}
+	return h, nil
 }
 
 // rollbackNewTunnel, createTunnel'da ad baglanamayan yeni tuneli siler. Istek
@@ -1939,7 +2023,7 @@ func (s *Server) fail(w http.ResponseWriter, err error) {
 		writeJSONError(w, http.StatusNotFound, "not_found", "kayit bulunamadi")
 		return
 	}
-	s.logger().Error("API hatasi", "hata", err)
+	s.logger().Error("API hatasi", "hata", err, "request_id", requestIDOf(w))
 	writeJSONError(w, http.StatusInternalServerError, "internal", "beklenmeyen hata")
 }
 
@@ -1953,7 +2037,20 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 	// Govde siniri: yonetim API'sinde buyuk govde beklenmiyor; sinirsiz
 	// okumak bellek tuketme vektoru olurdu.
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	var raw json.RawMessage
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&raw); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid_json", err.Error())
+		return false
+	}
+	// A4 #10: `null` govdesi Go'da hedefi degistirmeden "basarili" cozuluyordu; isleyici
+	// sifir degerli govdeyle devam edip ayari sifirliyordu (PUT .../access null -> erisim
+	// denetimi kapaniyordu; POST /tokens null -> tam yetkili token). Bos nesne `{}` acik
+	// bir istek oldugu icin isleyicinin kendi anlamina birakilir.
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		writeJSONError(w, http.StatusBadRequest, "invalid_json", "govde null olamaz; JSON nesnesi bekleniyor")
+		return false
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid_json", err.Error())

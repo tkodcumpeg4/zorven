@@ -199,8 +199,8 @@ func CertNotAfter() time.Time {
 // --- gauge kaydi ---------------------------------------------------------------
 
 type gauge struct {
-	name, help string
-	fn         func() float64
+	name, help, typ string
+	fn              func() float64
 }
 
 var (
@@ -211,15 +211,26 @@ var (
 // RegisterGauge, her scrape'te cagrilan bir gauge ekler. fn hizli olmali ve kilit
 // bekletmemeli. Ayni ad tekrar eklenirse ustune yazilir.
 func RegisterGauge(name, help string, fn func() float64) {
+	registerFunc(name, help, "gauge", fn)
+}
+
+// RegisterCounter, RegisterGauge gibi ama TYPE counter yazar: fn tekduze artan bir
+// toplam donmelidir (or. pgx EmptyAcquireCount). Gauge olarak bildirilen sayaclar
+// Prometheus'ta rate()/increase() ile yanlis yorumlanir (A5 #6).
+func RegisterCounter(name, help string, fn func() float64) {
+	registerFunc(name, help, "counter", fn)
+}
+
+func registerFunc(name, help, typ string, fn func() float64) {
 	gaugeMu.Lock()
 	defer gaugeMu.Unlock()
 	for i := range gauges {
 		if gauges[i].name == name {
-			gauges[i] = gauge{name, help, fn}
+			gauges[i] = gauge{name, help, typ, fn}
 			return
 		}
 	}
-	gauges = append(gauges, gauge{name, help, fn})
+	gauges = append(gauges, gauge{name, help, typ, fn})
 }
 
 // --- metin cikti ------------------------------------------------------------------
@@ -299,11 +310,15 @@ func Write(w io.Writer) error {
 	gaugeMu.RUnlock()
 	sort.Slice(gs, func(i, j int) bool { return gs[i].name < gs[j].name })
 	for _, g := range gs {
-		head(&b, g.name, g.help, "gauge")
+		head(&b, g.name, g.help, g.typ)
 		fmt.Fprintf(&b, "%s %s\n", g.name, fmtF(g.fn()))
 	}
 
+	writeAuth(&b)
+	writeAPI(&b)
+	writeEvents(&b)
 	writeRuntime(&b)
+	writeProcess(&b)
 	_, err := w.Write(b.Bytes())
 	return err
 }
@@ -331,6 +346,10 @@ func writeRuntime(b *bytes.Buffer) {
 	fmt.Fprintf(b, "go_memstats_alloc_bytes %d\n", m.Alloc)
 	head(b, "go_memstats_sys_bytes", "Isletim sisteminden alinan toplam bellek.", "gauge")
 	fmt.Fprintf(b, "go_memstats_sys_bytes %d\n", m.Sys)
+	head(b, "go_memstats_heap_alloc_bytes", "Heap'te ayrilmis (canli + henuz toplanmamis) baytlar.", "gauge")
+	fmt.Fprintf(b, "go_memstats_heap_alloc_bytes %d\n", m.HeapAlloc)
+	head(b, "go_memstats_heap_inuse_bytes", "Kullanimdaki heap span baytlari.", "gauge")
+	fmt.Fprintf(b, "go_memstats_heap_inuse_bytes %d\n", m.HeapInuse)
 	head(b, "go_memstats_heap_objects", "Canli heap nesnesi sayisi.", "gauge")
 	fmt.Fprintf(b, "go_memstats_heap_objects %d\n", m.HeapObjects)
 	head(b, "go_gc_cycles_total", "Tamamlanan GC dongusu sayisi.", "counter")

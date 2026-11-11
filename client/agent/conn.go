@@ -219,6 +219,7 @@ type Agent struct {
 	wakeCh     chan struct{} // geri cekilme beklemesini kesen sinyal
 	netChanged atomic.Bool   // uyku/ag degisimi: backoff sifirlansin
 	curConn    *websocket.Conn
+	curConnAt  time.Time // curConn'un kuruldugu an (uyanma algisi, obs.go onWake)
 	curCS      *clientSession
 	curFM      *fileManager
 	// deviceUpdate: sunucu device_update'i onayladi (handshake).
@@ -418,15 +419,31 @@ func (a *Agent) Run(ctx context.Context) error {
 			return err
 		}
 
-		reconnectMsg := fmt.Sprintf("bağlantı koptu, %s sonra yeniden denenecek", backoff.Round(time.Second))
+		// Jitter: cok sayida istemci ayni anda kopunca sunucuya es zamanli
+		// yuklenmesinler diye bekleme suresine %0-25 rastgele ekleniyor.
+		wait := backoff + time.Duration(rand.Int64N(int64(backoff/4)+1))
+		serverClosing := errors.Is(err, errServerClosing)
+		if serverClosing {
+			// A3 #11: sunucu duzgun kapandi (yeniden baslatma / surum gecisi).
+			// Eskiden bu kopus siradan sayiliyor, kisa oturumdan sonra geri
+			// cekilme sifirlanmadigi icin toparlanma 30-75 sn surebiliyordu.
+			// Sunucu birkac saniyede geri gelir: kisa, jitter'li bekle ve
+			// geri cekilmeyi sifirla. Jitter (1-3 sn) ayni anda kopan binlerce
+			// ajanin sunucuya ayni anda yuklenmesini (thundering herd) dagitir;
+			// sunucu henuz ayakta degilse normal ussel geri cekilme devreye girer.
+			backoff = backoffMin
+			wait = serverRestartWait()
+		}
+
+		reconnectMsg := fmt.Sprintf("bağlantı koptu, %s sonra yeniden denenecek", wait.Round(time.Second))
 		if err != nil {
 			errStr := err.Error()
 			if strings.Contains(errStr, "first record does not look like a TLS handshake") || strings.Contains(errStr, "oversized record received") {
 				reconnectMsg = "Sunucu şifresiz (HTTP) çalışıyor — Ayarlar'dan 'Şifrelemeyi kapat'ı seçin"
 			} else if errors.Is(err, ErrAlreadyConnected) {
-				reconnectMsg = fmt.Sprintf("%s; %s sonra yeniden denenecek", msgAlreadyConnected, backoff.Round(time.Second))
+				reconnectMsg = fmt.Sprintf("%s; %s sonra yeniden denenecek", msgAlreadyConnected, wait.Round(time.Second))
 			} else if errors.Is(err, errTooManyAttempts) {
-				reconnectMsg = fmt.Sprintf("sunucu çok fazla bağlantı denemesi nedeniyle bekletiyor (429), %s sonra yeniden denenecek", backoff.Round(time.Second))
+				reconnectMsg = fmt.Sprintf("sunucu çok fazla bağlantı denemesi nedeniyle bekletiyor (429), %s sonra yeniden denenecek", wait.Round(time.Second))
 			} else if strings.Contains(errStr, "certificate signed by unknown authority") {
 				reconnectMsg = "Sertifika doğrulanamadı — Ayarlar'dan CA sertifikası (server.crt) seçin"
 			}
@@ -437,11 +454,8 @@ func (a *Agent) Run(ctx context.Context) error {
 			Message: reconnectMsg,
 		})
 		a.Log.Warn("baglanti koptu, yeniden denenecek",
-			"hata", err, "bekleme", backoff.Round(time.Millisecond))
+			"hata", err, "bekleme", wait.Round(time.Millisecond))
 
-		// Jitter: cok sayida istemci ayni anda kopunca sunucuya es zamanli
-		// yuklenmesinler diye bekleme suresine %0-25 rastgele ekleniyor.
-		wait := backoff + time.Duration(rand.Int64N(int64(backoff/4)+1))
 		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
@@ -456,6 +470,9 @@ func (a *Agent) Run(ctx context.Context) error {
 		case <-timer.C:
 		}
 
+		if serverClosing {
+			continue // ilk yeniden deneme basarisizsa geri cekilme backoffMin'den baslar
+		}
 		// Tavan panelden ayarlanabilir (reconnect_max_backoff_sec, F15).
 		maxB := a.settings.maxBackoffOr(backoffMax)
 		if backoff < maxB {
@@ -484,6 +501,17 @@ const conflictGrace = 2 * time.Minute
 
 // errReplaced, sunucunun bu oturumu ayni cihazin yeni baglantisiyla degistirdigini bildirir.
 var errReplaced = errors.New("oturum baska bir baglantiyla degistirildi")
+
+// errServerClosing, sunucunun baglantiyi WebSocket duzgun kapanisiyla (1000
+// / 1001) kapattigini bildirir: sunucu kapaniyor ya da yeniden basliyor
+// (server/shutdown.go). Kalici degildir; kisa beklemeyle yeniden baglanilir.
+var errServerClosing = errors.New("sunucu baglantiyi duzgun kapatti (yeniden basliyor olabilir)")
+
+// serverRestartWait, sunucu duzgun kapandiktan sonraki ilk bekleme: 1-3 sn
+// arasi duzgun dagilimli (thundering herd onlemi).
+func serverRestartWait() time.Duration {
+	return time.Second + time.Duration(rand.Int64N(int64(2*time.Second)))
+}
 
 // errTooManyAttempts, sunucunun kimlik dogrulama hiz siniri (429): kalici
 // degil, backoff ile yeniden denenir.
@@ -556,8 +584,18 @@ func (a *Agent) connectOnce(ctx context.Context) error {
 	dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
 
+	// Baglanti basina tasiyici: alt TCP baglantisi corkConn ile sarilir ve
+	// sunucuya yazimlar partiler halinde tek syscall ile gider (batchwrite.go).
+	// Tasiyici CA havuzlu istemcinin (setupTLS) ya da varsayilanin kopyasidir.
+	slot := &corkSlot{}
+	hc := a.dialHTTPClient(slot)
+	if tr, ok := hc.Transport.(*http.Transport); ok {
+		// El sikismadan sonra baglanti tasiyicidan ayrilir (hijack); kalan bosta
+		// baglanti (yonlendirme vb.) olursa birakilsin.
+		defer tr.CloseIdleConnections()
+	}
 	conn, resp, err := websocket.Dial(dialCtx, url, &websocket.DialOptions{
-		HTTPClient: a.httpClient, // nil ise varsayilan kullanilir
+		HTTPClient: hc,
 		HTTPHeader: http.Header{
 			// Token query string'e DEGIL basliga konur: query string sunucu
 			// erisim loglarina ve ara proxy loglarina sizar.
@@ -591,7 +629,7 @@ func (a *Agent) connectOnce(ctx context.Context) error {
 		return fmt.Errorf("el sikismasi basarisiz: %w", err)
 	}
 
-	return a.readLoop(ctx, conn)
+	return a.readLoop(ctx, conn, slot.get())
 }
 
 // clientVersion, hello'da bildirilen GERCEK ikili surumu (ldflags). Bos ise "dev".
@@ -768,7 +806,7 @@ func (a *Agent) handshake(ctx context.Context, conn *websocket.Conn) error {
 	return nil
 }
 
-func (a *Agent) readLoop(parent context.Context, conn *websocket.Conn) error {
+func (a *Agent) readLoop(parent context.Context, conn *websocket.Conn, cork *corkConn) error {
 	// Baglanti basina baglam: readLoop donunce (kopma/yeniden baglanma) bu
 	// baglantiya ait TUM goroutine'ler (udp istatistik, cihaz sertifikasi, durus,
 	// keepalive, wg dugumu...) durur. Run'in baglami kullanilsaydi her yeniden
@@ -780,6 +818,7 @@ func (a *Agent) readLoop(parent context.Context, conn *websocket.Conn) error {
 		runCtx = *p
 	}
 	cs := newClientSession(conn, a.LocalURL, a.Log)
+	cs.cork = cork
 	cs.tm = a.observ().tm
 	cs.flowControl = a.flowControl // el sikismada pazarlandi
 	cs.screenInputStatus = a.screenInputStatus
@@ -813,6 +852,7 @@ func (a *Agent) readLoop(parent context.Context, conn *websocket.Conn) error {
 	a.terminal = tm
 	a.screen = sm
 	a.curConn, a.curCS, a.curFM = conn, cs, fm
+	a.curConnAt = time.Now()
 	a.mu.Unlock()
 	go a.keepalive(ctx, conn)
 
@@ -899,9 +939,14 @@ func (a *Agent) readLoop(parent context.Context, conn *websocket.Conn) error {
 				strings.Contains(ce.Reason, "already connected") {
 				return ErrAlreadyConnected
 			}
-			status := websocket.CloseStatus(err)
-			if status == websocket.StatusNormalClosure || errors.Is(err, context.Canceled) {
+			if errors.Is(err, context.Canceled) {
 				return nil
+			}
+			status := websocket.CloseStatus(err)
+			if status == websocket.StatusNormalClosure || status == websocket.StatusGoingAway {
+				// Kapanis cercevesini sunucu yolladi (ajan kendi kapattiginda
+				// CloseNow kullanir, cerceve yollamaz).
+				return errServerClosing
 			}
 			return err
 		}

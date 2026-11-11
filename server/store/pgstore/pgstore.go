@@ -19,6 +19,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/tkodcumpeg4/zorven/server/internal/envnum"
 	"github.com/tkodcumpeg4/zorven/server/store"
 )
 
@@ -80,15 +81,6 @@ const (
 	longOpTimeout = 10 * time.Minute
 )
 
-func envInt(get func(string) string, key string, def int) int {
-	if v := get(key); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
-			return n
-		}
-	}
-	return def
-}
-
 // poolConfig, DSN + ortam degiskenlerinden havuz ayarini uretir:
 // ZORVEN_DB_MAX_CONNS (vars. 20), ZORVEN_DB_STATEMENT_TIMEOUT_MS (vars. 15000; 0 = kapali).
 func poolConfig(dsn string, get func(string) string) (*pgxpool.Config, error) {
@@ -96,11 +88,9 @@ func poolConfig(dsn string, get func(string) string) (*pgxpool.Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	maxC := envInt(get, "ZORVEN_DB_MAX_CONNS", defaultMaxConns)
-	if maxC < 1 {
-		maxC = defaultMaxConns
-	}
-	cfg.MaxConns = int32(maxC)
+	// Ust sinir: Postgres max_connections (vars. 100) diger servislerle paylasiliyor;
+	// yazim hatasiyla dev bir havuz baglanti tukenmesine yol acmasin.
+	cfg.MaxConns = int32(envnum.Int(get, "ZORVEN_DB_MAX_CONNS", defaultMaxConns, 1, 500))
 	cfg.MinConns = 2
 	if cfg.MinConns > cfg.MaxConns {
 		cfg.MinConns = cfg.MaxConns
@@ -113,9 +103,16 @@ func poolConfig(dsn string, get func(string) string) (*pgxpool.Config, error) {
 		cfg.ConnConfig.RuntimeParams = map[string]string{}
 	}
 	rp := cfg.ConnConfig.RuntimeParams
-	rp["statement_timeout"] = strconv.Itoa(envInt(get, "ZORVEN_DB_STATEMENT_TIMEOUT_MS", defaultStatementTimeout))
+	// 0 = kapali; ust sinir 1 saat (longOpTimeout'tan uzun tek ifade beklenmez).
+	rp["statement_timeout"] = strconv.Itoa(envnum.Int(get, "ZORVEN_DB_STATEMENT_TIMEOUT_MS", defaultStatementTimeout, 0, 3600000))
 	rp["idle_in_transaction_session_timeout"] = strconv.Itoa(idleInTxTimeoutMS)
 	rp["application_name"] = "zorven"
+	// O4: JIT kapali. Uygulamanin sorgulari kisa OLTP sorgulari; kucuk tablolarda
+	// istatistik bayatlayinca planlayici satir tahminini milyonlara cikarip JIT'i
+	// tetikliyordu (yonlendirme tablosu yuklemesi 0,85 ms -> 0,8-4,6 sn). Uzun analitik
+	// sorgu yok; JIT'in kazanci yok, gecikme riski var. Sunucu tarafi ayar degil,
+	// yalniz bu havuzun oturumlari icin gecerli (diger servisleri etkilemez).
+	rp["jit"] = "off"
 	return cfg, nil
 }
 

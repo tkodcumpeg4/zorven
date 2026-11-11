@@ -47,3 +47,19 @@ func TestDashboardMissingAssetIs404(t *testing.T) {
 		}
 	}
 }
+
+func TestDashboardRobotsAndNoindex(t *testing.T) {
+	h := dashboardHandler()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/robots.txt", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "Disallow: /") || !strings.HasPrefix(rec.Header().Get("Content-Type"), "text/plain") {
+		t.Fatalf("panel robots.txt tum taramayi kapatmali: %d %q %q", rec.Code, rec.Header().Get("Content-Type"), rec.Body.String())
+	}
+	for _, p := range []string{"/", "/tunnels"} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, p, nil))
+		if rec.Header().Get("X-Robots-Tag") != "noindex" {
+			t.Fatalf("%s: panel HTML noindex tasimali", p)
+		}
+	}
+}

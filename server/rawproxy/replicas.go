@@ -78,7 +78,8 @@ func (h hubStreams) open(ctx context.Context, ti TunnelInfo, clientID, proto, re
 	if !ok {
 		return nil, true, nil
 	}
-	rs, err := sess.OpenStream(ctx, ti.TunnelID, proto, remote)
+	// Tuketici bridgeTCP/UDP'dir: tcp'de yari kapamayi isler (yalniz tcp'de onerilir).
+	rs, err := sess.OpenStreamHalf(ctx, ti.TunnelID, proto, remote)
 	if err != nil {
 		return nil, false, err
 	}

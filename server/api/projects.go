@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/tkodcumpeg4/zorven/server/entitlements"
 	"github.com/tkodcumpeg4/zorven/server/store"
 )
 
@@ -65,6 +66,11 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 
 	// Plan limiti (FAZ 3.5): yalnizca YENI proje engellenir; siniri asan
 	// mevcut projeler silinmez.
+	unlock, ok := s.lockQuota(w, r, tenantID, entitlements.QuotaProjects)
+	if !ok {
+		return
+	}
+	defer unlock()
 	if s.Entitlements != nil {
 		if err := s.Entitlements.CanCreateProject(r.Context(), tenantID); err != nil {
 			writeEntitlementError(w, err)
@@ -72,6 +78,7 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	p, err := s.Store.CreateProject(r.Context(), tenantID, body.Name, body.Slug)
+	unlock()
 	if errors.Is(err, store.ErrProjectSlugTaken) {
 		writeJSONError(w, http.StatusConflict, "slug_taken", "bu proje slug'ı zaten kullanımda")
 		return

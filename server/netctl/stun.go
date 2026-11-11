@@ -2,6 +2,7 @@ package netctl
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net"
 	"net/netip"
@@ -114,6 +115,8 @@ func (s *StunServer) Serve(ctx context.Context, pc net.PacketConn) error {
 	go func() { <-ctx.Done(); _ = pc.Close() }()
 	buf := make([]byte, 512)
 	udp, _ := pc.(*net.UDPConn)
+	var wait time.Duration
+	var lastLog time.Time
 	for {
 		var n int
 		var src netip.AddrPort
@@ -131,11 +134,29 @@ func (s *StunServer) Serve(ctx context.Context, pc net.PacketConn) error {
 			if ctx.Err() != nil {
 				return nil
 			}
+			if errors.Is(err, net.ErrClosed) {
+				return err
+			}
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
 				continue
 			}
-			return err
+			// Gecici okuma hatasi (ENOBUFS/ENOMEM, ICMP kaynakli ECONNREFUSED ...):
+			// eskiden STUN kalici olarak duruyordu; ussel bekleyip devam et.
+			wait = nextReadWait(wait)
+			if time.Since(lastLog) >= 10*time.Second {
+				lastLog = time.Now()
+				if s.Log != nil {
+					s.Log.Warn("STUN okuma hatasi, yeniden deneniyor", "hata", err, "bekleme", wait)
+				}
+			}
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(wait):
+			}
+			continue
 		}
+		wait = 0
 		if resp, ok := s.Handle(buf[:n], src); ok {
 			if udp != nil {
 				_, _ = udp.WriteToUDPAddrPort(resp, src)
@@ -144,6 +165,17 @@ func (s *StunServer) Serve(ctx context.Context, pc net.PacketConn) error {
 			}
 		}
 	}
+}
+
+// nextReadWait, ardisik okuma hatalarinda beklemeyi ikiye katlar (5 ms - 1 sn).
+func nextReadWait(d time.Duration) time.Duration {
+	if d == 0 {
+		return 5 * time.Millisecond
+	}
+	if d *= 2; d > time.Second {
+		d = time.Second
+	}
+	return d
 }
 
 // Listen, addr ("host:port" veya ":3478") uzerinde UDP soketi acar. Hata

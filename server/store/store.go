@@ -637,6 +637,11 @@ type HostRoute struct {
 	// Expired: gecici tunelin suresi doldu (saklama penceresinde, trafige kapali).
 	Expired bool
 
+	// ExpiresAt: gecici tunelin bitis ani (kalici tunelde nil). Supurucu dakikada
+	// bir calisip Expired'i isaretler; o arada tunel ~30-60 sn daha trafik
+	// aliyordu (A4 #13). Ingress bu alana bakip suresi gecmisse hemen 410 doner.
+	ExpiresAt *time.Time
+
 	// PathPrefix (FAZ 6.5): yol-tabanli yonlendirme kurali ise dolu. Bos ise bu
 	// hostname'in VARSAYILAN (birincil) route'udur. Router, ayni fqdn icin en uzun
 	// eslesen on-eki secer; hicbiri eslesmezse varsayilana duser.

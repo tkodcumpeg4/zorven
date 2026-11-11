@@ -2,9 +2,10 @@ package rawproxy
 
 import (
 	"os"
-	"strconv"
 	"sync"
 	"time"
+
+	"github.com/tkodcumpeg4/zorven/server/internal/envnum"
 )
 
 // Ham TCP baglanti sinirlari. Her ziyaretci baglantisi sunucuda bir goroutine
@@ -33,23 +34,25 @@ type connLimits struct {
 	byIP     map[string]int // tunel|ip
 }
 
-func envInt(name string, def int) int {
-	if v, err := strconv.Atoi(os.Getenv(name)); err == nil && v >= 0 {
-		return v
-	}
-	return def
-}
+// Ust sinirlar: yanlis yazilmis dev bir deger (or. 10000000) sinirin fiilen
+// kapanmasi demektir; envnum aralik disinda WARN yazip varsayilana duser (A5 #10).
+// 0 = sinirsiz anlami korunur.
+const (
+	maxConnsCap = 1 << 20
+	maxIdleSec  = 7 * 24 * 3600
+)
 
 func newConnLimits() *connLimits {
-	idle := defIdle
-	if v, err := strconv.Atoi(os.Getenv("ZORVEN_RAW_TCP_IDLE_SEC")); err == nil && v >= 0 {
-		idle = time.Duration(v) * time.Second
-	}
+	return newConnLimitsFrom(os.Getenv)
+}
+
+func newConnLimitsFrom(get func(string) string) *connLimits {
+	idleSec := envnum.Int(get, "ZORVEN_RAW_TCP_IDLE_SEC", int(defIdle/time.Second), 0, maxIdleSec)
 	return &connLimits{
-		max:       envInt("ZORVEN_RAW_TCP_MAX_CONNS", defMaxConns),
-		perTunnel: envInt("ZORVEN_RAW_TCP_MAX_CONNS_TUNNEL", defMaxConnsTunnel),
-		perIP:     envInt("ZORVEN_RAW_TCP_MAX_CONNS_IP", defMaxConnsIP),
-		idle:      idle,
+		max:       envnum.Int(get, "ZORVEN_RAW_TCP_MAX_CONNS", defMaxConns, 0, maxConnsCap),
+		perTunnel: envnum.Int(get, "ZORVEN_RAW_TCP_MAX_CONNS_TUNNEL", defMaxConnsTunnel, 0, maxConnsCap),
+		perIP:     envnum.Int(get, "ZORVEN_RAW_TCP_MAX_CONNS_IP", defMaxConnsIP, 0, maxConnsCap),
+		idle:      time.Duration(idleSec) * time.Second,
 		byTunnel:  map[string]int{},
 		byIP:      map[string]int{},
 	}

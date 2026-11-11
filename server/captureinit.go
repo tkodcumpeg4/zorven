@@ -2,11 +2,11 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
 	"log/slog"
-	"strconv"
 	"strings"
 
+	"github.com/tkodcumpeg4/zorven/server/internal/envnum"
+	"github.com/tkodcumpeg4/zorven/server/obs"
 	"github.com/tkodcumpeg4/zorven/server/reqlog"
 	"github.com/tkodcumpeg4/zorven/server/store/pgstore"
 )
@@ -30,17 +30,10 @@ type captureEnv struct {
 	RetentionDays    int
 }
 
+// envNum, yakalama ayarlarini envnum ortak kuraliyla okur (gecersiz -> WARN + varsayilan).
+// Ust sinir 1<<30: GB (<<30) carpaniyla bile int64 tasmasin.
 func envNum(get func(string) string, key string, def int64) int64 {
-	v := strings.TrimSpace(get(key))
-	if v == "" {
-		return def
-	}
-	n, err := strconv.ParseInt(v, 10, 64)
-	if err != nil || n < 0 {
-		slog.Warn("gecersiz yakalama ayari, varsayilan kullaniliyor", "env", key, "deger", v)
-		return def
-	}
-	return n
+	return envnum.Int64(get, key, def, 0, 1<<30)
 }
 
 func captureEnvFrom(get func(string) string) captureEnv {
@@ -57,12 +50,10 @@ func captureEnvFrom(get func(string) string) captureEnv {
 // captureCodecFromEnv, ZORVEN_SECRET_KEY'den (base64, 32 bayt) turetilmis
 // anahtarla kodlayici uretir; anahtar yok/gecersizse nil (kalici yakalama kapali).
 func captureCodecFromEnv(get func(string) string) *reqlog.CaptureCodec {
-	raw := strings.TrimSpace(get("ZORVEN_SECRET_KEY"))
-	if raw == "" {
-		return nil
-	}
-	master, err := base64.StdEncoding.DecodeString(raw)
-	if err != nil || len(master) != 32 {
+	// Kodlama kurali pgstore ile ayni (standart/URL-safe/dolgusuz); dolu ama gecersiz
+	// deger baslangicta pgstore.CheckSecretKeyEnv ile zaten reddedilir.
+	master, err := pgstore.ParseSecretKey(get("ZORVEN_SECRET_KEY"))
+	if err != nil {
 		return nil
 	}
 	c, err := reqlog.NewCaptureCodec(deriveKey(master, keyPurposeCapture))
@@ -94,7 +85,8 @@ func setupCaptures(ctx context.Context, captures *reqlog.CaptureStore, st any, g
 			log.Warn("request_captures tablespace'e tasinamadi; mevcut konumda devam", "tablespace", cfg.Tablespace, "hata", err)
 		}
 	}
-	go run(ctx)
+	// Yakalama persister'i bellek ici kuyruk tutar: panikte kontrollu cikis (obs.GoFatal).
+	obs.GoFatal(ctx, log, "capture_persister", run)
 	log.Info("kalici istek govdesi yakalama etkin", "govde_tavan_bayt", cfg.MaxBody,
 		"kiraci_kota_bayt", cfg.TenantQuotaBytes, "global_tavan_bayt", cfg.GlobalLimitBytes)
 }

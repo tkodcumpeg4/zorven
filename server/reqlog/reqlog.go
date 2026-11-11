@@ -125,8 +125,44 @@ func New(capacity int) *Ring {
 	return &Ring{buf: make([]Entry, capacity)}
 }
 
+// sanitizeEntry, metin alanlarindaki kontrol karakterlerini (CR, LF, NUL...) yuzde
+// kodlamasina cevirir (A5 #13). Neden: yol ham saklaniyordu; %0d%0a iceren bir istek
+// request_logs satirini ikiye boluyor, panel/CSV gibi satir tabanli tuketicilerde
+// sahte kayit uretebiliyordu. Kacis (silme degil) ham degeri geri okunabilir tutar.
+func sanitizeEntry(e Entry) Entry {
+	e.Path = escapeControl(e.Path)
+	e.Method = escapeControl(e.Method)
+	e.Hostname = escapeControl(e.Hostname)
+	return e
+}
+
+func escapeControl(s string) string {
+	i := 0
+	for ; i < len(s); i++ {
+		if c := s[i]; c < 0x20 || c == 0x7f {
+			break
+		}
+	}
+	if i == len(s) {
+		return s // sicak yol: kontrol karakteri yok, tahsis yok
+	}
+	const hex = "0123456789ABCDEF"
+	b := make([]byte, 0, len(s)+8)
+	b = append(b, s[:i]...)
+	for ; i < len(s); i++ {
+		c := s[i]
+		if c < 0x20 || c == 0x7f {
+			b = append(b, '%', hex[c>>4], hex[c&0xf])
+			continue
+		}
+		b = append(b, c)
+	}
+	return string(b)
+}
+
 // Add, kaydi ekler ve uretilen ID'yi doner. En eski kayit sessizce dusurulur.
 func (r *Ring) Add(e Entry) Entry {
+	e = sanitizeEntry(e)
 	if e.ID == "" {
 		e.ID = NewID()
 	}

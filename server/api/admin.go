@@ -12,10 +12,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/tkodcumpeg4/zorven/server/auth"
 	"github.com/tkodcumpeg4/zorven/server/entitlements"
+	"github.com/tkodcumpeg4/zorven/server/obs"
 	"github.com/tkodcumpeg4/zorven/server/ratelimit"
 	"github.com/tkodcumpeg4/zorven/server/session"
 	"github.com/tkodcumpeg4/zorven/server/store"
@@ -192,6 +194,152 @@ type Middleware struct {
 	// PlatformDomain, Origin denetiminde uretim/gelistirme ayrimi icindir:
 	// uretim domaininde loopback Origin ve http Origin reddedilir (csrf.go).
 	PlatformDomain string
+
+	// FailLimiter, argon2 gerektiren BASARISIZ kimlik denemelerini (bilinmeyen
+	// token, yanlis sir) istemci IP'si basina sinirlar. Yalniz basarisizlik
+	// jeton harcar; basarili istekler etkilenmez. Kota bitince istek argon2
+	// calismadan 429 alir. nil ise varsayilan (failBurst / failRate) kurulur.
+	FailLimiter *ratelimit.Limiter
+	failOnce    sync.Once
+}
+
+// Basarisiz deneme siniri varsayilanlari: IP basina 20 deneme, sonra ~6 sn'de
+// bir. Gecerli token onbellekten gectiginden normal kullanim buna takilmaz.
+const (
+	failBurst = 20
+	failRate  = 1.0 / 6
+)
+
+func (m *Middleware) failLimiter() *ratelimit.Limiter {
+	m.failOnce.Do(func() {
+		if m.FailLimiter == nil {
+			m.FailLimiter = ratelimit.New(failRate, failBurst)
+		}
+	})
+	return m.FailLimiter
+}
+
+// rejectUnknown, depoda bulunmayan tokenID icin 401 yazar. Bilinmeyen tokenID
+// kesin basarisizliktir: kota argon2'den ONCE harcanir, kota bittiyse sahte
+// argon2 hic calismaz (429). Kota varken sahte dogrulama gecerli tokenID'li
+// yolla ayni maliyeti uretir (zamanlama esitlemesi).
+func (m *Middleware) rejectUnknown(w http.ResponseWriter, r *http.Request, kind, secret, code, msg string) {
+	if !m.noteAuthFail(r, kind, auth.ReasonUnknown) {
+		m.writeAuthLimited(w)
+		return
+	}
+	if errors.Is(auth.VerifyDummyContext(r.Context(), secret), auth.ErrBusy) {
+		m.writeAuthBusy(w, r, kind)
+		return
+	}
+	writeJSONError(w, http.StatusUnauthorized, code, msg)
+}
+
+// verifyKnown, kaydi depodan okunmus bir token'in sirrini dogrular; gecerliyse
+// true. false donerse yanit yazilmistir (401, 429 ya da 503).
+//
+// Sira onemli: once onbellek (argon2'siz), sonra IP basina basarisiz deneme
+// siniri, en son argon2. Boylece ayni IP'deki bir sel, yakinda dogrulanmis
+// gecerli istemciyi kilitlemez; onbellekte olmayan her deneme ise sinirdan gecer.
+func (m *Middleware) verifyKnown(w http.ResponseWriter, r *http.Request, kind, scope, secret, hash, code, msg string) bool {
+	if auth.CachedOK(scope, secret, hash) {
+		return true
+	}
+	if m.authBlocked(w, r, kind) {
+		return false
+	}
+	valid, err := auth.VerifyCached(r.Context(), scope, secret, hash)
+	if errors.Is(err, auth.ErrBusy) {
+		m.writeAuthBusy(w, r, kind)
+		return false
+	}
+	if err != nil || !valid {
+		if !m.noteAuthFail(r, kind, auth.ReasonInvalid) {
+			m.writeAuthLimited(w)
+			return false
+		}
+		writeJSONError(w, http.StatusUnauthorized, code, msg)
+		return false
+	}
+	return true
+}
+
+// authBlocked, IP'nin basarisiz deneme kotasi bittiyse 429 yazar ve true doner.
+// Jeton harcamaz; argon2'den ONCE cagrilir.
+func (m *Middleware) authBlocked(w http.ResponseWriter, r *http.Request, kind string) bool {
+	ip := clientIP(r)
+	if m.failLimiter().Remaining(ip) >= 1 {
+		return false
+	}
+	auth.ReportFailure(m.Log, kind, auth.ReasonRateLimited, ip)
+	m.writeAuthLimited(w)
+	return true
+}
+
+// noteAuthFail, argon2 gerektiren bir basarisizligi kaydeder (jeton harcar)
+// ve izini birakir. Kota zaten bittiyse false doner: cagiran argon2
+// calistirmadan 429 yazmalidir. Eszamanli bir seldeki fazla istekler de
+// boylece argon2'ye ulasamaz (Remaining kontrolu tek basina yarisa acikti).
+func (m *Middleware) noteAuthFail(r *http.Request, kind, reason string) bool {
+	ip := clientIP(r)
+	if !m.failLimiter().Allow(ip) {
+		auth.ReportFailure(m.Log, kind, auth.ReasonRateLimited, ip)
+		return false
+	}
+	auth.ReportFailure(m.Log, kind, reason, ip)
+	return true
+}
+
+func (m *Middleware) writeAuthLimited(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", strconv.Itoa(int(m.failLimiter().RetryAfter().Seconds())))
+	writeJSONError(w, http.StatusTooManyRequests, "rate_limited",
+		"cok fazla basarisiz kimlik dogrulama denemesi, lutfen biraz sonra tekrar deneyin")
+}
+
+// transientStatus, gecici kimlik dogrulama hatalarinin (depo kapali, argon2
+// kapisi dolu) durum kodu. Genelde 503. Ag oturumu ucunda 429: mevcut
+// istemciler (client/wgnet) 503'u "sunucu Zorven Net sunmuyor" diye KALICI
+// hata sayip duruyor; 429 + Retry-After ile geri cekilip yeniden denerler.
+func transientStatus(r *http.Request) int {
+	if r.URL.Path == netSessionPath {
+		return http.StatusTooManyRequests
+	}
+	return http.StatusServiceUnavailable
+}
+
+// writeStoreUnavailable, kimlik dogrulama sirasinda depo hatasini (DB kapali,
+// havuz zaman asimi) 401 yerine 503 olarak yazar: 401 istemciye "token
+// gecersiz" der ve bazi istemcileri kalici durdurur. Hata ornekli loglanir.
+func (m *Middleware) writeStoreUnavailable(w http.ResponseWriter, r *http.Request, kind string, err error) {
+	if r.Context().Err() == nil {
+		auth.ReportStoreError(m.Log, kind, clientIP(r), err)
+	}
+	w.Header().Set("Retry-After", "5")
+	writeJSONError(w, transientStatus(r), "store_unavailable",
+		"kimlik dogrulama su an yapilamiyor (depo erisilemez), lutfen tekrar deneyin")
+}
+
+// writeAuthBusy, argon2 kapisi doluyken (auth.ErrBusy) 503 yazar.
+func (m *Middleware) writeAuthBusy(w http.ResponseWriter, r *http.Request, kind string) {
+	auth.ReportFailure(m.Log, kind, auth.ReasonBusy, clientIP(r))
+	w.Header().Set("Retry-After", "2")
+	writeJSONError(w, transientStatus(r), "auth_busy",
+		"sunucu yogun, kimlik dogrulama yapilamadi; lutfen tekrar deneyin")
+}
+
+// entitlementDenied, CheckFeature hatasinin gercek bir plan reddi mi (403)
+// yoksa altyapi hatasi mi (503) oldugunu ayirir. Abonelik/plan kaydi yoksa
+// da ret sayilir (mevcut davranis); DB hatasi "planiniz desteklemiyor"
+// olarak raporlanmamali.
+//
+// Yalniz tip/sentinel bakilir: CheckFeature plan satiri yokken artik
+// *EntitlementError doner, GetPlan ise store.ErrNotFound (P4). Eskiden
+// "plan bulunamadi" METNI de eslesiyordu; metin degisirse ya da baska bir
+// hata ayni metni tasirsa siniflama sessizce kayardi.
+func entitlementDenied(err error) bool {
+	var ee *entitlements.EntitlementError
+	return errors.As(err, &ee) || errors.Is(err, store.ErrNotFound) ||
+		errors.Is(err, store.ErrTenantNotFound)
 }
 
 func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -199,12 +347,17 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
 
-	// Istek kimligi: yoksa uret, yankila (gozlemlenebilirlik + destek).
-	rid := r.Header.Get("X-Request-Id")
-	if rid == "" {
-		rid = newRequestID()
+	// Istek kimligi: ust katman (obs.InstrumentAPI) zaten yazdiysa ona dokunma;
+	// yoksa gelen deger yalniz ^[A-Za-z0-9._-]{1,64}$ ise korunur, degilse uretilir.
+	// Eskiden dogrulamasiz/sinirsiz yankilaniyordu (A5 #7). s.fail ve 5xx govdesi
+	// kimligi bu yanit basligindan okur.
+	if w.Header().Get(obs.HeaderRequestID) == "" {
+		rid := r.Header.Get(obs.HeaderRequestID)
+		if !obs.ValidRequestID(rid) {
+			rid = newRequestID()
+		}
+		w.Header().Set(obs.HeaderRequestID, rid)
 	}
-	w.Header().Set("X-Request-Id", rid)
 
 	if m.PublicPaths[r.URL.Path] {
 		// Public uclar da (health, auth/config, github login/callback, logout)
@@ -338,30 +491,42 @@ func (m *Middleware) serveAuthenticated(w http.ResponseWriter, r *http.Request) 
 
 		// 3a. Programatik REST API Tokeni kontrolu (zrv_api_...)
 		if m.Store != nil && (strings.HasPrefix(trimmed, auth.PrefixAPI) || strings.HasPrefix(trimmed, "zorven_api_")) {
+			const kind = auth.KindAPIToken
 			id, secret, err := auth.Split(trimmed)
 			if err != nil {
+				// Bicimsiz token argon2 calistirmaz (zamanlama esitlemesi gerekmez:
+				// bicim hicbir tokenID'nin varligini ele vermez); kota harcamaz.
+				auth.ReportFailure(m.Log, kind, auth.ReasonMalformed, clientIP(r))
 				writeJSONError(w, http.StatusUnauthorized, "invalid_token", "geçersiz api token biçimi")
 				return
 			}
 			tok, err := m.Store.GetAPITokenByTokenID(r.Context(), id)
 			if err != nil {
-				auth.VerifyDummy(secret)
-				writeJSONError(w, http.StatusUnauthorized, "invalid_token", "geçersiz veya iptal edilmiş api token")
+				if !errors.Is(err, store.ErrNotFound) {
+					m.writeStoreUnavailable(w, r, kind, err)
+					return
+				}
+				m.rejectUnknown(w, r, kind, secret, "invalid_token", "geçersiz veya iptal edilmiş api token")
 				return
 			}
 			if tok.ExpiresAt != nil && tok.ExpiresAt.Before(time.Now().UTC()) {
+				auth.ReportFailure(m.Log, kind, auth.ReasonExpired, clientIP(r))
 				writeJSONError(w, http.StatusUnauthorized, "token_expired", "api token geçerlilik süresi dolmuş")
 				return
 			}
-			valid, err := auth.Verify(secret, tok.TokenHash)
-			if err != nil || !valid {
-				writeJSONError(w, http.StatusUnauthorized, "invalid_token", "geçersiz api token")
+			// Kayit her istekte depodan okundu (iptal aninda gecerli); onbellek
+			// yalniz ayni sir+hash icin argon2 adimini atlar.
+			if !m.verifyKnown(w, r, kind, "api:"+tok.ID, secret, tok.TokenHash, "invalid_token", "geçersiz api token") {
 				return
 			}
 
 			// Plan yetki kontrolü: FeatureAPIAccess (Pro, Team, Enterprise)
 			if m.Entitlements != nil {
 				if err := m.Entitlements.CheckFeature(r.Context(), tok.TenantID, entitlements.FeatureAPIAccess); err != nil {
+					if !entitlementDenied(err) {
+						m.writeStoreUnavailable(w, r, kind, err)
+						return
+					}
 					writeJSONError(w, http.StatusForbidden, "feature_not_available",
 						"API erişim özelliği mevcut planınızda desteklenmiyor. Lütfen planınızı yükseltin.")
 					return
@@ -489,18 +654,23 @@ func (m *Middleware) serveAuthenticated(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	const kind = auth.KindAdminKey
 	id, secret, err := auth.Split(strings.TrimSpace(raw))
-	if err != nil || id != m.Key.TokenID {
-		// tokenID eslesmese bile sahte dogrulama yap: aksi halde gecerli
-		// tokenID yanit suresinden ayirt edilebilirdi.
-		auth.VerifyDummy(secret)
+	if err != nil {
+		// Bicimsiz deger (or. "Bearer garbage", suresi dolmus oturum token'i)
+		// argon2 calistirmaz: bicim hicbir tokenID'yi ele vermez. Onceden burada
+		// da sahte argon2 calisiyordu (64 eszamanli istekte 2.5 GB).
+		auth.ReportFailure(m.Log, kind, auth.ReasonMalformed, clientIP(r))
 		writeJSONError(w, http.StatusUnauthorized, "unauthorized", "gecersiz admin anahtari")
 		return
 	}
-
-	valid, err := auth.Verify(secret, m.Key.Hash)
-	if err != nil || !valid {
-		writeJSONError(w, http.StatusUnauthorized, "unauthorized", "gecersiz admin anahtari")
+	if id != m.Key.TokenID {
+		// tokenID eslesmese bile sahte dogrulama yap: aksi halde gecerli
+		// tokenID yanit suresinden ayirt edilebilirdi.
+		m.rejectUnknown(w, r, kind, secret, "unauthorized", "gecersiz admin anahtari")
+		return
+	}
+	if !m.verifyKnown(w, r, kind, "admin:"+id, secret, m.Key.Hash, "unauthorized", "gecersiz admin anahtari") {
 		return
 	}
 
@@ -652,19 +822,23 @@ func (m *Middleware) serveClientNetSession(w http.ResponseWriter, r *http.Reques
 			"cok fazla kimlik dogrulama denemesi")
 		return true
 	}
+	const kind = auth.KindClientToken
 	id, secret, err := auth.Split(token)
 	if err != nil {
+		auth.ReportFailure(m.Log, kind, auth.ReasonMalformed, clientIP(r))
 		writeJSONError(w, http.StatusUnauthorized, "invalid_token", "gecersiz istemci token'i")
 		return true
 	}
 	c, err := m.Store.GetClientByTokenID(r.Context(), id)
 	if err != nil {
-		auth.VerifyDummy(secret)
-		writeJSONError(w, http.StatusUnauthorized, "invalid_token", "gecersiz istemci token'i")
+		if !errors.Is(err, store.ErrNotFound) {
+			m.writeStoreUnavailable(w, r, kind, err)
+			return true
+		}
+		m.rejectUnknown(w, r, kind, secret, "invalid_token", "gecersiz istemci token'i")
 		return true
 	}
-	if ok, err := auth.Verify(secret, c.TokenHash); err != nil || !ok {
-		writeJSONError(w, http.StatusUnauthorized, "invalid_token", "gecersiz istemci token'i")
+	if !m.verifyKnown(w, r, kind, "client:"+c.ID, secret, c.TokenHash, "invalid_token", "gecersiz istemci token'i") {
 		return true
 	}
 	ctx := withTenant(r.Context(), c.TenantID)

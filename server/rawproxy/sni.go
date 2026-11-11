@@ -49,17 +49,33 @@ func NewDemuxListener(inner net.Listener, tlsConfig *tls.Config, lookup func(str
 	return d
 }
 
+// run, ic dinleyiciden kabul eder. Gecici hatalarda (EMFILE vb.) ussel bekleyip
+// devam eder (bkz. accept.go); YALNIZ dinleyici kapatildiysa cikar. Eskiden her
+// hatada demux'u kapatiyordu: http.Server.Serve ErrClosed alip donuyor ve
+// sunucu sureci kapaniyordu.
 func (d *DemuxListener) run() {
+	var bo acceptBackoff
 	for {
 		c, err := d.inner.Accept()
 		if err != nil {
 			select {
 			case <-d.closed:
+				return
 			default:
-				d.Close()
 			}
-			return
+			if isClosedErr(err) {
+				// Ic dinleyici disaridan kapatildi: demux'u da kapat ki Accept beklemesin.
+				d.Close()
+				return
+			}
+			wait := bo.next()
+			acceptLog.warn(d.log, "sni demux: baglanti kabul hatasi, yeniden denenecek", err, wait)
+			if !sleepOrDone(wait, d.closed) {
+				return
+			}
+			continue
 		}
+		bo.reset()
 		go d.handle(c)
 	}
 }

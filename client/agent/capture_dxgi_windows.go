@@ -10,6 +10,8 @@ import (
 	"syscall"
 	"time"
 	"unsafe"
+
+	"golang.org/x/sys/windows"
 )
 
 // Windows DXGI Desktop Duplication yakalama (COM, CGO'suz).
@@ -26,8 +28,8 @@ import (
 // Tum cagrilar yakalama goroutine'inden (OS thread'ine bagli) yapilir.
 
 var (
-	modD3D11Cap = syscall.NewLazyDLL("d3d11.dll")
-	modDXGICap  = syscall.NewLazyDLL("dxgi.dll")
+	modD3D11Cap = windows.NewLazySystemDLL("d3d11.dll")
+	modDXGICap  = windows.NewLazySystemDLL("dxgi.dll")
 
 	procD3D11CreateDevice  = modD3D11Cap.NewProc("D3D11CreateDevice")
 	procCreateDXGIFactory1 = modDXGICap.NewProc("CreateDXGIFactory1")

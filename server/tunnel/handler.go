@@ -15,12 +15,14 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/coder/websocket"
 	"github.com/tkodcumpeg4/zorven/server/abuse"
 	"github.com/tkodcumpeg4/zorven/server/auth"
 	"github.com/tkodcumpeg4/zorven/server/entitlements"
 	"github.com/tkodcumpeg4/zorven/server/netctl"
+	"github.com/tkodcumpeg4/zorven/server/obs"
 	"github.com/tkodcumpeg4/zorven/server/ratelimit"
 	"github.com/tkodcumpeg4/zorven/server/store"
 	"github.com/tkodcumpeg4/zorven/shared/protocol"
@@ -71,7 +73,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.AuthLimiter != nil {
 		ip := clientIP(r)
 		if !h.AuthLimiter.Allow(ip) {
-			h.Log.Warn("kimlik dogrulama hiz siniri asildi", "ip", ip)
+			// Ornekli: her 429 icin bir satir log seli uretiyordu.
+			auth.ReportFailure(h.Log, auth.KindAgent, auth.ReasonRateLimited, ip)
 			w.Header().Set("Retry-After", strconv.Itoa(int(h.AuthLimiter.RetryAfter().Seconds())))
 			http.Error(w, "cok fazla baglanti denemesi", http.StatusTooManyRequests)
 			return
@@ -109,6 +112,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.Log.Warn("websocket upgrade basarisiz", "hata", err)
 		return
 	}
+	// Oturum nasil biterse bitsin alttaki TCP kapatilir. Ajan kapanis cercevesi
+	// gondermeden giderse (TCP kesme, cokme, kill -9) Read EOF ile doner ama
+	// coder/websocket soketi kapatmaz: fd surec omru boyunca acik kaliyordu
+	// (O6: 30 dongude 19 -> 42 fd). Close/CloseNow sonrasi ikinci cagri zararsiz.
+	defer conn.CloseNow()
 
 	// Okuma sinirini acikca ayarla: varsayilan 32 KB, govde cercevelerimiz
 	// icin yetersiz kalir ve baglanti "message too big" ile kopar.
@@ -120,6 +128,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sess.UserID = client.UserID
 
 	sess.onDeviceUpdate = func(ctx context.Context, upd protocol.DeviceUpdate) {
+		// Hello ile ayni sinirlar: cihaz guncellemesi de DB'ye yazilir.
+		hh := protocol.Hello{Hostname: upd.Hostname, IPs: upd.IPs}
+		sanitizeHello(&hh)
+		upd.Hostname, upd.IPs = hh.Hostname, hh.IPs
 		if upd.Hostname == "" && len(upd.IPs) == 0 {
 			return
 		}
@@ -144,6 +156,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.Log.Info("eski oturum yeni baglantiyla degistirildi", "client", client.ID, "eski", old.ID, "yeni", sess.ID)
 		old.Evict("replaced by newer connection")
 	}
+	// Baglan/kop sayaclari (dalgalanma alarmi); devralmada da her oturum bir kez sayilir.
+	obs.AgentConnected()
+	defer obs.AgentDisconnected()
 	if h.OnClientConnected != nil {
 		h.OnClientConnected(ctx, client.ID)
 	}
@@ -185,6 +200,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // authenticate, Authorization: Bearer <token> basligini dogrular.
 func (h *Handler) authenticate(w http.ResponseWriter, r *http.Request) (store.Client, bool) {
+	const kind = auth.KindAgent
+	ip := clientIP(r)
 	raw, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if !ok || raw == "" {
 		http.Error(w, "Authorization: Bearer <token> gerekli", http.StatusUnauthorized)
@@ -193,40 +210,64 @@ func (h *Handler) authenticate(w http.ResponseWriter, r *http.Request) (store.Cl
 
 	tokenID, secret, err := auth.Split(strings.TrimSpace(raw))
 	if err != nil {
+		auth.ReportFailure(h.Log, kind, auth.ReasonMalformed, ip)
 		http.Error(w, "gecersiz token", http.StatusUnauthorized)
 		return store.Client{}, false
 	}
 
 	client, err := h.Store.GetClientByTokenID(r.Context(), tokenID)
 	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			// Veritabani hatasi "token gecersiz" DEGILDIR: 401 istemciyi kalici durdurur
+			// (FatalSessionError); 503 ile istemci geri cekilip yeniden dener. Hata
+			// tokenID'ye bagli olmadigindan sahte argon2 gerekmez. Log ornekli: DB
+			// kesintisinde her ajan denemesi bir ERROR satiri uretiyordu.
+			auth.ReportStoreError(h.Log, kind, ip, err)
+			w.Header().Set("Retry-After", "5")
+			http.Error(w, "gecici hata, tekrar deneyin", http.StatusServiceUnavailable)
+			return store.Client{}, false
+		}
 		// ZAMANLAMA SIZINTISI ONLEMI: kayit bulunamadiginda hemen donersek,
 		// gecerli bir tokenID ile gecersizi yanit suresinden ayirt etmek mumkun olur
 		// (gecerlide argon2 calisir, ~10ms; gecersizde 0ms). Sahte bir dogrulama
-		// yaparak iki yolun maliyetini esitliyoruz.
-		auth.VerifyDummy(secret)
-		if !errors.Is(err, store.ErrNotFound) {
-			// Veritabani hatasi "token gecersiz" DEGILDIR: 401 istemciyi kalici durdurur
-			// (FatalSessionError); 503 ile istemci geri cekilip yeniden dener.
-			h.Log.Error("istemci sorgulanamadi", "hata", err)
-			w.Header().Set("Retry-After", "5")
-			http.Error(w, "gecici hata, tekrar deneyin", http.StatusServiceUnavailable)
+		// yaparak iki yolun maliyetini esitliyoruz. Esitlik dolu kapida da korunur:
+		// iki yol da 503 doner.
+		auth.ReportFailure(h.Log, kind, auth.ReasonUnknown, ip)
+		if errors.Is(auth.VerifyDummyContext(r.Context(), secret), auth.ErrBusy) {
+			writeAgentBusy(w)
 			return store.Client{}, false
 		}
 		http.Error(w, "gecersiz token", http.StatusUnauthorized)
 		return store.Client{}, false
 	}
 
-	valid, err := auth.Verify(secret, client.TokenHash)
+	// IP basina siniri (AuthLimiter, ServeHTTP basinda) farkli IP'lerle asan bir
+	// sel argon2 kapisinda durur: tepe bellek kapasite x 32 MB. Toplu yeniden
+	// baglanmada (sunucu restart) dolu kapi 503 doner; ajan geri cekilip dener.
+	valid, err := auth.VerifyCached(r.Context(), "agent:"+client.ID, secret, client.TokenHash)
+	if errors.Is(err, auth.ErrBusy) {
+		auth.ReportFailure(h.Log, kind, auth.ReasonBusy, ip)
+		writeAgentBusy(w)
+		return store.Client{}, false
+	}
 	if err != nil {
 		h.Log.Error("token dogrulanamadi", "client", client.ID, "hata", err)
 		http.Error(w, "gecersiz token", http.StatusUnauthorized)
 		return store.Client{}, false
 	}
 	if !valid {
+		auth.ReportFailure(h.Log, kind, auth.ReasonInvalid, ip)
 		http.Error(w, "gecersiz token", http.StatusUnauthorized)
 		return store.Client{}, false
 	}
 	return client, true
+}
+
+// writeAgentBusy, argon2 kapisi doluyken 503 yazar. 401 degil: ajan 401'i
+// kalici hata sayar; 503'te geri cekilip yeniden baglanir.
+func writeAgentBusy(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", "5")
+	http.Error(w, "sunucu yogun, tekrar deneyin", http.StatusServiceUnavailable)
 }
 
 // handshake, hello mesajini bekler ve hello_ack ile yanit verir.
@@ -254,6 +295,7 @@ func (h *Handler) handshake(ctx context.Context, s *Session) error {
 	if err := json.Unmarshal(data, &hello); err != nil {
 		return err
 	}
+	sanitizeHello(&hello)
 	// ClientVersion = ikilinin GERCEK surumu (panelde gosterilir); protokol
 	// uyumlulugu X-Tunnel-Client-Version basligiyla ayri denetlenir.
 	s.Version, s.Platform = hello.ClientVersion, hello.Platform
@@ -381,11 +423,26 @@ func (h *Handler) handshake(ctx context.Context, s *Session) error {
 		}
 		if !found {
 			canCreate := true
+			// Plan limiti: say + ekle bolumu kiraci basina kilitli (O1). API yolu
+			// zaten kilitliydi; ajan el sikismasi kilitsiz oldugu icin ayni kiracinin
+			// paralel baglanan N cihazi limiti asabiliyordu. Kilit yalniz denetim +
+			// ekleme icin tutulur; ad ekleme ve yonlendirme tazeleme disarida.
+			unlockQuota := func() {}
 			if h.Entitlements != nil {
-				if err := h.Entitlements.CanCreateTunnel(ctx, s.TenantID); err != nil {
-					h.Log.Warn("otomatik tunel olusturulamadi (kota asildi)", "tenant", s.TenantID, "client", s.ClientID, "hata", err)
+				unlock, lerr := h.Entitlements.LockQuota(ctx, s.TenantID, entitlements.QuotaTunnels)
+				if lerr != nil {
+					h.Log.Warn("otomatik tunel olusturulamadi (kota kilidi alinamadi)", "tenant", s.TenantID, "client", s.ClientID, "hata", lerr)
 					canCreate = false
+				} else {
+					unlockQuota = unlock
+					if err := h.Entitlements.CanCreateTunnel(ctx, s.TenantID); err != nil {
+						h.Log.Warn("otomatik tunel olusturulamadi (kota asildi)", "tenant", s.TenantID, "client", s.ClientID, "hata", err)
+						canCreate = false
+					}
 				}
+			}
+			if !canCreate {
+				unlockQuota()
 			}
 			if canCreate {
 				var newTun store.Tunnel
@@ -396,6 +453,7 @@ func (h *Handler) handshake(ctx context.Context, s *Session) error {
 				} else {
 					newTun, err = h.Store.CreateTunnel(ctx, s.TenantID, s.ClientID, reqTarget)
 				}
+				unlockQuota()
 				if err != nil {
 					h.Log.Warn("otomatik tunel acilamadi", "hata", err)
 				} else {
@@ -477,6 +535,69 @@ func (h *Handler) handshake(ctx context.Context, s *Session) error {
 		Features:           enabled,
 		Settings:           settings,
 	}, protocol.TypeHelloAck)
+}
+
+// Hello alan sinirlari (A4 #11). Onceden 500 000 karakterlik client_version
+// DB'ye yaziliyor, gecersiz UTF-8 platform kabul ediliyordu. Gercek degerler
+// bu sinirlarin cok altinda (surum "0.3.7", platform "windows/amd64");
+// asiri uzun deger REDDEDILMEZ, kesilir: bozuk/eski bir istemci baglanmaya
+// devam eder, yalniz panelde/DB'de kisaltilmis gorunur.
+const (
+	maxHelloShort    = 64  // client_version, platform, protocol_version, app_kind
+	maxHelloHostname = 255 // DNS ad siniri
+	maxHelloIP       = 64  // IPv6 + bolge kimligi icin yeterli
+	maxHelloIPs      = 64
+	maxHelloPrevNode = 128
+	maxHelloTarget   = 2048
+	maxHelloFeatures = 128
+)
+
+// cleanHelloField, gecersiz UTF-8 dizilerini ve kontrol karakterlerini atar
+// (log/panel enjeksiyonu), sonra rune sinirinda en fazla max bayta keser.
+func cleanHelloField(s string, max int) string {
+	if s == "" {
+		return s
+	}
+	s = strings.ToValidUTF8(s, "")
+	s = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) {
+			return -1
+		}
+		return r
+	}, s)
+	if len(s) <= max {
+		return s
+	}
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
+}
+
+// sanitizeHello, istemciden gelen ve saklanan/loglanan hello alanlarini sinirlar.
+func sanitizeHello(h *protocol.Hello) {
+	h.ClientVersion = cleanHelloField(h.ClientVersion, maxHelloShort)
+	h.Platform = cleanHelloField(h.Platform, maxHelloShort)
+	h.ProtocolVersion = cleanHelloField(h.ProtocolVersion, maxHelloShort)
+	h.AppKind = cleanHelloField(h.AppKind, maxHelloShort)
+	h.Hostname = cleanHelloField(h.Hostname, maxHelloHostname)
+	h.PrevNode = cleanHelloField(h.PrevNode, maxHelloPrevNode)
+	h.RequestedTarget = cleanHelloField(h.RequestedTarget, maxHelloTarget)
+	h.DefaultShell = cleanHelloField(h.DefaultShell, maxHelloShort)
+	if len(h.IPs) > maxHelloIPs {
+		h.IPs = h.IPs[:maxHelloIPs]
+	}
+	ips := h.IPs[:0]
+	for _, ip := range h.IPs {
+		if ip = cleanHelloField(ip, maxHelloIP); ip != "" {
+			ips = append(ips, ip)
+		}
+	}
+	h.IPs = ips
+	if len(h.Features) > maxHelloFeatures {
+		h.Features = h.Features[:maxHelloFeatures]
+	}
 }
 
 // versionCompatible, MVP'de yalnizca major.minor esitligine bakar.

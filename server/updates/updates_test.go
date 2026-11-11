@@ -506,3 +506,15 @@ func TestPickZHContent(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestSeoTitle(t *testing.T) {
+	short := "Zorven 0.3.7: yeniden bağlanma düzeltmesi"
+	if got := seoTitle(short); got != short {
+		t.Fatalf("kisa baslik degismemeli: %q", got)
+	}
+	long := "Zorven 0.3.4: tünellerde gRPC, yeni Windows kurulumu ve çok düğümlü altyapı hazırlığı"
+	got := seoTitle(long)
+	if n := len([]rune(got)); n > 58 || !strings.HasSuffix(got, "…") || strings.HasSuffix(strings.TrimSuffix(got, "…"), " ") {
+		t.Fatalf("uzun baslik kelime sinirinda kisalmali: %q (%d)", got, n)
+	}
+}

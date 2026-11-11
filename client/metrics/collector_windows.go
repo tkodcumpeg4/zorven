@@ -10,10 +10,12 @@ import (
 	"unsafe"
 
 	"github.com/tkodcumpeg4/zorven/shared/protocol"
+
+	"golang.org/x/sys/windows"
 )
 
 var (
-	modkernel32            = syscall.NewLazyDLL("kernel32.dll")
+	modkernel32            = windows.NewLazySystemDLL("kernel32.dll")
 	procGetSystemTimes     = modkernel32.NewProc("GetSystemTimes")
 	procGlobalMemoryStatus = modkernel32.NewProc("GlobalMemoryStatusEx")
 	procGetDiskFreeSpace   = modkernel32.NewProc("GetDiskFreeSpaceExW")

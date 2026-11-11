@@ -70,6 +70,13 @@ func (a *activeShare) track(c net.Conn, ip netip.Addr) bool {
 	return true
 }
 
+// isClosed, paylasim durduruldu mu (closeConns conns'u nil yapar).
+func (a *activeShare) isClosed() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.conns == nil
+}
+
 func (a *activeShare) untrack(c net.Conn) {
 	a.mu.Lock()
 	delete(a.conns, c)
@@ -175,11 +182,23 @@ func remoteIP(addr net.Addr) (netip.Addr, bool) {
 }
 
 func (s *shareServer) serveTCP(a *activeShare, ln net.Listener) {
+	var retry acceptRetry
 	for {
 		c, err := ln.Accept()
 		if err != nil {
-			return
+			// Paylasim durduruldu (stop: ln.Close + closeConns) ya da dinleyici
+			// kapali: cik. gVisor dinleyicisi kapaninca net.ErrClosed degil kendi
+			// iptal hatasini doner; bu yuzden paylasimin durumuna da bakilir.
+			if isClosedErr(err) || a.isClosed() {
+				return
+			}
+			time.Sleep(retry.next(s.log, "paylasim:"+a.out.Name, err))
+			if a.isClosed() {
+				return
+			}
+			continue
 		}
+		retry.reset()
 		go func() {
 			ip, ok := remoteIP(c.RemoteAddr())
 			if !ok || !a.allowed(ip) {

@@ -34,9 +34,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Changed
 - Remote screen control (input, clipboard, files, shortcuts) is limited to tenant owners and admins; members can only watch. The decision is made when the screen ticket is issued.
 - Panel session cookie uses the `__Host-` prefix over HTTPS and a conflicting duplicate cookie is treated as signed-out (cookie-tossing protection).
-- Go toolchain 1.27.3 (`go 1.26`).
+- Go toolchain 1.27.4 (`go 1.26`), golang.org/x/net and x/crypto updated; server image `golang:1.27.4-alpine`.
+- Tunnel data path: per-stream flow-control credit (agent and server), request credit for HTTP exchanges, batched agent writes and a bounded stream queue; slow visitors no longer stall other streams on the same agent connection. Tunnel requests carry `X-Zorven-Request-Id`.
+- Authentication: concurrency gate and per-IP failure quota for argon2 checks, short-lived verification caches (API tokens, Basic access, mail app passwords).
+- Graceful shutdown: in-flight requests drain before background jobs stop and final log batches are flushed before the database pool closes; `/readyz` returns 503 while draining.
+- Observability: API metrics with request IDs and panic recovery, `--log-format json` (`ZORVEN_LOG_FORMAT`), goroutine supervisors (restart or controlled exit on panic), process and event metrics, startup memory-limit log; validated numeric env vars.
+- Compose: log rotation, `no-new-privileges`, dropped capabilities, memory limits (`GOMEMLIMIT`, `ZORVEN_MEM_LIMIT`), health checks, 30 s stop grace period.
+- Dashboard host serves `robots.txt` (disallow all) and `X-Robots-Tag: noindex` on HTML.
 
 ### Fixed
+- An invalid `ZORVEN_SECRET_KEY` now stops startup instead of silently storing secrets in plain text; URL-safe keys are normalized.
+- `null` JSON bodies are rejected with 400 (a `null` access setting reset it, a `null` token request created a full-scope token).
+- Request logs survive short database outages (bounded buffer, retries, dropped counter); control characters in logged path/host/method are escaped.
+- Expired ephemeral tunnels return 410 immediately; a tenant can reuse its own free scoped name; traffic-policy and policy headers/redirects are validated on save (422).
+- Agent: aborted response bodies end with an error frame, local dial timeout, reconnect backoff with jitter after a clean server close; transient `Accept` errors (EMFILE) no longer stop listeners.
 - Cancelling a browser/visitor request no longer drops the whole agent WebSocket connection (server and client, with regression tests).
 - CSP blocked blob: images and media, which left MJPEG/H.264 screen sharing black.
 - Markdown links with nested parentheses; a rejected link no longer leaks characters into the output.

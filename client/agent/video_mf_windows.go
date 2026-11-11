@@ -112,8 +112,8 @@ const (
 )
 
 var (
-	modMfplat = syscall.NewLazyDLL("mfplat.dll")
-	modOle32  = syscall.NewLazyDLL("ole32.dll")
+	modMfplat = windows.NewLazySystemDLL("mfplat.dll")
+	modOle32  = windows.NewLazySystemDLL("ole32.dll")
 
 	procMFStartup            = modMfplat.NewProc("MFStartup")
 	procMFCreateMediaType    = modMfplat.NewProc("MFCreateMediaType")
@@ -191,7 +191,7 @@ func (o *mfObj) release() {
 }
 
 //go:uintptrescapes
-func mfDLL(p *syscall.LazyProc, args ...uintptr) uintptr {
+func mfDLL(p *windows.LazyProc, args ...uintptr) uintptr {
 	r, _, _ := p.Call(args...)
 	return r
 }

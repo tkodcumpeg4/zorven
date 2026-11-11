@@ -21,7 +21,7 @@ func TestPoolConfigDefaults(t *testing.T) {
 		t.Fatalf("connect timeout = %v", cfg.ConnConfig.ConnectTimeout)
 	}
 	rp := cfg.ConnConfig.RuntimeParams
-	if rp["statement_timeout"] != "15000" || rp["idle_in_transaction_session_timeout"] != "30000" || rp["application_name"] != "zorven" {
+	if rp["statement_timeout"] != "15000" || rp["idle_in_transaction_session_timeout"] != "30000" || rp["application_name"] != "zorven" || rp["jit"] != "off" {
 		t.Fatalf("runtime params = %v", rp)
 	}
 }
@@ -41,6 +41,12 @@ func TestPoolConfigEnv(t *testing.T) {
 	if cfg.MaxConns != 20 || cfg.ConnConfig.RuntimeParams["statement_timeout"] != "15000" {
 		t.Fatalf("varsayilana dusmedi: %d %v", cfg.MaxConns, cfg.ConnConfig.RuntimeParams)
 	}
+	// Aralik disi (ust sinir) degerler de varsayilana duser.
+	env = map[string]string{"ZORVEN_DB_MAX_CONNS": "1000000", "ZORVEN_DB_STATEMENT_TIMEOUT_MS": "99999999"}
+	cfg, _ = poolConfig("postgres://u:p@localhost/db", func(k string) string { return env[k] })
+	if cfg.MaxConns != 20 || cfg.ConnConfig.RuntimeParams["statement_timeout"] != "15000" {
+		t.Fatalf("ust sinir uygulanmadi: %d %v", cfg.MaxConns, cfg.ConnConfig.RuntimeParams)
+	}
 	// MaxConns 1 iken MinConns tavanlanir.
 	env = map[string]string{"ZORVEN_DB_MAX_CONNS": "1"}
 	cfg, _ = poolConfig("postgres://u:p@localhost/db", func(k string) string { return env[k] })
@@ -58,6 +64,10 @@ func TestStatementTimeoutEffective(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	t.Cleanup(func() { s.Close() })
+	var jit string
+	if err := s.pool.QueryRow(ctx, `SHOW jit`).Scan(&jit); err != nil || jit != "off" {
+		t.Fatalf("havuz oturumunda jit=off olmali: %q %v", jit, err)
+	}
 	if _, err := s.pool.Exec(ctx, `SELECT pg_sleep(2)`); err == nil {
 		t.Fatal("statement_timeout calismadi: pg_sleep(2) hata vermeliydi")
 	}

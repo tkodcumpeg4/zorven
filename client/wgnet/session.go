@@ -2,13 +2,16 @@ package wgnet
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +36,84 @@ type SessionConfig struct {
 type FatalSessionError struct{ Msg string }
 
 func (e *FatalSessionError) Error() string { return e.Msg }
+
+// TransientSessionError: sunucu oturumu GECICI olarak reddetti (429 hiz siniri,
+// 503 depo/kimlik dogrulama kapisi dolu ya da sunucu yeniden basliyor).
+// Eskiden 503 kalici sayiliyordu ve `zorven access` sunucunun kisa bir
+// kesintisinde tamamen duruyordu. RetryAfter > 0 ise sunucunun istedigi
+// sureden once yeniden denenmez.
+type TransientSessionError struct {
+	Status     int
+	RetryAfter time.Duration
+}
+
+func (e *TransientSessionError) Error() string {
+	return fmt.Sprintf("sunucu ag oturumunu gecici olarak reddetti (%d)", e.Status)
+}
+
+// maxRetryAfter, sunucunun Retry-After degerine uyulacak ust sinir (bozuk ya da
+// asiri buyuk degerle istemci saatlerce beklemesin).
+const maxRetryAfter = 5 * time.Minute
+
+// parseRetryAfter, Retry-After basligini (saniye ya da HTTP tarihi) okur.
+func parseRetryAfter(h http.Header, now time.Time) time.Duration {
+	v := strings.TrimSpace(h.Get("Retry-After"))
+	if v == "" {
+		return 0
+	}
+	var d time.Duration
+	if secs, err := strconv.Atoi(v); err == nil {
+		d = time.Duration(secs) * time.Second
+	} else if t, err := http.ParseTime(v); err == nil {
+		d = t.Sub(now)
+	}
+	if d < 0 {
+		return 0
+	}
+	return min(d, maxRetryAfter)
+}
+
+// sessionRejectCode, hata yanitinin JSON govdesindeki kodu okur
+// ({"error":{"code":...}}); okunamazsa "". coder/websocket hata yanitinda
+// govdenin ilk 1024 baytini okumaya izin verir.
+func sessionRejectCode(resp *http.Response) string {
+	if resp == nil || resp.Body == nil {
+		return ""
+	}
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+	var e struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(b, &e) != nil {
+		return ""
+	}
+	return e.Error.Code
+}
+
+// classifyDialStatus, el sikisma reddini kalici/gecici hataya cevirir; nil:
+// durum koduna ozel bir anlam yok (genel baglanti hatasi).
+func classifyDialStatus(resp *http.Response) error {
+	switch resp.StatusCode {
+	case http.StatusUnauthorized:
+		return &FatalSessionError{"token gecersiz (401): API token veya cihazin istemci token'i gecerli olmali"}
+	case http.StatusForbidden:
+		return &FatalSessionError{"ag oturumu reddedildi (403): token kullaniciya bagli ve net:read kapsamli olmali"}
+	case http.StatusPaymentRequired:
+		return &FatalSessionError{fmt.Sprintf("sunucu Zorven Net'i sunmuyor (%d)", resp.StatusCode)}
+	case http.StatusServiceUnavailable:
+		// Sunucu Net'i hic sunmuyorsa (net_disabled) yeniden denemek anlamsiz;
+		// diger 503'ler (depo kapali, kapi dolu, ters vekil yeniden basliyor) gecici.
+		if sessionRejectCode(resp) == "net_disabled" {
+			return &FatalSessionError{fmt.Sprintf("sunucu Zorven Net'i sunmuyor (%d)", resp.StatusCode)}
+		}
+		return &TransientSessionError{Status: resp.StatusCode, RetryAfter: parseRetryAfter(resp.Header, time.Now())}
+	case http.StatusTooManyRequests:
+		return &TransientSessionError{Status: resp.StatusCode, RetryAfter: parseRetryAfter(resp.Header, time.Now())}
+	}
+	return nil
+}
 
 type wsTransport struct {
 	c  *websocket.Conn
@@ -105,13 +186,8 @@ func RunSession(ctx context.Context, cfg SessionConfig, onReady func(*Node)) err
 	dcancel()
 	if err != nil {
 		if resp != nil {
-			switch resp.StatusCode {
-			case http.StatusUnauthorized:
-				return &FatalSessionError{"token gecersiz (401): API token veya cihazin istemci token'i gecerli olmali"}
-			case http.StatusForbidden:
-				return &FatalSessionError{"ag oturumu reddedildi (403): token kullaniciya bagli ve net:read kapsamli olmali"}
-			case http.StatusServiceUnavailable, http.StatusPaymentRequired:
-				return &FatalSessionError{fmt.Sprintf("sunucu Zorven Net'i sunmuyor (%d)", resp.StatusCode)}
+			if cerr := classifyDialStatus(resp); cerr != nil {
+				return cerr
 			}
 		}
 		return fmt.Errorf("baglanilamadi: %w", err)
@@ -212,13 +288,20 @@ func (a *Accessor) Run(ctx context.Context) error {
 		if time.Since(started) > 30*time.Second {
 			backoff = time.Second
 		}
+		wait := backoff + time.Duration(rand.Int64N(int64(backoff/4)+1))
+		var tr *TransientSessionError
+		if errors.As(err, &tr) && tr.RetryAfter > wait {
+			// Sunucunun istedigi sureye uy; ayni anda reddedilen istemciler ayni
+			// anda geri donmesin diye ustune kucuk jitter.
+			wait = tr.RetryAfter + time.Duration(rand.Int64N(int64(tr.RetryAfter/10)+1))
+		}
 		if a.Cfg.Log != nil {
-			a.Cfg.Log.Warn("ag oturumu koptu, yeniden denenecek", "hata", err, "bekleme", backoff)
+			a.Cfg.Log.Warn("ag oturumu koptu, yeniden denenecek", "hata", err, "bekleme", wait.Round(time.Millisecond))
 		}
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-time.After(backoff + time.Duration(rand.Int64N(int64(backoff/4)+1))):
+		case <-time.After(wait):
 		}
 		if backoff < 30*time.Second {
 			backoff *= 2

@@ -68,12 +68,56 @@ func realPostureEnv(version string, isService bool) postureEnv {
 func runPostureCmd(ctx context.Context, name string, args ...string) (string, error) {
 	cctx, cancel := context.WithTimeout(ctx, postureCmdTimeout)
 	defer cancel()
-	cmd := hideConsole(exec.CommandContext(cctx, name, args...))
+	cmd := hideConsole(exec.CommandContext(cctx, postureBin(name, runtime.GOOS, os.Getenv("SystemRoot"), fileExists), args...))
 	cmd.Env = append(os.Environ(), "LC_ALL=C", "LANG=C")
 	var buf limitedBuffer
 	cmd.Stdout, cmd.Stderr = &buf, &buf
 	err := cmd.Run()
 	return buf.String(), err
+}
+
+// postureBin, durus komutunun yolunu bilinen sistem dizinlerinde cozer; yoksa
+// adi oldugu gibi doner (PATH aramasi son care).
+//
+// NEDEN (A5 #17): komutlar PATH'ten araniyordu. Servis olarak (root/SYSTEM)
+// calisan ajanin ortamindaki PATH'e kullanici yazilabilir bir dizin girmisse
+// (or. ~/.local/bin, ayarlanmis servis ortami) ayni adli bir ikili ajanin
+// yetkisiyle calisirdi; ustelik rapor sahte "guvenli" degerler alirdi.
+// Mutlak yol icerenler (socketfilterfw) degismez.
+func postureBin(name, goos, systemRoot string, exists func(string) bool) string {
+	if strings.ContainsAny(name, `/\`) {
+		return name
+	}
+	var dirs []string
+	if goos == "windows" {
+		if systemRoot == "" {
+			systemRoot = `C:\Windows`
+		}
+		sys32 := systemRoot + `\System32`
+		dirs = []string{sys32, sys32 + `\WindowsPowerShell\v1.0`}
+		if !strings.HasSuffix(strings.ToLower(name), ".exe") {
+			name += ".exe"
+		}
+		for _, d := range dirs {
+			if p := d + `\` + name; exists(p) {
+				return p
+			}
+		}
+		return name
+	}
+	dirs = []string{"/usr/bin", "/bin", "/usr/sbin", "/sbin"}
+	for _, d := range dirs {
+		if p := d + "/" + name; exists(p) {
+			return p
+		}
+	}
+	return name
+}
+
+// fileExists, yol duzenli bir dosya mi.
+func fileExists(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && fi.Mode().IsRegular()
 }
 
 type limitedBuffer struct{ b bytes.Buffer }

@@ -122,6 +122,12 @@ func (f *tunCreateStore) AttachHostname(_ context.Context, _, hostnameID, tunnel
 	return nil
 }
 
+// GetHostnameByFQDN: alinmis adlar baska kiraciya/tunele ait sayilir (bos ad yeniden
+// kullanimi, A4 #15, bu sahtede tetiklenmez; Postgres'li testte ayrica denenir).
+func (f *tunCreateStore) GetHostnameByFQDN(context.Context, string) (store.Hostname, error) {
+	return store.Hostname{}, store.ErrNotFound
+}
+
 func (f *tunCreateStore) tunnelCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()

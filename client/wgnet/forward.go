@@ -3,6 +3,7 @@ package wgnet
 import (
 	"context"
 	"io"
+	"log/slog"
 	"net"
 	"sync"
 	"time"
@@ -36,11 +37,23 @@ type DialFunc func(ctx context.Context) (net.Conn, error)
 // ServeTCP, yerel dinleyiciye gelen her baglantiyi dial ile ic aga koprular.
 func ServeTCP(ctx context.Context, ln net.Listener, dial DialFunc, onErr func(error)) {
 	go func() { <-ctx.Done(); ln.Close() }()
+	var retry acceptRetry
 	for {
 		c, err := ln.Accept()
 		if err != nil {
-			return
+			// Yalniz kapatilmis dinleyicide (ctx bitti) cik; gecici hatada
+			// (EMFILE vb.) ussel bekleyip devam et (bkz. acceptRetry).
+			if ctx.Err() != nil || isClosedErr(err) {
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(retry.next(slog.Default(), ln.Addr().String(), err)):
+			}
+			continue
 		}
+		retry.reset()
 		go func() {
 			dctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 			r, err := dial(dctx)

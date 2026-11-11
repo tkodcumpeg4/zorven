@@ -129,6 +129,8 @@ type Handler struct {
 	// rejectLim, ingress'in proxy'lemeden reddettigi isteklerin loglanmasini
 	// tunel basina sinirlar (tarama/bot seli request_logs'u doldurmasin).
 	rejectLim rejectLimiter
+	// warnSamp, ret basina WARN satirlarini tunel+neden basina ornekler (O5).
+	warnSamp warnSampler
 
 	// Bot korumasi (B1-B3). BotKey: main.go'nun ziyaretci sirrindan HKDF ile
 	// turettigi ana anahtar (bos ise surece ozel rastgele anahtar). TLSFP: el
@@ -175,7 +177,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Gecici tunelin suresi doldu (saklama penceresi): 410 Gone, net mesaj.
-	if tun.Expired {
+	// ExpiresAt: supurucunun isaretlemesini beklemeden bitis aninda kapat (A4 #13).
+	if tun.Expired || (tun.ExpiresAt != nil && !time.Now().Before(*tun.ExpiresAt)) {
 		writeError(w, r, http.StatusGone, protocol.CodeTunnelExpired,
 			"Bu gecici tunelin suresi doldu.")
 		return
@@ -219,7 +222,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		allowed, err := h.IPFilter.CheckAllowed(r.Context(), tun.TenantID, tun.TunnelID, ip)
 		// Hata (kural varken cozumlenemeyen istemci IP'si) = RET (fail-closed).
 		if err != nil || !allowed {
-			h.Log.Warn("IP izin listesi tarafindan engellendi",
+			h.sampledWarn(RejectIPForbidden, tun.TunnelID, "IP izin listesi tarafindan engellendi",
 				"ip", ip, "tunel", tun.TunnelID, "tenant", tun.TenantID, "hostname", tun.FQDN)
 			writeError(w, r, http.StatusForbidden, protocol.CodeIPForbidden,
 				"Erişim engellendi: IP adresiniz ("+ip+") bu tünelin izin listesinde bulunmuyor.")
@@ -347,7 +350,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.logReject(tun, r, http.StatusForbidden, RejectMTLSRequired, started)
 		case pol.wafBlocked:
 			// Hangi kuralin eslestigi YALNIZCA logda; yanit bilgi sizdirmaz.
-			h.Log.Warn("waf tarafindan engellendi",
+			h.sampledWarn(RejectWAFBlocked, tun.TunnelID, "waf tarafindan engellendi",
 				"tunel", tun.TunnelID, "hostname", tun.FQDN,
 				"ip", clientIP(r), "yol", r.URL.Path, "kural", pol.wafRule)
 			writeError(w, r, http.StatusForbidden, protocol.CodeAccessDenied,
@@ -358,7 +361,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if st == 0 {
 				st = http.StatusUnauthorized
 			}
-			h.Log.Warn("webhook imza dogrulamasi basarisiz",
+			h.sampledWarn(RejectWebhookFailed, tun.TunnelID, "webhook imza dogrulamasi basarisiz",
 				"tunel", tun.TunnelID, "hostname", tun.FQDN, "durum", st)
 			writeError(w, r, st, protocol.CodeAccessDenied, pol.webhookMessage)
 			h.logReject(tun, r, st, RejectWebhookFailed, started)
@@ -385,7 +388,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Hiz siniri tunel cozumlendikten hemen sonra, istemciye herhangi bir
 	// is gonderilmeden once uygulanir.
 	if h.ReqLimiter != nil && !h.ReqLimiter.Allow(tun.TunnelID) {
-		h.Log.Warn("tunel hiz siniri asildi", "tunel", tun.TunnelID, "hostname", tun.FQDN)
+		h.sampledWarn(RejectRateLimited, tun.TunnelID, "tunel hiz siniri asildi", "tunel", tun.TunnelID, "hostname", tun.FQDN)
 		w.Header().Set("Retry-After", strconv.Itoa(int(h.ReqLimiter.RetryAfter().Seconds())))
 		writeError(w, r, http.StatusTooManyRequests, protocol.CodeRateLimited,
 			"Bu tunel icin istek hizi siniri asildi.")
@@ -455,6 +458,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.proxy(w, r, sess, tun.TunnelID, tun.TenantID, runtimeState, tp, mc)
 }
 
+// sampledWarn, ret basina WARN'i (neden, tunel) basina saniyede bir satira
+// indirir; arada bastirilan olay sayisi "bastirilan" alaniyla eklenir (O5).
+func (h *Handler) sampledWarn(reason, tunnelID, msg string, args ...any) {
+	ok, n := h.warnSamp.allow(reason, tunnelID)
+	if !ok {
+		return
+	}
+	if n > 0 {
+		args = append(args, "bastirilan", n)
+	}
+	h.Log.Warn(msg, args...)
+}
+
 // enforceAccess, tunelin erişim denetimi politikasını uygular.
 // true = geç; false = reddedildi (yanıt zaten yazıldı). Politika kapalı/none ise
 // her zaman true (geriye uyumlu — tünel herkese açık).
@@ -474,6 +490,10 @@ func (h *Handler) enforceAccess(w http.ResponseWriter, r *http.Request, tun stor
 func (h *Handler) proxy(w http.ResponseWriter, r *http.Request, sess *tunnel.Session, tunnelID, tenantID string, runtimeState *bandwidth.TenantRuntimeState, tp *trafficPolicy, mc *mcpReq) {
 	ctx := r.Context()
 	hasBody := r.Body != nil && r.ContentLength != 0
+	// Ziyaretci baglantisinin deadline denetimi (O11 govde okuma, yanit yazma
+	// tikanmasi). Sarmalayicilardan ONCE alinir: recorder/kisitlayici Unwrap
+	// sunmaz; mcpWriter sunar.
+	rc := http.NewResponseController(w)
 
 	// Akis G1: gRPC (HTTP/2 + application/grpc). Ajan yetenegi yoksa gRPC
 	// istemcisinin anlayacagi net bir hata doner (HTTP/1.1 ile gRPC calismaz).
@@ -487,11 +507,13 @@ func (h *Handler) proxy(w http.ResponseWriter, r *http.Request, sess *tunnel.Ses
 	// FAZ 2: opt-in tam yakalama (kapaliyken sifir maliyet). Istek govdesini
 	// tavana kadar yakala; yanit writeResponse'da tee edilir.
 	var capt *reqlog.Capture
+	zReqID := reqlog.NewID() // istek kimligi (A5 #7, bkz. requestid.go)
+	fwdReqID := forwardRequestID(r, zReqID)
 	// MCP modunda yakalama ZORLA kapali: arac argumanlari/sonuclari sir icerebilir.
 	// gRPC'de de kapali: ikili ve uzun omurlu akislar bellege tee edilmez.
 	if mc == nil && !grpc && h.Captures != nil && h.Captures.Enabled(tenantID) {
 		capt = &reqlog.Capture{
-			ID:         newCaptureID(),
+			ID:         zReqID,
 			TunnelID:   tunnelID,
 			TenantID:   tenantID,
 			Hostname:   normalizeHost(r.Host),
@@ -508,7 +530,7 @@ func (h *Handler) proxy(w http.ResponseWriter, r *http.Request, sess *tunnel.Ses
 	}
 
 	// Yanit durumunu ve boyutunu yakalayabilmek icin ResponseWriter'i sar.
-	rec := &recorder{ResponseWriter: w, status: http.StatusOK}
+	rec := &recorder{ResponseWriter: w, status: http.StatusOK, zid: zReqID, fwdID: fwdReqID}
 	rec.in = countUnknownLenBody(r)
 	var targetWriter http.ResponseWriter = rec
 	if runtimeState != nil && runtimeState.GetLimiter() != nil {
@@ -525,8 +547,17 @@ func (h *Handler) proxy(w http.ResponseWriter, r *http.Request, sess *tunnel.Ses
 			}
 			h.Captures.Put(capt)
 		}
-		h.recordWithID(tunnelID, tenantID, false, r, rec, started, captureID(capt))
+		h.recordWithID(tunnelID, tenantID, false, r, rec, started, zReqID)
 	}()
+
+	// A1 #9: uzunlugu bastan bilinen ve tavani asan govde ajana HIC gitmez.
+	// Eskiden 32 MB akitildiktan sonra 413 donuyordu (yavas baglantida 16 sn) ve
+	// hedefe kesik bir govde ulasiyordu. gRPC akisinin tavani yok (asagida).
+	if hasBody && !grpc && r.ContentLength > protocol.MaxBodyBytes {
+		writeError(w, r, http.StatusRequestEntityTooLarge, protocol.CodeBodyTooLarge,
+			"Istek govdesi 32 MB sinirini asiyor.")
+		return
+	}
 
 	// FAZ 6: trafik politikasi istek basliklari (backend'e iletilen).
 	reqHeaders := forwardHeaders(r)
@@ -534,6 +565,7 @@ func (h *Handler) proxy(w http.ResponseWriter, r *http.Request, sess *tunnel.Ses
 	if mc != nil {
 		mc.applyUpstream(reqHeaders)
 	}
+	setRequestIDHeaders(reqHeaders, zReqID, fwdReqID)
 
 	ex, err := sess.SendRequest(ctx, protocol.HTTPRequest{
 		TunnelID:      tunnelID,
@@ -560,27 +592,47 @@ func (h *Handler) proxy(w http.ResponseWriter, r *http.Request, sess *tunnel.Ses
 	}
 	// Bekleyen istek tablosunda sizinti olmamasi icin her cikista temizle.
 	defer sess.FinishExchange(ex.ReqID())
+	reqID := ex.ReqID()
+	// Ajana iptal: ziyaretci gitti, govde yuklemesi kesildi, bas zaman asimi.
+	// Iptal olmadan ajan yerel istegi (ve hedef TCP baglantisini, istek govdesi
+	// kuyrugunu, kredi beklemesini) dakikalarca tutuyordu (Y5, O8, O9).
+	cancelAgent := func(reason string) {
+		sess.SendCancel(context.Background(), reqID, reason)
+	}
 
 	if hasBody && grpc {
 		// gRPC: istek govdesi yanit beklenirken es zamanli akar (client-streaming /
 		// bidi). Sunucu yaniti erken bitirirse ctx iptaliyle okuma da durur.
-		reqID := ex.ReqID()
+		// Kayan okuma deadline'i UYGULANMAZ: client-streaming/bidi akislarda
+		// istemcinin uzun sure mesaj gondermemesi mesrudur.
 		go func() {
 			if err := sess.StreamRequestBodyUnbounded(ctx, reqID, r.Body); err != nil && ctx.Err() == nil {
 				h.Log.Debug("gRPC istek govdesi aktarimi bitti", "hata", err)
-				sess.SendCancel(context.Background(), reqID, "request_body_failed")
+				cancelAgent("request_body_failed")
 			}
 		}()
 	} else if hasBody {
-		if err := sess.StreamRequestBody(ctx, ex.ReqID(), r.Body); err != nil {
-			if errors.Is(err, tunnel.ErrBodyTooLarge) {
+		// O11: http.Server'da ReadTimeout yok; govde ilerlemesi olmayan (1 bayt/sn
+		// slowloris) yuklemeler kayan deadline ile kesilir.
+		body := newProgressBody(r.Body, rc, requestBodyIdleTimeout, requestBodyMinProgress)
+		if err := sess.StreamRequestBody(ctx, reqID, body); err != nil {
+			// O8: ajan yarim govdeyle yerel istegi acik tutmasin.
+			cancelAgent("request_body_failed")
+			switch {
+			case errors.Is(err, tunnel.ErrBodyTooLarge):
 				writeError(w, r, http.StatusRequestEntityTooLarge, protocol.CodeBodyTooLarge,
 					"Istek govdesi 32 MB sinirini asiyor.")
-				return
+			case body.timedOut:
+				h.Log.Debug("istek govdesi ilerlemedigi icin kesildi", "req_id", reqID)
+				writeError(w, r, http.StatusRequestTimeout, codeRequestTimeout,
+					"Istek govdesi zamaninda gonderilmedi.")
+			default:
+				if ctx.Err() == nil {
+					h.Log.Warn("istek govdesi aktarilamadi", "hata", err)
+				}
+				writeError(w, r, http.StatusBadGateway, protocol.CodeClientOffline,
+					"Istek govdesi iletilemedi.")
 			}
-			h.Log.Warn("istek govdesi aktarilamadi", "hata", err)
-			writeError(w, r, http.StatusBadGateway, protocol.CodeClientOffline,
-				"Istek govdesi iletilemedi.")
 			return
 		}
 	}
@@ -593,27 +645,21 @@ func (h *Handler) proxy(w http.ResponseWriter, r *http.Request, sess *tunnel.Ses
 	if mc != nil {
 		headTimeout = mc.rt.cfg.HeadTimeout()
 		idle = mc.rt.cfg.IdleTimeout()
-		// Uzun omurlu akislarda istemci kopmasi, upstream sessizken bile fark
-		// edilir ve ajana iptal bildirilir.
-		stop := make(chan struct{})
-		defer close(stop)
-		go func() {
-			select {
-			case <-ctx.Done():
-				sess.SendCancel(context.Background(), ex.ReqID(), "client_disconnected")
-			case <-stop:
-			}
-		}()
 	}
 
 	// Yanit basligini bekle.
+	headTimer := time.NewTimer(headTimeout)
+	defer headTimer.Stop()
 	select {
 	case <-ctx.Done():
 		// Tarayici vazgecti; istemciye iptal bildir.
-		sess.SendCancel(context.Background(), ex.ReqID(), "client_disconnected")
+		cancelAgent("client_disconnected")
 		return
 
-	case <-time.After(headTimeout):
+	case <-headTimer.C:
+		// O9: ajan (or. SYN kara deligine dial) istegi kendi zaman asimina kadar
+		// tutmasin; ziyaretci 504'u aldi, ajan da birakmali.
+		cancelAgent("upstream_timeout")
 		writeError(w, r, http.StatusGatewayTimeout, protocol.CodeUpstreamTimeout,
 			"Istemci zamaninda yanit vermedi.")
 		return
@@ -635,11 +681,14 @@ func (h *Handler) proxy(w http.ResponseWriter, r *http.Request, sess *tunnel.Ses
 			capt.Status = head.Status
 			capt.RespHeaders = head.Headers
 		}
-		h.writeResponse(w, head, ex, capt, tp, idle, sess)
+		h.writeResponse(ctx, w, rc, head, ex, capt, tp, idle, cancelAgent)
 	}
 }
 
-func (h *Handler) writeResponse(w http.ResponseWriter, head tunnel.ResponseHead, ex *tunnel.Exchange, capt *reqlog.Capture, tp *trafficPolicy, idle time.Duration, sess *tunnel.Session) {
+// errMCPIdle, MCP akisinin bosta zaman asimi (okuma baglaminin iptal nedeni).
+var errMCPIdle = errors.New("mcp akisi bosta zaman asimi")
+
+func (h *Handler) writeResponse(ctx context.Context, w http.ResponseWriter, rc *http.ResponseController, head tunnel.ResponseHead, ex *tunnel.Exchange, capt *reqlog.Capture, tp *trafficPolicy, idle time.Duration, cancelAgent func(string)) {
 	dst := w.Header()
 	for k, vals := range head.Headers {
 		lk := strings.ToLower(k)
@@ -679,21 +728,52 @@ func (h *Handler) writeResponse(w http.ResponseWriter, head tunnel.ResponseHead,
 
 	// Govde akitilir; buyuk yanitlar tamamen bellege alinmaz. FAZ 2: yakalama
 	// aciksa akan govde tavana kadar bir tampona da tee edilir.
-	var out io.Writer = newFlushWriter(w)
+	// Y5: ziyaretci baglami iptal olunca (koptu) govde okumasi hemen doner;
+	// ajan hic veri yollamasa bile goroutine beklemede kalmaz.
+	readCtx, cancelRead := context.WithCancelCause(ctx)
+	defer cancelRead(nil)
+	ex.BindContext(readCtx)
+
+	// Ziyaretci HIC okumuyorsa yazim sonsuza kadar tikanmasin (bkz. stallWriter).
+	sw := newStallWriter(newFlushWriter(w), rc, responseWriteStallTimeout)
+	defer func() {
+		if !sw.failed && !sw.off {
+			_ = rc.SetWriteDeadline(time.Time{})
+		}
+	}()
+	var out io.Writer = sw
 	if capt != nil {
 		out = io.MultiWriter(out, &captureWriter{w: io.Discard, dst: &capt.RespBody, truncated: &capt.RespBodyTruncated, max: h.Captures.MaxBody()})
 	}
 	if idle > 0 {
-		// MCP: N saniye hic bayt gelmeyen akis temizlenir (asili/sizdirilmis baglanti).
+		// MCP: N saniye hic bayt gelmeyen akis temizlenir (asili/sizdirilmis
+		// baglanti). Okuma da iptal edilir: ajan iptalden sonra EOF yollamaz.
 		t := time.AfterFunc(idle, func() {
-			sess.SendCancel(context.Background(), ex.ReqID(), "idle_timeout")
+			cancelAgent("idle_timeout")
+			cancelRead(errMCPIdle)
 		})
 		defer t.Stop()
 		out = &idleResetWriter{w: out, t: t, d: idle}
 	}
-	if _, err := io.Copy(out, ex.Body()); err != nil {
-		h.Log.Debug("yanit govdesi yazilirken kesildi", "hata", err)
+	rerr, werr := copyResponseBody(out, ex.Body())
+	switch {
+	case werr != nil || ctx.Err() != nil:
+		// Ziyaretci gitti ya da yazim tikandi: ajan yerel istegi (hedef
+		// baglantisi, kredi beklemesi) birakmali (Y5). Yanit zaten yarim kaldi;
+		// baglanti net/http tarafinda kapanir.
+		cancelAgent("client_disconnected")
+		h.Log.Debug("yanit govdesi ziyaretciye yazilirken kesildi", "hata", errors.Join(werr, rerr))
 		return
+	case rerr != nil:
+		// Y4: govde AJAN tarafinda yarida kesildi (yerel servis baglantiyi kopardi,
+		// ajan koptu, akis ihlali, MCP bosta zaman asimi). Normal donus net/http'de
+		// yaniti TAMAMLANMIS gosterirdi (chunked sonlandirici; HTTP/2 END_STREAM)
+		// ve ziyaretci kesik govdeyi gecerli sanardi. ErrAbortHandler HTTP/1.1'de
+		// baglantiyi keser, HTTP/2'de RST_STREAM yollar. Ertelenmis kayit/temizlik
+		// (recordWithID, FinishExchange, mcpWriter.finish) panik sirasinda da calisir.
+		cancelAgent("upstream_aborted")
+		h.Log.Debug("yanit govdesi ajan tarafinda yarida kesildi", "hata", rerr)
+		panic(http.ErrAbortHandler)
 	}
 	// Yanit trailer'lari (gRPC grpc-status/grpc-message dahil): govde bitti.
 	if tr := ex.Trailers(); len(tr) > 0 {
@@ -714,6 +794,9 @@ func visitorHTTPMajor(r *http.Request, sess *tunnel.Session) int {
 
 // codeMisdirected, SNI ile Host uyusmazliginda (421) donen hata kodu.
 const codeMisdirected = "misdirected_request"
+
+// codeRequestTimeout, istek govdesi ilerlemedigi icin kesildiginde (408) donen kod.
+const codeRequestTimeout = "request_timeout"
 
 // clientCertOK, istemcinin sundugu sertifikanin tunelin mTLS CA'sina gore
 // gecerli (clientAuth kullanimli) olup olmadigi.
@@ -863,6 +946,9 @@ type recorder struct {
 	// in, uzunlugu bilinmeyen (chunked / gRPC) istek govdesinin gercek bayt
 	// sayaci; nil ise bytes_in r.ContentLength'ten gelir.
 	in *countingBody
+	// zid/fwdID: ziyaretci yanitina yazilacak istek kimlikleri (requestid.go).
+	zid, fwdID string
+	stamped    bool
 }
 
 // countingBody, istek govdesinden ajana/dugume gercekten okunan baytlari sayar.
@@ -893,11 +979,13 @@ func countUnknownLenBody(r *http.Request) *countingBody {
 }
 
 func (rec *recorder) WriteHeader(code int) {
+	rec.stampIDs()
 	rec.status = code
 	rec.ResponseWriter.WriteHeader(code)
 }
 
 func (rec *recorder) Write(p []byte) (int, error) {
+	rec.stampIDs()
 	n, err := rec.ResponseWriter.Write(p)
 	rec.written += int64(n)
 	return n, err

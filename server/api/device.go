@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/tkodcumpeg4/zorven/server/auth"
+	"github.com/tkodcumpeg4/zorven/server/entitlements"
 	"github.com/tkodcumpeg4/zorven/server/ratelimit"
 )
 
@@ -281,6 +282,12 @@ func (s *Server) deviceApprove(w http.ResponseWriter, r *http.Request) {
 		s.Devices.mu.Unlock()
 	}
 
+	unlock, ok := s.lockQuota(w, r, tenantID, entitlements.QuotaClients)
+	if !ok {
+		release()
+		return
+	}
+	defer unlock()
 	if s.Entitlements != nil {
 		if err := s.Entitlements.CanCreateClient(r.Context(), tenantID); err != nil {
 			release()
@@ -296,11 +303,14 @@ func (s *Server) deviceApprove(w http.ResponseWriter, r *http.Request) {
 	}
 	// Panelde secili proje varsa istemci o projeye baglanir (createClient ile ayni).
 	projID, _ := s.projectFor(r)
-	if _, err := s.Store.CreateClientWithProject(r.Context(), tenantID, name, tokenID, hash, projID); err != nil {
+	dc, err := s.Store.CreateClientWithProject(r.Context(), tenantID, name, tokenID, hash, projID)
+	unlock()
+	if err != nil {
 		release()
 		s.fail(w, err)
 		return
 	}
+	s.audit(r, "client.create", dc.ID, dc.Name)
 
 	s.Devices.mu.Lock()
 	req.Status = "approved"

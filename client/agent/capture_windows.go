@@ -9,11 +9,12 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 	"unsafe"
 
 	"github.com/kbinani/screenshot"
+
+	"golang.org/x/sys/windows"
 )
 
 // Windows ekran yakalama: kalici bellek DC'si + DIB section (GDI BitBlt).
@@ -29,8 +30,8 @@ import (
 // Monitor sinirlari kbinani'den gelir (DPI'dan bagimsiz gercek cozunurluk).
 
 var (
-	modGDI32Cap  = syscall.NewLazyDLL("gdi32.dll")
-	modUser32Cap = syscall.NewLazyDLL("user32.dll")
+	modGDI32Cap  = windows.NewLazySystemDLL("gdi32.dll")
+	modUser32Cap = windows.NewLazySystemDLL("user32.dll")
 
 	procGetDCCap         = modUser32Cap.NewProc("GetDC")
 	procReleaseDCCap     = modUser32Cap.NewProc("ReleaseDC")
