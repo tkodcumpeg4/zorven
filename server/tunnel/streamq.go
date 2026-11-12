@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/tkodcumpeg4/zorven/server/obs"
 	"github.com/tkodcumpeg4/zorven/shared/protocol"
 )
 
@@ -184,37 +185,15 @@ func (q *streamQueue) abort() {
 }
 
 func (q *streamQueue) run() {
+	// Panik (ornegin kredi iadesinde): yalniz bu akis iptal edilir; abort kanallari
+	// kapatip bellegi oturum sayacindan dusurur, tuketiciler normal kapanis
+	// yolunu izler. Kilit next() icinde defer ile birakildigi icin abort kilitlenmez.
+	defer obs.Recover(nil, "tunnel.streamq", func(any) { q.abort() })
 	for {
-		q.mu.Lock()
-		for len(q.items) == 0 {
-			if q.remoteDone {
-				q.mu.Unlock()
-				q.closeOnce.Do(func() { close(q.closed) })
-				return
-			}
-			q.mu.Unlock()
-			select {
-			case <-q.wake:
-			case <-q.closed:
-				return
-			}
-			q.mu.Lock()
+		it, ok := q.next()
+		if !ok {
+			return
 		}
-		it := q.items[0]
-		q.items[0] = qItem{}
-		q.items = q.items[1:]
-		if len(q.items) == 0 {
-			q.items = nil // bos dizinin bas kismini birak
-		}
-		if !it.eof {
-			m := itemMem(it.b)
-			q.mem -= m
-			if q.sessMem != nil {
-				q.sessMem.Add(-m)
-			}
-		}
-		q.mu.Unlock()
-
 		if it.eof {
 			q.eofOnce.Do(func() { close(q.eof) })
 			continue
@@ -226,6 +205,50 @@ func (q *streamQueue) run() {
 			return
 		}
 	}
+}
+
+// next, siradaki ogeyi bekleyip cikarir; akis bittiyse ok=false. Kilit her
+// donuste (panik dahil) birakilir.
+func (q *streamQueue) next() (qItem, bool) {
+	for {
+		it, ok, wait := q.take()
+		if !wait {
+			return it, ok
+		}
+		select {
+		case <-q.wake:
+		case <-q.closed:
+			return qItem{}, false
+		}
+	}
+}
+
+// take, kilit altinda tek deneme: oge varsa cikarir; yoksa ve karsi taraf
+// kapattiysa akisi kapatir; aksi halde wait=true (uyandirilmayi bekle).
+func (q *streamQueue) take() (it qItem, ok, wait bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.items) == 0 {
+		if q.remoteDone {
+			q.closeOnce.Do(func() { close(q.closed) })
+			return qItem{}, false, false
+		}
+		return qItem{}, false, true
+	}
+	it = q.items[0]
+	q.items[0] = qItem{}
+	q.items = q.items[1:]
+	if len(q.items) == 0 {
+		q.items = nil // bos dizinin bas kismini birak
+	}
+	if !it.eof {
+		m := itemMem(it.b)
+		q.mem -= m
+		if q.sessMem != nil {
+			q.sessMem.Add(-m)
+		}
+	}
+	return it, true, false
 }
 
 // delivered, tuketiciye teslim edilen veri icin krediyi biriktirir ve esigi

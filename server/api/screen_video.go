@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/tkodcumpeg4/zorven/server/obs"
 	"github.com/tkodcumpeg4/zorven/shared/protocol"
 )
 
@@ -152,11 +153,11 @@ func (h *screen2Hub) syncVideo(askIDR bool) {
 	active := h.vid.active
 	h.mu.Unlock()
 	if changed {
-		go func() {
+		obs.Go(nil, "api_screen_video", func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			_ = h.vid.agent.Screen2Video(ctx, h.sid, eff)
-		}()
+		})
 	}
 	if askIDR && active && eff != protocol.Screen2VideoTiles {
 		h.askKeyframe() // yeni izleyiciye config+IDR

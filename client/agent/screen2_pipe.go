@@ -240,7 +240,7 @@ func (s *screen2Session) captureLoop(ctx context.Context, slot *s2Slot) error {
 			// sifirlama, UAC): oturumu oldurmek yerine ussel geri cekilmeyle
 			// yeniden dene; son kare izleyicide kalir.
 			wait, giveUp := retry.Fail(time.Now())
-			s.logWarn("ekran yakalanamadi, yeniden denenecek", "hata", err, "bekleme", wait, "giveUp", giveUp)
+			s.logWarn("ekran yakalanamadi, yeniden denenecek", "hata", err, "bekleme", wait, "vazgec", giveUp)
 			if giveUp {
 				return fmt.Errorf("%s", i18n.T("scr.err.capture_gave_up", err.Error()))
 			}

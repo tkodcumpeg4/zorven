@@ -74,7 +74,7 @@ func (s *Server) issueScreenTicket(w http.ResponseWriter, r *http.Request) {
 	controlAllowed := s.screenControlAllowed(r, tenantID)
 	ticket := s.Tickets.issueFull(ticketKindScreen, tenantID, body.ClientID, release, controlAllowed)
 	s.Tickets.setMaxFPS(ticket, spec.MaxFPS)
-	s.logger().Info("ekran bileti verildi", "tenant_id", tenantID, "client_id", body.ClientID, "remote_addr", r.RemoteAddr)
+	s.logger().Info("ekran bileti verildi", "tenant", tenantID, "client", body.ClientID, "adres", r.RemoteAddr)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ticket":     ticket,
 		"expires_in": int(ticketTTL.Seconds()),
@@ -102,7 +102,7 @@ func (s *Server) screenHandler(w http.ResponseWriter, r *http.Request) {
 	// CSWSH Koruması: Origin doğrulaması
 	if !s.isAllowedOrigin(r) {
 		s.logger().Warn("ekran ws reddedildi: yetkisiz origin",
-			"origin", r.Header.Get("Origin"), "remote_addr", r.RemoteAddr)
+			"origin", r.Header.Get("Origin"), "adres", r.RemoteAddr)
 		writeJSONError(w, http.StatusForbidden, "forbidden_origin", "Gecersiz veya yetkisiz Origin.")
 		return
 	}
@@ -119,7 +119,7 @@ func (s *Server) screenHandler(w http.ResponseWriter, r *http.Request) {
 	locked := !tinfo.ControlAllowed
 	if !valid || tenantID == "" {
 		s.logger().Warn("ekran ws reddedildi: gecersiz veya suresi dolmus bilet",
-			"client_id", clientID, "remote_addr", r.RemoteAddr)
+			"client", clientID, "adres", r.RemoteAddr)
 		writeJSONError(w, http.StatusUnauthorized, "invalid_ticket",
 			"Gecersiz veya suresi dolmus ekran bileti.")
 		return
@@ -136,7 +136,7 @@ func (s *Server) screenHandler(w http.ResponseWriter, r *http.Request) {
 	// İstemcinin biletteki kiracıya ait olduğunu doğrula (IDOR önlemi)
 	if _, err := s.Store.GetClient(r.Context(), tenantID, clientID); err != nil {
 		s.logger().Warn("ekran ws reddedildi: istemci bu kiraciya ait degil veya bulunamadi",
-			"client_id", clientID, "tenant_id", tenantID, "remote_addr", r.RemoteAddr)
+			"client", clientID, "tenant", tenantID, "adres", r.RemoteAddr)
 		writeJSONError(w, http.StatusForbidden, "forbidden", "Bu istemciye erisim yetkiniz yok.")
 		return
 	}
@@ -144,7 +144,7 @@ func (s *Server) screenHandler(w http.ResponseWriter, r *http.Request) {
 	sess, online := s.Hub.Get(clientID)
 	if !online {
 		s.logger().Warn("ekran ws baglanamadi: istemci cevrimdisi",
-			"client_id", clientID, "remote_addr", r.RemoteAddr)
+			"client", clientID, "adres", r.RemoteAddr)
 		writeJSONError(w, http.StatusBadGateway, "client_offline",
 			"Istemci su anda bagli degil; ekran acilamaz.")
 		return
@@ -165,7 +165,7 @@ func (s *Server) screenHandler(w http.ResponseWriter, r *http.Request) {
 		InsecureSkipVerify: true,
 	})
 	if err != nil {
-		s.logger().Warn("ekran ws upgrade basarisiz", "client_id", clientID, "hata", err)
+		s.logger().Warn("ekran ws upgrade basarisiz", "client", clientID, "hata", err)
 		return
 	}
 	defer conn.CloseNow()
@@ -175,7 +175,7 @@ func (s *Server) screenHandler(w http.ResponseWriter, r *http.Request) {
 
 	sessionID := "scr_" + randomHex(6)
 	s.logger().Info("ekran ws oturumu baslatildi",
-		"client_id", clientID, "session_id", sessionID, "mode", mode, "max_width", maxWidth)
+		"client", clientID, "session", sessionID, "kip", mode, "max_width", maxWidth)
 
 	// Kare kuyrugu: H.264'te parcalar DUSURULEMEZ (fMP4 sureklidir), o yuzden
 	// kisa ag dalgalanmalarini yutacak kadar derin tutuyoruz. 8 kare 5 fps'te
@@ -217,7 +217,7 @@ func (s *Server) screenHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		if err != nil {
 			s.logger().Error("istemcide screen2 oturumu acilamadi",
-				"client_id", clientID, "session_id", sessionID, "hata", err)
+				"client", clientID, "session", sessionID, "hata", err)
 			conn.Close(websocket.StatusInternalError, "ekran acilamadi")
 			return
 		}
@@ -229,13 +229,13 @@ func (s *Server) screenHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := sess.OpenScreen(ctx, sessionID, fps, quality, maxWidth, legacy, frames, errs); err != nil {
 			s.logger().Error("istemcide ekran oturumu acilamadi",
-				"client_id", clientID, "session_id", sessionID, "hata", err)
+				"client", clientID, "session", sessionID, "hata", err)
 			conn.Close(websocket.StatusInternalError, "ekran acilamadi")
 			return
 		}
 	}
 	defer func() {
-		s.logger().Info("ekran ws oturumu sonlandirildi", "client_id", clientID, "session_id", sessionID)
+		s.logger().Info("ekran ws oturumu sonlandirildi", "client", clientID, "session", sessionID)
 		sess.CloseScreen(context.Background(), sessionID)
 	}()
 
@@ -548,7 +548,7 @@ func (s *Server) serveScreen2Shared(ctx context.Context, cancel context.CancelFu
 		return false, false
 	}
 	if err != nil {
-		s.logger().Error("paylasimli screen2 acilamadi", "client_id", clientID, "hata", err)
+		s.logger().Error("paylasimli screen2 acilamadi", "client", clientID, "hata", err)
 		msg := "ekran acilamadi"
 		if errors.Is(err, ErrTooManyViewers) {
 			msg = "izleyici siniri dolu"
@@ -559,7 +559,7 @@ func (s *Server) serveScreen2Shared(ctx context.Context, cancel context.CancelFu
 	defer v.leave()
 	// Pano mesaji 64 KiB metin + JSON kacisi tasiyabilir (varsayilan okuma siniri 32 KiB).
 	conn.SetReadLimit(screenPanelReadLimit)
-	s.logger().Info("ekran ws izleyici katildi (screen2 paylasimli)", "client_id", clientID, "session_id", v.hub.sid)
+	s.logger().Info("ekran ws izleyici katildi (screen2 paylasimli)", "client", clientID, "session", v.hub.sid)
 
 	go func() {
 		ticker := time.NewTicker(10 * time.Second)

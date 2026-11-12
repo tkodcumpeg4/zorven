@@ -10,6 +10,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/tkodcumpeg4/zorven/server/obs"
 	"github.com/tkodcumpeg4/zorven/shared/protocol"
 )
 
@@ -43,10 +44,15 @@ func Pipe(ctx context.Context, conn net.Conn, stream *RawStream) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	defer stream.Close("closed")
+	// Cagiran goroutine (ozel ag/kume) panikte de akisi kapatsin; panik yukari
+	// tasinmaz (cagiranin kendi kurtarmasi yoksa surec duserdi).
+	defer obs.Recover(nil, "tunnel.pipe", nil)
 
 	// conn -> ajan
 	go func() {
 		defer cancel()
+		// Panik: yalniz bu akis kapanir (cancel -> asagidaki dongu doner, stream kapanir).
+		defer obs.Recover(nil, "tunnel.pipe", nil)
 		buf := make([]byte, 32*1024)
 		for {
 			n, rerr := conn.Read(buf)

@@ -534,9 +534,10 @@ func (m *Middleware) serveAuthenticated(w http.ResponseWriter, r *http.Request) 
 			}
 
 			// Son kullanım zamanını arka planda güncelle
-			go func(tokID string) {
+			tokID := tok.ID
+			obs.Go(m.Log, "api_token_touch", func() {
 				_ = m.Store.TouchAPITokenLastUsed(context.Background(), tokID)
-			}(tok.ID)
+			})
 
 			// Yuzey kisiti: token'lar YALNIZCA public kaynaklara erisebilir
 			// (mail/team/admin/terminal panel-icidir). Allowlist disi -> 403.

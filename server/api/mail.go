@@ -314,7 +314,7 @@ func (s *Server) sendMail(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) logMailWarn(msg string, err error) {
 	if s.Logger != nil {
-		s.Logger.Warn(msg, "error", err)
+		s.Logger.Warn(msg, "hata", err)
 	}
 }
 

@@ -98,7 +98,7 @@ func (h *Handler) ReevaluateVisitors(tenantID string) int {
 		closed++
 		if h.Log != nil {
 			h.Log.Info("acik WebSocket yeniden degerlendirmede kapatildi",
-				"tunel", e.tunnelID, "ip", e.ip, "neden", reason)
+				"tunnel", e.tunnelID, "ip", e.ip, "neden", reason)
 		}
 	}
 	return closed

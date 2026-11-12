@@ -66,7 +66,7 @@ func (h *Handler) enforceTunnelWAF(w http.ResponseWriter, r *http.Request, tun s
 	}
 	w.Header().Set(requestIDHeader, id)
 	if h.Log != nil {
-		h.Log.Debug("tunel WAF engelledi", "tunel", tun.TunnelID, "ip", clientIP(r), "kural", hit.Rule, "kimlik", id)
+		h.Log.Debug("tunel WAF engelledi", "tunnel", tun.TunnelID, "ip", clientIP(r), "kural", hit.Rule, "kimlik", id)
 	}
 	writeError(w, r, http.StatusForbidden, protocol.CodeAccessDenied,
 		secDeniedMessage+" Istek kimligi: "+id)

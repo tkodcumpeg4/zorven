@@ -37,7 +37,12 @@ services:
       dockerfile: deploy/Dockerfile
     restart: unless-stopped
     logging: *default-logging
-    # O20 konteyner sertlestirme (root kullanici su an korunuyor; USER gecisi ayri plan).
+    # USER gecisi: imaj varsayilani 65532 (root degil). Bu dosya gecis tamamlanana kadar
+    # root'u ACIKCA korur; root olmayan + salt okunur kip icin bu dosyanin USTUNE
+    # deploy/docker-compose.nonroot.yml eklenir (deploy/ops/migrate-nonroot.sh). Geri alma:
+    # override'siz `docker compose up -d zorven-primary`.
+    user: "0:0"
+    # O20 konteyner sertlestirme (root kipte).
     # Sunucu ham soket, TUN, chown, setuid KULLANMAZ (kod taramasi); gereken tek yetenek
     # 80/443/25/587/465/993'e baglanmak (NET_BIND_SERVICE). DAC_OVERRIDE + FOWNER gecis
     # suresince tutulur: bind mount'lardaki (or. ./certs) dosyalar baska

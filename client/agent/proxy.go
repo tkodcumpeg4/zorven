@@ -761,7 +761,7 @@ func (cs *clientSession) cancelRequest(reqID uint64, reason string) {
 	fl, ok := cs.inflight[reqID]
 	cs.mu.Unlock()
 	if ok {
-		cs.log.Debug("istek iptal edildi", "req_id", reqID, "sebep", reason)
+		cs.log.Debug("istek iptal edildi", "req_id", reqID, "neden", reason)
 		// Sunucu istegi birakti: govde hatasini ona geri bildirmek anlamsiz.
 		fl.serverCanceled.Store(true)
 		// Baglam iptali yerel istegi (dial, baslik bekleme, govde okuma) ve kredi

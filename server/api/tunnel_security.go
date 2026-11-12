@@ -6,6 +6,7 @@ import (
 	"strconv"
 
 	"github.com/tkodcumpeg4/zorven/server/entitlements"
+	"github.com/tkodcumpeg4/zorven/server/obs"
 	"github.com/tkodcumpeg4/zorven/server/store"
 	"github.com/tkodcumpeg4/zorven/server/tunsec"
 )
@@ -126,5 +127,5 @@ func (s *Server) notifyAuthzChange(tenantID string) {
 	if s.OnAuthzChange == nil {
 		return
 	}
-	go s.OnAuthzChange(tenantID)
+	obs.Go(s.logger(), "api_authz_change", func() { s.OnAuthzChange(tenantID) })
 }

@@ -188,7 +188,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	h.Log.Info("istemci baglandi",
-		"client", client.ID, "isim", client.Name, "session", sessionID,
+		"client", client.ID, "ad", client.Name, "session", sessionID,
 		"surum", sess.Version, "platform", sess.Platform, "adres", r.RemoteAddr)
 
 	if err := sess.Run(ctx); err != nil {
@@ -299,6 +299,7 @@ func (h *Handler) handshake(ctx context.Context, s *Session) error {
 	// ClientVersion = ikilinin GERCEK surumu (panelde gosterilir); protokol
 	// uyumlulugu X-Tunnel-Client-Version basligiyla ayri denetlenir.
 	s.Version, s.Platform = hello.ClientVersion, hello.Platform
+	s.legacyBodyStall = agentLacksBodyError(hello.ClientVersion)
 	s.AppKind = hello.AppKind
 	s.IsService = hello.IsService
 	s.Shells, s.DefaultShell = sanitizeShells(hello.Shells, hello.DefaultShell)
@@ -488,9 +489,9 @@ func (h *Handler) handshake(ctx context.Context, s *Session) error {
 						// uyuyorsa admin incelemesi için işaretle (NON-BLOCKING).
 						if res := abuse.ScanFQDN(hname.FQDN, plat); res.Suspicious {
 							h.Log.Warn("otomatik tarama supheli otomatik-ad isaretledi",
-								"fqdn", hname.FQDN, "score", res.Score, "reason", res.Reason)
+								"fqdn", hname.FQDN, "score", res.Score, "neden", res.Reason)
 							if _, cerr := h.Store.CreateAbuseReport(ctx, hname.FQDN, res.Reason, "auto-scan"); cerr != nil {
-								h.Log.Error("otomatik tarama raporu olusturulamadi", "fqdn", hname.FQDN, "err", cerr)
+								h.Log.Error("otomatik tarama raporu olusturulamadi", "fqdn", hname.FQDN, "hata", cerr)
 							}
 						}
 					}
@@ -498,7 +499,7 @@ func (h *Handler) handshake(ctx context.Context, s *Session) error {
 						h.OnTunnelChange()
 					}
 					h.Log.Info("tek komutla otomatik tunel acildi",
-						"client", s.ClientID, "target", reqTarget, "fqdn", fqdn)
+						"client", s.ClientID, "hedef", reqTarget, "fqdn", fqdn)
 				}
 			}
 		}

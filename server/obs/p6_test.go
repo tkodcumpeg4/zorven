@@ -213,3 +213,57 @@ func TestGoRestartAndFatal(t *testing.T) {
 		t.Fatal("GoFatal cikmadi")
 	}
 }
+
+// B2: Recover paniği yalniz o goroutine'de keser, sayar ve kapatmayi calistirir;
+// kapatma kilitlenirse bekci sureci kontrollu sonlandirir.
+func TestRecoverClosesScopeAndWatchdog(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	before := Panics("test_recover")
+	closed := make(chan any, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer Recover(log, "test_recover", func(p any) { closed <- p })
+		panic("akis bozuk")
+	}()
+	<-done
+	if p := <-closed; p != "akis bozuk" {
+		t.Fatalf("onPanic paniği almadi: %v", p)
+	}
+	if Panics("test_recover") != before+1 {
+		t.Fatal("panik sayilmadi")
+	}
+
+	// Kapatmanin kendi paniği de kurtarilir.
+	done2 := make(chan struct{})
+	go func() {
+		defer close(done2)
+		defer Recover(log, "test_recover", func(any) { panic("kapatma da bozuk") })
+		panic("ilk")
+	}()
+	<-done2
+	if Panics("test_recover") != before+3 {
+		t.Fatalf("iki panik daha sayilmaliydi: %d", Panics("test_recover")-before)
+	}
+
+	// Kilitlenen kapatma: bekci FatalExit'i cagirir.
+	oldExit, oldTO := FatalExit, PanicCleanupTimeout
+	exited := make(chan int, 1)
+	FatalExit = func(code int) { exited <- code }
+	PanicCleanupTimeout = 50 * time.Millisecond
+	defer func() { FatalExit, PanicCleanupTimeout = oldExit, oldTO }()
+	block := make(chan struct{})
+	defer close(block)
+	go func() {
+		defer Recover(log, "test_recover", func(any) { <-block })
+		panic("kilitli")
+	}()
+	select {
+	case c := <-exited:
+		if c != 2 {
+			t.Fatalf("cikis kodu %d", c)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("bekci cikmadi")
+	}
+}

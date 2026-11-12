@@ -225,9 +225,9 @@ func (s *Session) askKeyframe(sub *screen2Sub) {
 	if !ask {
 		return
 	}
-	go func() {
+	s.goSafe("tunnel.screen2_keyframe", nil, func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = s.Screen2Keyframe(ctx, sub.sessionID)
-	}()
+	})
 }

@@ -88,6 +88,9 @@ func TestTCPStatsAcceptBytesDuration(t *testing.T) {
 	if _, err := io.ReadFull(c, buf); err != nil {
 		t.Fatal(err)
 	}
+	// BytesOut, ziyaretci yazimi DONDUKTEN sonra artar; istemci veriyi ondan once
+	// okuyabilir (eskiden ara sira BytesOut:0 ile duseren yaris).
+	waitFor(t, "cikis bayt sayaci", func() bool { l, _ := m.TCPStats("tun"); return l.BytesOut == 5000 })
 	live, ok := m.TCPStats("tun")
 	if !ok || live.Active != 1 || live.ConnsTotal != 1 {
 		t.Fatalf("canli (aktif): %+v", live)

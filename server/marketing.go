@@ -99,3 +99,23 @@ func marketingHandler() http.Handler {
 		write(w, "index.html", index)
 	})
 }
+
+// wwwRedirect, "www." ile gelen her istegi kok alan adina 301 ile tasir (surum
+// notu yollari dahil; tek kanonik adres). Hedef, istegin kendi hostundan turetilir.
+func wwwRedirect(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host := r.Host
+		if i := strings.LastIndex(host, ":"); i > 0 && !strings.Contains(host[i:], "]") {
+			host = host[:i]
+		}
+		if strings.HasPrefix(strings.ToLower(host), "www.") {
+			target := "https://" + host[4:] + r.URL.Path
+			if r.URL.RawQuery != "" {
+				target += "?" + r.URL.RawQuery
+			}
+			http.Redirect(w, r, target, http.StatusMovedPermanently)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}

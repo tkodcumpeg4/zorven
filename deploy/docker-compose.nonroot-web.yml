@@ -1,0 +1,19 @@
+# web (Nitro / Better Auth): root OLMAYAN + salt okunur kip. ISTEGE BAGLI, zorven-primary
+# gecisinden (docker-compose.nonroot.yml) BAGIMSIZ; ayri pencerede eklenebilir.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.nonroot.yml \
+#     -f docker-compose.nonroot-web.yml up -d web
+# Geri alma: bu dosya olmadan `up -d web`.
+#
+# Imaj (web/Dockerfile) degismez: node:22-alpine'daki hazir `node` kullanicisi (1000)
+# compose'dan secilir; boylece yeniden derleme gerekmez ve geri alma yalniz compose'tur.
+# .output root'a ait ve herkesce okunabilir; Nitro calisirken diske yazmaz (yerelde
+# `docker diff` bos). Port 3000 ayricaliksiz; hicbir yetenek gerekmez (taban: cap_drop ALL).
+# web/Dockerfile'daki `npm install` (npm ci degil) bilinçli: lockfile npm surum farki; bkz. dosya.
+
+services:
+  web:
+    user: "1000:1000"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=32m,mode=1777

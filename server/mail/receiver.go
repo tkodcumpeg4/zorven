@@ -23,7 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"strings"
 	"time"
@@ -165,7 +165,7 @@ func (s *session) Data(r io.Reader) error {
 		// Sahte Authentication-Results basliklari silinir, sonuc en uste eklenir.
 		raw = mailauth.Prepend(raw, a.AuthservID, res, a.StripIDs...)
 		act := a.action(res, s.rcpt)
-		log.Printf("[mail] gelen ileti dogrulamasi: %s", authSummary(res, s.remoteIP, act))
+		slog.Info("[mail] gelen ileti dogrulamasi", "ozet", authSummary(res, s.remoteIP, act))
 		switch act {
 		case mailauth.ActionReject:
 			return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 7, 1}, Message: rejectText(res)}
@@ -184,7 +184,7 @@ func (s *session) Data(r io.Reader) error {
 	if err != nil {
 		return &smtp.SMTPError{Code: 451, Message: "gecici depolama hatasi, sonra tekrar deneyin"}
 	}
-	log.Printf("[mail] %d aliciya gelen mail teslim edildi (from=%s)", n, s.from)
+	slog.Info("[mail] gelen mail teslim edildi", "alici_sayisi", n, "gonderen", s.from)
 	return nil
 }
 

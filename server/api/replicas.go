@@ -98,6 +98,15 @@ func (s *Server) removeTunnelReplica(w http.ResponseWriter, r *http.Request) {
 	}
 	tunnelID := r.PathValue("id")
 	clientID := r.PathValue("clientID")
+	// Istemci bu kiracinin olmali: aksi halde kendi tunelinde "olmayan replikayi
+	// kaldir" diyen baska bir kiraci, yoldaki istemci kimligi icin asagidaki
+	// config_update itmesini tetikleyebiliyordu (A'nin ajanina kiracilar arasi
+	// durtme; 2026-11 izolasyon testi). Bulunamayan istemci 404, var olmayan
+	// replika gibi.
+	if _, err := s.Store.GetClient(r.Context(), tenantID, clientID); err != nil {
+		s.fail(w, err)
+		return
+	}
 	if err := s.Store.RemoveTunnelReplica(r.Context(), tenantID, tunnelID, clientID); err != nil {
 		s.fail(w, err)
 		return

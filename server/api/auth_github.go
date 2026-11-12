@@ -329,7 +329,7 @@ func (s *Server) resolveTenantForUser(ctx context.Context, u store.User) (store.
 	if err := s.Store.AddTenantMember(ctx, t.ID, u.ID, store.RoleOwner); err != nil {
 		return store.Tenant{}, err
 	}
-	s.Logger.Info("yeni kiraci acildi", "tenant", t.ID, "slug", t.Slug, "user", u.GitHubLogin)
+	s.Logger.Info("yeni kiraci acildi", "tenant", t.ID, "slug", t.Slug, "kullanici", u.GitHubLogin)
 	return t, nil
 }
 

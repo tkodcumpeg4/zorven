@@ -9,12 +9,12 @@ FROM node:22-alpine AS builder
 WORKDIR /app
 
 # Bağımlılıklar önce (katman cache): package + lock kopyala, kur.
-# NOT: `npm ci` yerine `npm install` — lockfile farklı bir npm sürümüyle
-# (yerelde v11, container'da v10) üretildiğinde `npm ci` küçük ağaç
-# farklarında (ör. transitif unplugin) hata verir; `npm install` container'ın
-# kendi npm'iyle çözer ve derlemeyi kırmaz.
+# `npm ci`: imaj tam olarak lockfile'daki (denetlenmis) surumlerle kurulur;
+# `npm install` lockfile'dan sapip denetlenmemis transitif surum cekebilirdi.
+# Lockfile yerelde ve imajda ayni npm ana surumuyle (v10, node:22) uretilmeli;
+# eskiden yerel npm v11 iken `npm ci` kucuk agac farklarinda kiriliyordu.
 COPY package.json package-lock.json ./
-RUN npm install --no-audit --no-fund
+RUN npm ci --no-audit --no-fund
 
 # Kaynakları kopyala ve node-server preset'iyle derle (.output üretir).
 COPY . .

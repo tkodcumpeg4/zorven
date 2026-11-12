@@ -31,14 +31,14 @@ func (s *Server) notifyTenantOwnersOffline(ctx context.Context, offline []pgstor
 		clients := byTenant[tid]
 		owners, err := n.TenantOwners(ctx, tid)
 		if err != nil {
-			s.logger().Warn("kopuk ajan bildirimi: owner'lar okunamadi", "kiraci", tid, "hata", err)
+			s.logger().Warn("kopuk ajan bildirimi: owner'lar okunamadi", "tenant", tid, "hata", err)
 			continue
 		}
 		sent := 0
 		for _, o := range owners {
 			subject, body := agentOfflineOwnerMail(s.ownerMailLang(ctx, o.UserID), clients, after, domain)
 			if _, err := s.MailSender.Send(from, o.Email, subject, body, "", "", nil); err != nil {
-				s.logger().Warn("kopuk ajan bildirimi gonderilemedi", "kiraci", tid, "hata", err)
+				s.logger().Warn("kopuk ajan bildirimi gonderilemedi", "tenant", tid, "hata", err)
 				continue
 			}
 			sent++
@@ -53,9 +53,9 @@ func (s *Server) notifyTenantOwnersOffline(ctx context.Context, offline []pgstor
 			ids = append(ids, c.ID)
 		}
 		if err := n.MarkClientsOfflineNotified(ctx, ids); err != nil {
-			s.logger().Warn("kopuk ajan bildirimi isaretlenemedi", "kiraci", tid, "hata", err)
+			s.logger().Warn("kopuk ajan bildirimi isaretlenemedi", "tenant", tid, "hata", err)
 		}
-		s.logger().Info("kopuk ajan bildirimi owner'lara gonderildi", "kiraci", tid, "ajan", len(clients), "alici", sent)
+		s.logger().Info("kopuk ajan bildirimi owner'lara gonderildi", "tenant", tid, "ajan", len(clients), "alici", sent)
 	}
 }
 

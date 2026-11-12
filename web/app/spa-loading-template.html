@@ -4,11 +4,12 @@
   @media (prefers-color-scheme: light) { html, body { background: #f6f8fb; } }
   .zv-boot { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px;
     font: 500 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; color: #94a3b8; }
-  .zv-boot svg { width: 44px; height: 44px; color: #00e5a3; animation: zv-pulse 1.6s ease-in-out infinite; }
+  .zv-boot svg { width: 44px; height: 44px; color: #00e5a3; transform-origin: 50% 50%; animation: zv-spin 1.1s cubic-bezier(.55,.15,.45,.85) infinite, zv-pulse 1.6s ease-in-out infinite; }
   .zv-boot .bar { width: 160px; height: 3px; border-radius: 3px; background: rgba(148,163,184,.18); overflow: hidden; }
   .zv-boot .bar i { display: block; width: 40%; height: 100%; border-radius: 3px; background: #00e5a3; animation: zv-slide 1.2s ease-in-out infinite; }
   @keyframes zv-slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(260%); } }
-  @keyframes zv-pulse { 0%, 100% { opacity: .55; } 50% { opacity: 1; } }
+  @keyframes zv-spin { to { transform: rotate(360deg); } }
+  @keyframes zv-pulse { 0%, 100% { opacity: .7; } 50% { opacity: 1; } }
   @media (prefers-reduced-motion: reduce) { .zv-boot svg, .zv-boot .bar i { animation: none; } }
 </style>
 <div class="zv-boot" role="status" aria-live="polite">

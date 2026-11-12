@@ -120,7 +120,7 @@ func (h *Handler) serveDoor(w http.ResponseWriter, r *http.Request, tun store.Ho
 
 	if isClose {
 		if _, err := h.Door.Close(r.Context(), target, ip, identity, method, r.UserAgent()); err != nil {
-			h.Log.Warn("door: kapi kapatilamadi", "tunel", tun.TunnelID, "hata", err)
+			h.Log.Warn("door: kapi kapatilamadi", "tunnel", tun.TunnelID, "hata", err)
 			writeError(w, r, http.StatusInternalServerError, protocol.CodeAccessDenied, "Kapi kapatilamadi.")
 			return
 		}
@@ -161,7 +161,7 @@ func (h *Handler) serveDoor(w http.ResponseWriter, r *http.Request, tun store.Ho
 			h.renderDoorUnavailable(w, r, t.doorUnavailTitle, t.doorUnavailMsg, lang)
 			return
 		}
-		h.Log.Warn("door: kapi acilamadi", "tunel", tun.TunnelID, "hata", err)
+		h.Log.Warn("door: kapi acilamadi", "tunnel", tun.TunnelID, "hata", err)
 		writeError(w, r, http.StatusInternalServerError, protocol.CodeAccessDenied, "Kapi acilamadi.")
 		return
 	}

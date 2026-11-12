@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 
 	"github.com/tkodcumpeg4/zorven/server/store"
@@ -124,7 +124,7 @@ func (l *Local) junkFolderKey(ctx context.Context, tenantID, mailbox string) str
 	}
 	err := l.Store.CreateMailFolder(ctx, tenantID, mailbox, store.MailJunkFolderName, store.MailSpecialUseJunk)
 	if err != nil && !errors.Is(err, store.ErrMailFolderExists) {
-		log.Printf("[mail] Onemsiz klasoru olusturulamadi, Gelen Kutusu'na teslim ediliyor (tenant=%s): %v", tenantID, err)
+		slog.Warn("[mail] Onemsiz klasoru olusturulamadi, Gelen Kutusu'na teslim ediliyor", "tenant", tenantID, "hata", err)
 		return store.MailFolderInbox
 	}
 	if k, ok := find(); ok {
@@ -178,14 +178,14 @@ func (l *Local) DeliverWith(ctx context.Context, envFrom string, rcpts []string,
 			Mailbox:   to,
 		})
 		if err != nil {
-			log.Printf("[mail] yerel teslim kaydedilemedi (tenant=%s): %v", tenantID, err)
+			slog.Error("[mail] yerel teslim kaydedilemedi", "tenant", tenantID, "hata", err)
 			return n, err
 		}
 		for _, att := range attachments {
 			att.MessageID = saved.ID
 			att.TenantID = tenantID
 			if aerr := l.Store.InsertMailAttachment(ctx, att); aerr != nil {
-				log.Printf("[mail] ek kaydedilemedi (msg=%s): %v", saved.ID, aerr)
+				slog.Warn("[mail] ek kaydedilemedi", "ileti", saved.ID, "hata", aerr)
 			}
 		}
 		hub.Notify(tenantID, to)

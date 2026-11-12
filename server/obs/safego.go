@@ -70,6 +70,16 @@ func GoFatal(ctx context.Context, log *slog.Logger, name string, fn func(context
 	}()
 }
 
+// Go, istek basina acilan KISA OMURLU bir isi (denetim kaydi yazimi, son kullanim
+// damgasi, config itmesi) arka planda calistirir. Panik loglanir ve
+// zorven_panics_total{where=name} artar; is yeniden baslatilmaz (tek seferlik,
+// kaybi zararsiz) ve surec ayakta kalir. Neden: net/http yalniz isleyici
+// goroutine'ini kurtarir; isleyicinin actigi "go func" icindeki bir panik (or. depo
+// surucusunde nil) tum sureci dusururdu.
+func Go(log *slog.Logger, name string, fn func()) {
+	go runRecovered(context.Background(), log, name, func(context.Context) { fn() })
+}
+
 // runRecovered, fn'i calistirir; panik olduysa true doner (loglanmis ve sayilmis).
 func runRecovered(ctx context.Context, log *slog.Logger, name string, fn func(context.Context)) (panicked bool) {
 	defer func() {
@@ -83,4 +93,56 @@ func runRecovered(ctx context.Context, log *slog.Logger, name string, fn func(co
 	}()
 	fn(ctx)
 	return false
+}
+
+// PanicCleanupTimeout, panik sonrasi temizligin (kapanis yolu) tamamlanmasi
+// icin taninan sure (degisken: testler kisaltir). Asilirsa temizlik buyuk
+// olasilikla panikleyen goroutine'in birakmadigi bir kilitte bekliyordur.
+var PanicCleanupTimeout = 30 * time.Second
+
+// Recover, oturum/akis kapsamli bir goroutine'de paniği kurtarir: tum sureci
+// degil yalniz o oturumu/akisi dusurmek icin. `defer obs.Recover(...)` olarak
+// DOGRUDAN ertelenmelidir (recover yalniz ertelenen fonksiyonun kendisinde
+// calisir). Panikte: sayac (zorven_panics_total{where}), ERROR + yigin, sonra
+// onPanic (kaynaklari normal kapanis yoluyla birakan kapatma). onPanic'in
+// kendisi paniklerse o da kurtarilir. onPanic PanicCleanupTimeout icinde
+// bitmezse (kilitlenme) surec GoFatal gibi kontrollu sonlanir: yari kilitli
+// durumla calismak (ornegin bekleyen tum istekler sonsuza dek asili) daha kotu.
+func Recover(log *slog.Logger, where string, onPanic func(p any)) {
+	p := recover()
+	if p == nil {
+		return
+	}
+	if log == nil {
+		log = slog.Default()
+	}
+	CountPanic(where)
+	log.Error("goroutine panikledi; yalniz ilgili oturum/akis kapatiliyor", "yer", where, "panik", p, "yigin", string(debug.Stack()))
+	if onPanic == nil {
+		return
+	}
+	stop := PanicWatchdog(log, where)
+	defer stop()
+	defer func() {
+		if p2 := recover(); p2 != nil {
+			CountPanic(where)
+			log.Error("panik sonrasi kapatma da panikledi", "yer", where, "panik", p2, "yigin", string(debug.Stack()))
+		}
+	}()
+	onPanic(p)
+}
+
+// PanicWatchdog, panik sonrasi temizlik icin bekci kurar; temizlik bitince
+// donen stop cagrilmalidir. Sure dolarsa ERROR loglanir ve FatalExit(2).
+// Temizligin bir kismi ertelenmis fonksiyonlarda (Recover'dan SONRA calisan
+// defer'lar) yapiliyorsa bekci onPanic icinde kurulup en son defer'da durdurulur.
+func PanicWatchdog(log *slog.Logger, where string) (stop func()) {
+	if log == nil {
+		log = slog.Default()
+	}
+	t := time.AfterFunc(PanicCleanupTimeout, func() {
+		log.Error("panik sonrasi temizlik zamaninda bitmedi (olasi kilitlenme); surec kontrollu olarak sonlandiriliyor", "yer", where)
+		FatalExit(2)
+	})
+	return func() { t.Stop() }
 }

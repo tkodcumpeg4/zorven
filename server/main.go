@@ -72,12 +72,19 @@ var (
 	tenantID string
 )
 
+// buildVersion, sunucu ikilisinin derleme surumu (git describe / kisa commit + tarih).
+// Derlemede gomulur: -ldflags "-X main.buildVersion=..." (scripts/build-server.sh,
+// deploy/Dockerfile). Neden ayri: protocol.Version tel protokolunun surumudur ve
+// her derlemede ayni kalir; hangi ikilinin calistigini (zorven_build_info, health,
+// baslangic logu) o soyleyemez. Elle derlenen ikili "dev" gosterir.
+var buildVersion = "dev"
+
 func main() {
 	root := &cobra.Command{
 		Use:          "zorven-server",
 		Aliases:      []string{"zorven", "rpshell-server"},
 		Short:        "Zorven tunel sunucusu",
-		Version:      protocol.Version,
+		Version:      buildVersion + " (protokol " + protocol.Version + ")",
 		SilenceUsage: true,
 	}
 	root.PersistentFlags().StringVar(&dbDSN, "db-dsn", os.Getenv("ZORVEN_DB_DSN"),
@@ -119,7 +126,7 @@ func serveCmd() *cobra.Command {
 				return err
 			}
 			logMemoryLimit(log)
-			obs.SetBuildInfo(protocol.Version)
+			obs.SetBuildInfo(buildVersion)
 			st, err := openStore(cmd.Context())
 			if err != nil {
 				return err
@@ -310,7 +317,7 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 			apiSrv := &api.Server{
 				Net:   netMgr,
 				Store: st, Hub: hub, Log: requests, Events: broker,
-				Logger: log, Version: protocol.Version,
+				Logger: log, Version: buildVersion,
 				GitHub: github, Sessions: sessions,
 				Tickets:      api.NewTicketStore(),
 				Entitlements: entitlementSvc,
@@ -368,7 +375,7 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				// bunlara gelenleri ten_default'ta gorur ve bunlardan gonderir.
 				sysLocalParts := strings.Fields(strings.ReplaceAll(firstNonEmpty(
 					os.Getenv("ZORVEN_SYSTEM_MAILBOXES"),
-					"info hello contact support sales abuse admin kvkk legal privacy postmaster no-reply",
+					"info hello contact support sales abuse admin kvkk legal privacy security postmaster no-reply",
 				), ",", " "))
 				mailSysLocalParts = sysLocalParts
 				if apiSrv.PlatformDomain != "" {
@@ -400,13 +407,21 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 						},
 					}
 				}
-				go func() {
-					log.Info("webmail: gelen SMTP alicisi baslatildi", "addr", inboundAddr, "domain", mailDomain,
+				// B2: dinleyici bir kez acilir; kabul dongusu paniklerse ayni dinleyiciyle
+				// ussel bekleyip yeniden baslar (ListenAndServe yeniden cagrilsa port
+				// hala acik oldugu icin "address in use" ile sessizce dururdu). Kapanista
+				// (mailSrv.Close) Serve nil doner ve yeniden baslatilmaz.
+				if mailLn, lerr := net.Listen("tcp", inboundAddr); lerr != nil {
+					log.Warn("webmail: SMTP alicisi durdu", "hata", lerr)
+				} else {
+					log.Info("webmail: gelen SMTP alicisi baslatildi", "adres", inboundAddr, "domain", mailDomain,
 						"kimlik_dogrulama", string(authMode), "starttls", useTLS)
-					if err := mailSrv.ListenAndServe(); err != nil {
-						log.Warn("webmail: SMTP alicisi durdu", "hata", err)
-					}
-				}()
+					obs.GoRestart(ctx, log, "mail.inbound_smtp", func(context.Context) {
+						if err := mailSrv.Serve(mailLn); err != nil {
+							log.Warn("webmail: SMTP alicisi durdu", "hata", err)
+						}
+					})
+				}
 				go func() {
 					<-ctx.Done()
 					_ = mailSrv.Close()
@@ -420,7 +435,7 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 			}
 			apiSrv.PortPool = portCfg
 			for _, sl := range portCfg.Slots {
-				log.Info("rezerve port havuzu yuvasi", "host", sl.Host, "ip", sl.IP,
+				log.Info("rezerve port havuzu yuvasi", "fqdn", sl.Host, "ip", sl.IP,
 					"port_araligi", fmt.Sprintf("%d-%d", portCfg.Min, portCfg.Max),
 					"joker_bind", sl.Wildcard, "kaydirma", sl.Offset)
 			}
@@ -750,14 +765,34 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 					log.Warn("ZORVEN_EPHEMERAL_RETAIN gecersiz, varsayilan kullaniliyor", "deger", v)
 				}
 			}
+			// Veri yolu suresi dolmus bir gecici tuneli gordugunde supurucuyu durtar
+			// (tamponlu, bloklamaz); pes pese durtmeler tek tura birlesir ve en fazla
+			// 2 saniyede bir tur calisir (istek seli supurucuyu DB'ye yuklemesin).
+			sweepKick := make(chan struct{}, 1)
+			proxy.OnExpiredSeen = func() {
+				select {
+				case sweepKick <- struct{}{}:
+				default:
+				}
+			}
 			obs.GoRestart(ctx, log, "ephemeral_sweeper", func(ctx context.Context) {
 				tk := time.NewTicker(time.Minute)
 				defer tk.Stop()
+				var lastKick time.Time
 				for {
 					select {
 					case <-ctx.Done():
 						return
 					case <-tk.C:
+					case <-sweepKick:
+						if d := 2*time.Second - time.Since(lastKick); d > 0 {
+							select {
+							case <-ctx.Done():
+								return
+							case <-time.After(d):
+							}
+						}
+						lastKick = time.Now()
 					}
 					// 1) Suresi yeni dolanlar trafige kapanir (silinmez).
 					expiredNow, eerr := st.ExpireEphemeralTunnels(ctx)
@@ -928,6 +963,8 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 					}).Wrap(marketing)
 				}
 			}
+			// www -> kok alan adi: surum notu yollari dahil tum tanitim hostu istekleri.
+			marketing = wwwRedirect(marketing)
 
 			// Tanitim (pazarlama) hostlari: kok domain + www. Bu hostlarda panel
 			// yerine tanitim sitesi gosterilir; panel panel.zorven.app'tedir.
@@ -975,7 +1012,7 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 			for _, ph := range platformHostList {
 				if rt, ok := router.Lookup(ph); ok && rt.TenantID != "" {
 					log.Warn("platform hostu bir kiraci kaydiyla catisiyor; kiraciya YONLENDIRILMEZ",
-						"host", ph, "kiraci", rt.TenantID, "tunel", rt.TunnelID)
+						"fqdn", ph, "tenant", rt.TenantID, "tunnel", rt.TunnelID)
 				}
 			}
 
@@ -1071,7 +1108,7 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				Audit:         apiSrv.AuditExternal,
 				FailLimiter:   adminLimiter,
 				ClientIP:      ipOf,
-				Version:       protocol.Version,
+				Version:       buildVersion,
 				Logger:        log,
 				OAuth:         oauthVerifier,
 			})
@@ -1418,7 +1455,7 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				}()
 			}
 			log.Info("sunucu basliyor", "adres", addr, "tls", useTLS, "depolama", "postgres",
-				"control_hosts", controlHosts)
+				"control_hosts", controlHosts, "surum", buildVersion, "protokol", protocol.Version)
 			if !useTLS {
 				log.Warn("TLS KAPALI (--allow-insecure) — tunel trafigi SIFRELENMEMIS. " +
 					"Yalnizca lokal gelistirme icin.")
@@ -1610,7 +1647,7 @@ func resolveSessionManager(ctx context.Context, st store.Store) (*session.Manage
 		if !pgstore.IsSealed(stored) {
 			if sealed := pgstore.SealString(secret); sealed != stored {
 				if err := st.SetSetting(ctx, settingSessionSecret, sealed); err != nil {
-					slog.Warn("oturum gizli anahtari sifreli yeniden yazilamadi", "err", err)
+					slog.Warn("oturum gizli anahtari sifreli yeniden yazilamadi", "hata", err)
 				}
 			}
 		}

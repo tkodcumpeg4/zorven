@@ -347,7 +347,7 @@ func (sm *screenManager) input(msg protocol.ScreenInput) {
 	// mi diye ayrilabilir.
 	ss.inputLog.Do(func() {
 		sm.cs.log.Info("ekran girdisi alindi (ilk olay)",
-			"session", msg.SessionID, "kind", msg.Kind, "os", runtime.GOOS)
+			"session", msg.SessionID, "tur", msg.Kind, "os", runtime.GOOS)
 	})
 
 	// Politika inputQueue'da: yalniz mousemove dusurulur/birlestirilir,

@@ -35,7 +35,7 @@ func SealString(plain string) string {
 				slog.Warn("ZORVEN_SECRET_KEY tanimli degil: oturum sirlari duz metin saklaniyor")
 			})
 		} else {
-			slog.Error("alan sifrelenemedi, duz metin saklaniyor", "err", err)
+			slog.Error("alan sifrelenemedi, duz metin saklaniyor", "hata", err)
 		}
 		return plain
 	}
@@ -64,7 +64,7 @@ func OpenString(v string) (string, error) {
 func openStringLenient(v, what string) string {
 	out, err := OpenString(v)
 	if err != nil {
-		slog.Error("sifreli alan cozulemedi (ZORVEN_SECRET_KEY eksik/yanlis?)", "alan", what, "err", err)
+		slog.Error("sifreli alan cozulemedi (ZORVEN_SECRET_KEY eksik/yanlis?)", "alan", what, "hata", err)
 		return ""
 	}
 	return out

@@ -13,6 +13,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/tkodcumpeg4/zorven/server/netctl"
+	"github.com/tkodcumpeg4/zorven/server/obs"
 	"github.com/tkodcumpeg4/zorven/shared/protocol"
 )
 
@@ -137,6 +138,10 @@ type Session struct {
 	screen2FPS60 bool
 	// screenFiles, istemci ekran oturumu dosya aktarimini pazarladiysa true.
 	screenFiles bool
+
+	// legacyBodyStall: ajan govde okuma hatasini bildirmeyen eski surum (<0.3.8);
+	// el sikismada yazilir, sonra yalniz okunur (legacybody.go).
+	legacyBodyStall bool
 
 	// features, el sikismada pazarlanan (hello_ack ile yankilanan) yetenekler.
 	features []string
@@ -324,7 +329,14 @@ func (s *Session) SendBinary(ctx context.Context, frame protocol.BodyFrame) erro
 
 // Run, oturumun okuma dongusunu ve heartbeat'ini calistirir.
 // Baglanti kapandiginda veya ctx iptal edildiginde doner.
-func (s *Session) Run(ctx context.Context) error {
+func (s *Session) Run(ctx context.Context) (err error) {
+	// Panik sonrasi temizlik bekcisi: en son defer, tum kapanis yolu bitince durur.
+	var stopWatchdog func()
+	defer func() {
+		if stopWatchdog != nil {
+			stopWatchdog()
+		}
+	}()
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -336,8 +348,19 @@ func (s *Session) Run(ctx context.Context) error {
 	defer s.closeAllFiles()
 	defer s.closeNet()
 	defer s.flushFrameLogs()
+	// B2: okuma dongusunde (kontrol isleyicileri dahil) bir panik eskiden HTTP
+	// isleyici goroutine'inde kalsa da sayilmiyor, yalniz stderr'e dusuyordu.
+	// Recover EN SON ertelenir ki ILK calissin: paniği durdurur, baglantiyi
+	// kapatir; ardindan yukaridaki normal kapanis defer'lari (bekleyenler, akislar,
+	// bellek sayaclari) panik olmadan calisir. Panikleyen goroutine bir kilidi
+	// tutuyor idiyse temizlik orada takilir: bekci sureci kontrollu sonlandirir.
+	defer obs.Recover(s.log, "tunnel.session", func(any) {
+		err = errSessionPanic
+		stopWatchdog = obs.PanicWatchdog(s.log, "tunnel.session")
+		s.closeNowSafe()
+	})
 
-	go s.heartbeat(ctx, cancel)
+	s.goSafe("tunnel.heartbeat", cancel, func() { s.heartbeat(ctx, cancel) })
 
 	for {
 		typ, data, err := s.conn.Read(ctx)
@@ -463,7 +486,7 @@ func (s *Session) handleControl(ctx context.Context, data []byte) error {
 		if err := json.Unmarshal(data, &msg); err != nil {
 			return err
 		}
-		s.log.Info("istemci veda etti", "sebep", msg.Reason)
+		s.log.Info("istemci veda etti", "neden", msg.Reason)
 		return s.conn.Close(websocket.StatusNormalClosure, "bye")
 
 	case protocol.TypeWSAccept:
@@ -518,6 +541,12 @@ func (s *Session) handleControl(ctx context.Context, data []byte) error {
 			return nil
 		}
 		s.noteReqHead(e)
+		if msg.HasBody && s.legacyBodyStall {
+			// B5: eski ajan govde hatasini bildirmez; bkz. legacybody.go.
+			if cl := declaredLength(msg.Headers); cl > 0 {
+				e.stallCL = cl
+			}
+		}
 		e.deliverHead(ResponseHead{Status: msg.Status, Headers: msg.Headers, HasBody: msg.HasBody})
 		if !msg.HasBody {
 			e.closeBody(nil)
@@ -688,9 +717,9 @@ func (s *Session) heartbeat(ctx context.Context, cancel context.CancelFunc) {
 			if probe {
 				// Ayri goroutine: yazma kilidi/tamponu doluysa (donmus es) Send
 				// writeTimeout'a kadar bloklayabilir; tespit saati bundan etkilenmemeli.
-				go func() {
+				s.goSafe("tunnel.ping", nil, func() {
 					_ = s.Send(ctx, protocol.Ping{Type: protocol.TypePing, TS: time.Now().UTC()}, protocol.TypePing)
-				}()
+				})
 			}
 		case <-ticker.C:
 			s.mu.Lock()
@@ -760,13 +789,38 @@ func (s *Session) touch() {
 // Evict, oturumu hemen sonlandirir (yerine yeni baglanti gecti). Kapanis
 // el sikismasini beklemez: yari olu soket cevap vermeyebilir.
 func (s *Session) Evict(reason string) {
-	go func() {
+	s.goSafe("tunnel.evict", nil, func() {
 		// Canli bir cift kopya varsa nedenini bilsin (kisa sureli, bloklamaz).
 		ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 		_ = s.Send(ctx, protocol.Bye{Type: protocol.TypeBye, Reason: reason, Code: protocol.ByeCodeReplaced}, protocol.TypeBye)
 		cancel()
 		s.conn.CloseNow()
+	})
+}
+
+// errSessionPanic, oturum okuma dongusu panikleyip kurtarildiginda Run'in hatasi.
+var errSessionPanic = errors.New("oturum panik nedeniyle kapatildi")
+
+// goSafe, oturum kapsamli bir goroutine baslatir. Panikte surec degil yalniz bu
+// oturum duser: baglanti kapatilir (Run'in okumasi hata alir ve normal kapanis
+// yolu bekleyenleri/akislari temizler), varsa cancel cagrilir.
+func (s *Session) goSafe(where string, cancel context.CancelFunc, fn func()) {
+	go func() {
+		defer obs.Recover(s.log, where, func(any) {
+			if cancel != nil {
+				cancel()
+			}
+			s.closeNowSafe()
+		})
+		fn()
 	}()
+}
+
+// closeNowSafe, baglantiyi beklemeden kapatir (testlerde conn nil olabilir).
+func (s *Session) closeNowSafe() {
+	if s.conn != nil {
+		_ = s.conn.CloseNow()
+	}
 }
 
 // Close, oturumu kapatir.

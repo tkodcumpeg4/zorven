@@ -50,6 +50,10 @@ var hopByHop = map[string]bool{
 
 // Handler, control_hostname disindaki tum hostname'ler icin catch-all proxy.
 type Handler struct {
+	// OnExpiredSeen: suresi dolmus ama henuz isaretlenmemis gecici tunele istek
+	// geldiginde cagrilir (supurucuyu durtmek icin). Bloklamamali; nil olabilir.
+	OnExpiredSeen func()
+
 	Router *Router
 	Hub    *tunnel.Hub
 	Log    *slog.Logger
@@ -179,6 +183,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Gecici tunelin suresi doldu (saklama penceresi): 410 Gone, net mesaj.
 	// ExpiresAt: supurucunun isaretlemesini beklemeden bitis aninda kapat (A4 #13).
 	if tun.Expired || (tun.ExpiresAt != nil && !time.Now().Before(*tun.ExpiresAt)) {
+		// Veri yolu sureyi aninda uygular ama kayit (expired_at, enabled) supurucunun
+		// bir sonraki dakikalik turuna kadar eski gorunurdu; supurucuyu simdi durt ki
+		// API ve panel de gecikmeden "suresi doldu" gostersin.
+		if !tun.Expired && h.OnExpiredSeen != nil {
+			h.OnExpiredSeen()
+		}
 		writeError(w, r, http.StatusGone, protocol.CodeTunnelExpired,
 			"Bu gecici tunelin suresi doldu.")
 		return
@@ -223,7 +233,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Hata (kural varken cozumlenemeyen istemci IP'si) = RET (fail-closed).
 		if err != nil || !allowed {
 			h.sampledWarn(RejectIPForbidden, tun.TunnelID, "IP izin listesi tarafindan engellendi",
-				"ip", ip, "tunel", tun.TunnelID, "tenant", tun.TenantID, "hostname", tun.FQDN)
+				"ip", ip, "tunnel", tun.TunnelID, "tenant", tun.TenantID, "fqdn", tun.FQDN)
 			writeError(w, r, http.StatusForbidden, protocol.CodeIPForbidden,
 				"Erişim engellendi: IP adresiniz ("+ip+") bu tünelin izin listesinde bulunmuyor.")
 			h.logReject(tun, r, http.StatusForbidden, RejectIPForbidden, started)
@@ -351,7 +361,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case pol.wafBlocked:
 			// Hangi kuralin eslestigi YALNIZCA logda; yanit bilgi sizdirmaz.
 			h.sampledWarn(RejectWAFBlocked, tun.TunnelID, "waf tarafindan engellendi",
-				"tunel", tun.TunnelID, "hostname", tun.FQDN,
+				"tunnel", tun.TunnelID, "fqdn", tun.FQDN,
 				"ip", clientIP(r), "yol", r.URL.Path, "kural", pol.wafRule)
 			writeError(w, r, http.StatusForbidden, protocol.CodeAccessDenied,
 				"İstek güvenlik politikası tarafından engellendi.")
@@ -362,7 +372,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				st = http.StatusUnauthorized
 			}
 			h.sampledWarn(RejectWebhookFailed, tun.TunnelID, "webhook imza dogrulamasi basarisiz",
-				"tunel", tun.TunnelID, "hostname", tun.FQDN, "durum", st)
+				"tunnel", tun.TunnelID, "fqdn", tun.FQDN, "durum", st)
 			writeError(w, r, st, protocol.CodeAccessDenied, pol.webhookMessage)
 			h.logReject(tun, r, st, RejectWebhookFailed, started)
 		}
@@ -388,7 +398,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Hiz siniri tunel cozumlendikten hemen sonra, istemciye herhangi bir
 	// is gonderilmeden once uygulanir.
 	if h.ReqLimiter != nil && !h.ReqLimiter.Allow(tun.TunnelID) {
-		h.sampledWarn(RejectRateLimited, tun.TunnelID, "tunel hiz siniri asildi", "tunel", tun.TunnelID, "hostname", tun.FQDN)
+		h.sampledWarn(RejectRateLimited, tun.TunnelID, "tunel hiz siniri asildi", "tunnel", tun.TunnelID, "fqdn", tun.FQDN)
 		w.Header().Set("Retry-After", strconv.Itoa(int(h.ReqLimiter.RetryAfter().Seconds())))
 		writeError(w, r, http.StatusTooManyRequests, protocol.CodeRateLimited,
 			"Bu tunel icin istek hizi siniri asildi.")

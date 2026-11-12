@@ -1,0 +1,36 @@
+# Zorven hafif izleme: cron ornegi (docs/operasyon-gozlemlenebilirlik.md §10).
+# Kurulum (sunucuda, root):
+#   install -m 0755 scripts/ops/metrics-watch.sh /usr/local/bin/zorven-metrics-watch
+#   install -m 0600 /dev/null /etc/zorven/metrics-token && echo "$ZORVEN_METRICS_TOKEN" > /etc/zorven/metrics-token
+#   cp deploy/ops/metrics-watch.cron.example /etc/cron.d/zorven-metrics-watch   (asagidaki satirlari duzenleyin)
+# /etc/cron.d bicimi: dakika saat gun ay haftagunu KULLANICI komut. flock: onceki calisma (argon2 30 sn
+# tekrar olcumu) bitmeden yenisi baslamaz. Cikti syslog'a da gider (logger); cron e-postasi istenmiyorsa
+# >/dev/null ile susturuldu, uyarilar --mail-cmd ile gider.
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+* * * * * root flock -n /run/zorven-metrics-watch.lock /usr/local/bin/zorven-metrics-watch --compose-service zorven-primary --token-file /etc/zorven/metrics-token --state-dir /var/lib/zorven-metrics-watch --disk-path / --disk-path /var/lib/docker --mail-cmd '{ printf "To: ops@example.com\nSubject: %s\n\n" "$ZV_ALERT_SUBJECT"; cat; } | /usr/sbin/sendmail -t' >/dev/null 2>&1
+
+# Dis erisilebilirlik (E3): SUNUCUNUN DISINDAKI bir makinede (or. gelistirme bilgisayari) kullanici crontab'i
+# (`crontab -e`), 5 dakikada bir:
+# */5 * * * * /path/to/repo/scripts/ops/uptime-check.sh --base https://example.com --panel https://panel.example.com --mail-cmd 'mail -s "$ZV_ALERT_SUBJECT" ops@example.com' >/dev/null 2>&1
+
+# --- systemd timer alternatifi -------------------------------------------------------------------
+# /etc/systemd/system/zorven-metrics-watch.service
+#   [Unit]
+#   Description=Zorven metrik izleme (tek calisma)
+#   [Service]
+#   Type=oneshot
+#   ExecStart=/usr/local/bin/zorven-metrics-watch --compose-service zorven-primary --token-file /etc/zorven/metrics-token --state-dir /var/lib/zorven-metrics-watch
+#   # Cikis 1 = "etkin uyari var"; birimi basarisiz saymasin:
+#   SuccessExitStatus=1
+# /etc/systemd/system/zorven-metrics-watch.timer
+#   [Unit]
+#   Description=Zorven metrik izleme dakikalik
+#   [Timer]
+#   OnCalendar=*-*-* *:*:00
+#   AccuracySec=5s
+#   [Install]
+#   WantedBy=timers.target
+# Etkinlestirme: systemctl daemon-reload && systemctl enable --now zorven-metrics-watch.timer
+# Gunluk: journalctl -t zorven-metrics-watch ; durum: cat /var/lib/zorven-metrics-watch/status.json

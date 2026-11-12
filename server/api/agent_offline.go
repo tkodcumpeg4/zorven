@@ -121,11 +121,11 @@ func (s *Server) evaluateAgentOffline(ctx context.Context, lister offlineLister,
 		return
 	}
 	for _, c := range down {
-		s.logger().Warn("ajan kopuk", "client_id", c.ID, "kiraci", c.TenantSlug, "surum", c.Version,
+		s.logger().Warn("ajan kopuk", "client", c.ID, "tenant", c.TenantSlug, "surum", c.Version,
 			"son_gorulme", c.LastSeenAt.UTC().Format(time.RFC3339))
 	}
 	for _, c := range up {
-		s.logger().Info("ajan geri baglandi", "client_id", c.ID, "kiraci", c.TenantSlug)
+		s.logger().Info("ajan geri baglandi", "client", c.ID, "tenant", c.TenantSlug)
 	}
 	s.sendAgentOfflineEmail(w.Emails, down, up, len(next), after)
 }

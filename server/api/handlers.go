@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/tkodcumpeg4/zorven/server/obs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -1963,7 +1964,7 @@ func (s *Server) pushClientConfig(clientID string) {
 	if !ok {
 		return
 	}
-	go func() {
+	obs.Go(s.logger(), "api_config_push", func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
@@ -2002,7 +2003,7 @@ func (s *Server) pushClientConfig(clientID string) {
 		}, protocol.TypeConfigUpdate); err != nil {
 			s.logger().Warn("config_update gonderilemedi", "client", clientID, "hata", err)
 		}
-	}()
+	})
 }
 
 func (s *Server) logger() *slog.Logger {

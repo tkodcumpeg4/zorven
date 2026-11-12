@@ -18,6 +18,7 @@ import (
 
 	"github.com/tkodcumpeg4/zorven/server/bandwidth"
 	"github.com/tkodcumpeg4/zorven/server/ipfilter"
+	"github.com/tkodcumpeg4/zorven/server/obs"
 	"github.com/tkodcumpeg4/zorven/server/tunnel"
 	"github.com/tkodcumpeg4/zorven/server/tunsec"
 	"github.com/tkodcumpeg4/zorven/shared/protocol"
@@ -217,7 +218,9 @@ func (m *Manager) Reload() {
 			m.tcpLn[port] = ln
 			m.byPort[port] = ti
 			m.Log.Info("rawproxy: TCP dinleyici acildi", "bind", port.addr, "port", port.port, "tunnel", ti.TunnelID)
-			go m.acceptLoop(ln, port)
+			// B2: kabul dongusu paniklerse sure dusmez; dongu ussel bekleyip
+			// yeniden baslar (dinleyici kapandiysa yeni dongu hemen normal doner).
+			obs.GoRestart(m.ctx(), m.Log, "rawproxy.accept", func(context.Context) { m.acceptLoop(ln, port) })
 		} else { // udp
 			if ul, ok := m.udpLn[port]; ok {
 				ul.setInfo(ti) // sinir/istemci degisikligi dinleyiciyi yeniden acmadan uygulanir
@@ -259,6 +262,9 @@ func (m *Manager) acceptLoop(ln net.Listener, port listenKey) {
 
 func (m *Manager) handleTCP(conn net.Conn, port listenKey) {
 	defer conn.Close()
+	// B2: baglanti basina goroutine; panikte yalniz bu baglanti kapanir
+	// (bridgeTCP'nin kendi defer'lari akisi kapatir, sayac/kullanim yazilir).
+	defer obs.Recover(m.Log, "rawproxy.tcp", nil)
 
 	m.mu.Lock()
 	ti, ok := m.byPort[port]
@@ -379,7 +385,7 @@ func (m *Manager) bridgeTCP(conn net.Conn, ti TunnelInfo) {
 		case ack := <-stream.Accept():
 			if ack.Code != "" {
 				st.reject(TCPRejectDial)
-				m.Log.Debug("rawproxy: yerel hedefe baglanilamadi", "tunnel", ti.TunnelID, "code", ack.Code, "msg", ack.Message)
+				m.Log.Debug("rawproxy: yerel hedefe baglanilamadi", "tunnel", ti.TunnelID, "kod", ack.Code, "mesaj", ack.Message)
 				return
 			}
 		case <-time.After(streamAckTimeout):
@@ -441,6 +447,12 @@ func (m *Manager) bridgeTCP(conn net.Conn, ti TunnelInfo) {
 	visitorEOF := make(chan bool, 1) // deger: yari kapama pazarlandi mi
 	go func() {
 		defer meter.Flush() // bridge donduktan sonra gelen son baytlar da yazilir
+		// Panik: akis ve baglanti kapatilir; ana dongu Closed/ctx ile doner.
+		defer obs.Recover(m.Log, "rawproxy.tcp_pump", func(any) {
+			cancel()
+			conn.Close()
+			stream.Close("panic")
+		})
 		buf := make([]byte, 32*1024)
 		for {
 			n, rerr := conn.Read(buf)

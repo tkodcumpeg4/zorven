@@ -188,7 +188,7 @@ func (s *Session) routeWSData(reqID uint64, payload []byte) {
 	if err := b.q.push(payload); err != nil {
 		s.logStreamAbort("ws", reqID, b.tunnelID, err)
 		b.q.abort()
-		go s.closeWSBridge(b, "overflow")
+		s.goSafe("tunnel.ws_close", nil, func() { s.closeWSBridge(b, "overflow") })
 	}
 }
 

@@ -185,6 +185,6 @@ func (s *StunServer) Listen(addr string) (net.PacketConn, error) {
 	if err != nil {
 		return nil, err
 	}
-	s.Log.Info("STUN dinleyicisi basladi", "addr", pc.LocalAddr().String())
+	s.Log.Info("STUN dinleyicisi basladi", "adres", pc.LocalAddr().String())
 	return pc, nil
 }

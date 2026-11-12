@@ -8,6 +8,8 @@
  */
 import { authClient } from '~/lib/auth-client'
 import { gt } from '~/plugins/i18n'
+import { track } from '~/lib/analytics'
+import { flushAuthMarkers, markSignupPendingVerify, markSocialLoginStarted } from '~/composables/useFunnel'
 
 /** Kimlik dogrulama akisinda sunucunun dondurdugu hata kodunu tasiyan hata. */
 export class AuthFlowError extends Error {
@@ -140,6 +142,7 @@ export function useAuth() {
       }
 
       if (authed.value && method.value === 'better-auth') {
+        flushAuthMarkers()
         await loadOrganizations()
       }
 
@@ -223,6 +226,7 @@ export function useAuth() {
     }
     needs2FA.value = false
     await check()
+    track('login', { method: 'email' })
     return { twoFactor: false }
   }
 
@@ -234,6 +238,7 @@ export function useAuth() {
     if (res?.error) throw new Error(res.error.message || gt('auth.thrownCodeVerify'))
     needs2FA.value = false
     await check()
+    track('login', { method: 'email', mfa: true })
   }
 
   /** Giriş 2. adımı: e-posta kodu gönder (kendi mail sunucumuzdan). */
@@ -248,6 +253,7 @@ export function useAuth() {
     if (res?.error) throw new Error(res.error.message || gt('auth.thrownCodeVerify'))
     needs2FA.value = false
     await check()
+    track('login', { method: 'email', mfa: true })
   }
 
   /** Giriş 2. adımı: yedek kod ile doğrula → oturum açılır. */
@@ -256,6 +262,7 @@ export function useAuth() {
     if (res?.error) throw new Error(res.error.message || gt('auth.thrownBackupVerify'))
     needs2FA.value = false
     await check()
+    track('login', { method: 'email', mfa: true })
   }
 
   /**
@@ -352,9 +359,12 @@ export function useAuth() {
     }
     // token null => e-posta doğrulama zorunlu, oturum açılmadı.
     if (!(res?.data as any)?.token) {
+      markSignupPendingVerify()
+      track('signup', { verify: true })
       return { needsVerification: true }
     }
     await check()
+    track('signup', { verify: false })
     return { needsVerification: false }
   }
 
@@ -367,6 +377,7 @@ export function useAuth() {
 
   /** Better Auth GitHub ile giriş */
   async function loginWithBetterAuthGithub(): Promise<void> {
+    markSocialLoginStarted()
     await authClient.signIn.social({
       provider: 'github',
       callbackURL: window.location.origin,
@@ -375,6 +386,7 @@ export function useAuth() {
 
   /** Better Auth Google ile giriş */
   async function loginWithBetterAuthGoogle(): Promise<void> {
+    markSocialLoginStarted()
     await authClient.signIn.social({
       provider: 'google',
       callbackURL: window.location.origin,

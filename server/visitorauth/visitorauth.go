@@ -504,7 +504,7 @@ func (m *Manager) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	allowed := EmailAllowed(email, pc.AllowedEmails)
 	if !allowed {
 		if m.log != nil {
-			m.log.Info("ziyaretçi reddedildi (izin listesinde yok)", "email", email, "host", st.Host)
+			m.log.Info("ziyaretçi reddedildi (izin listesinde yok)", "email", email, "fqdn", st.Host)
 		}
 		m.emit(r, st.Host, st.Provider, email, false, "email_not_allowed")
 	}

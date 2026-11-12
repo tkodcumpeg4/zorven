@@ -134,7 +134,7 @@ func (h *Handler) logRejectID(tun store.HostRoute, r *http.Request, status int, 
 	ok, warn := h.rejectLim.allow(tun.TunnelID)
 	if warn > 0 && h.Log != nil {
 		h.Log.Warn("reddedilen istek loglari hiz siniri nedeniyle atildi",
-			"tunel", tun.TunnelID, "kiraci", tun.TenantID, "atilan", warn, "pencere", rejectWarnEvery.String())
+			"tunnel", tun.TunnelID, "tenant", tun.TenantID, "atilan", warn, "pencere", rejectWarnEvery.String())
 	}
 	if !ok {
 		return

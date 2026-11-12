@@ -335,7 +335,7 @@ func (v *videoCtl) encodeLoop(ctx context.Context) {
 				return
 			}
 			wait, perm := v.retry.Fail(time.Now())
-			v.s.logWarn("video kodlayici hatasi", "hata", err, "yeniden_deneme", wait, "kalici", perm)
+			v.s.logWarn("video kodlayici hatasi", "hata", err, "bekleme", wait, "kalici", perm)
 			v.broken.Store(true)
 			e.close()
 			e.sendStop(ctx)

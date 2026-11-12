@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/tkodcumpeg4/zorven/server/obs"
 	"github.com/tkodcumpeg4/zorven/server/store"
 )
 
@@ -86,12 +87,15 @@ func StartClientServers(ctx context.Context, cfg ClientServersConfig) (*ClientCo
 	log := cfg.Logger
 
 	run := func(name string, f func() error, closer func() error) {
-		go func() {
-			log.Info("mail istemcisi sunucusu baslatildi", "sunucu", name)
-			if err := f(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Info("mail istemcisi sunucusu baslatildi", "sunucu", name)
+		// B2: kabul dongusunde panik tum sureci (tunelleri) dusurmesin: loglanir,
+		// sayilir, ayni dinleyiciyle ussel bekleyip yeniden baslar. Kapanista
+		// (ctx/closer) Serve normal doner ve yeniden baslatilmaz.
+		obs.GoRestart(ctx, log, "mail.client_server", func(context.Context) {
+			if err := f(); err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
 				log.Warn("mail istemcisi sunucusu durdu", "sunucu", name, "hata", err)
 			}
-		}()
+		})
 		go func() {
 			<-ctx.Done()
 			_ = closer()

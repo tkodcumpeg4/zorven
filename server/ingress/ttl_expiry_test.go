@@ -25,7 +25,8 @@ func TestServeHTTPEphemeralPastExpiresAtIsGone(t *testing.T) {
 	if err := r.Reload(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	h := &Handler{Router: r}
+	kicks := 0
+	h := &Handler{Router: r, OnExpiredSeen: func() { kicks++ }}
 	do := func(host string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodGet, "https://"+host+"/api", nil)
 		req.Host = host
@@ -37,8 +38,15 @@ func TestServeHTTPEphemeralPastExpiresAtIsGone(t *testing.T) {
 	if w := do("gecti.zorven.app"); w.Code != http.StatusGone || !strings.Contains(w.Body.String(), "tunnel_expired") {
 		t.Fatalf("410 tunnel_expired bekleniyordu: %d %s", w.Code, w.Body.String())
 	}
+	// Isaretlenmemis suresi dolmus tunel supurucuyu durtar (API/panel gecikmesin).
+	if kicks != 1 {
+		t.Fatalf("supurucu durtmesi 1 bekleniyordu: %d", kicks)
+	}
 	// Suresi dolmamis: TTL kontrolunden gecer (pasif oldugu icin 503; Hub'a ulasmaz).
 	if w := do("suruyor.zorven.app"); w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("suresi dolmamis tunel: %d %s", w.Code, w.Body.String())
+	}
+	if kicks != 1 {
+		t.Fatalf("suresi dolmamis tunel supurucuyu durtmemeli: %d", kicks)
 	}
 }

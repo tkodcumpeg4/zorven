@@ -20,14 +20,14 @@ func (s *Server) getSubscription(w http.ResponseWriter, r *http.Request) {
 
 	sub, err := s.Store.GetSubscription(r.Context(), tenantID)
 	if err != nil {
-		s.logger().Error("abonelik bilgisi alinamadi", "tenant_id", tenantID, "hata", err)
+		s.logger().Error("abonelik bilgisi alinamadi", "tenant", tenantID, "hata", err)
 		writeJSONError(w, http.StatusInternalServerError, "db_error", "Abonelik bilgisi alinamadi")
 		return
 	}
 
 	usage, err := s.Store.GetTenantUsage(r.Context(), tenantID)
 	if err != nil {
-		s.logger().Error("kullanim bilgisi alinamadi", "tenant_id", tenantID, "hata", err)
+		s.logger().Error("kullanim bilgisi alinamadi", "tenant", tenantID, "hata", err)
 		writeJSONError(w, http.StatusInternalServerError, "db_error", "Kullanim bilgisi alinamadi")
 		return
 	}
@@ -50,7 +50,7 @@ func (s *Server) planChanged(tenantID string) {
 	if s.Door != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		if _, err := s.Door.EnforcePlan(ctx, tenantID); err != nil {
-			s.logger().Warn("plan dususunde web kapilar kapatilamadi", "tenant_id", tenantID, "hata", err)
+			s.logger().Warn("plan dususunde web kapilar kapatilamadi", "tenant", tenantID, "hata", err)
 		}
 		cancel()
 	}

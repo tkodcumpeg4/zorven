@@ -1,0 +1,47 @@
+# zorven-primary: root OLMAYAN kullanici + salt okunur kok dosya sistemi (O20 / plan D).
+#
+# Bu bir OVERRIDE dosyasidir; tek basina calismaz. Kullanim (deploy/ dizininde):
+#   docker compose -f docker-compose.yml -f docker-compose.nonroot.yml up -d zorven-primary
+# Geri alma: ayni komut override'siz (-f docker-compose.nonroot.yml olmadan).
+# Ilk gecis ve geri alma icin deploy/ops/migrate-nonroot.sh kullanin: birim/sertifika
+# sahipligini hazirlar, saglik bekler, basarisizlikta otomatik geri alir.
+#
+# Gereken: docker compose >= 2.24 (`!reset` etiketi). Ag kipi bridge olmali (bu yigin
+# oyle; network_mode: host'ta sysctl uygulanamaz, bkz. docs/operasyon-gozlemlenebilirlik.md §9).
+#
+# Yazma yollari (kod taramasi + yerel `docker diff`, ayrinti §9 tablosu):
+#   /app/state  zorven_state birimi: uretilen admin anahtari (yalniz ZORVEN_ADMIN_KEY bos
+#               ve DB'de anahtar yokken), istege bagli ZORVEN_ROUTE_SNAPSHOT / ipset onbellegi.
+#   /tmp        tmpfs (bugun kod yazmiyor; kutuphane/teshis icin guvenlik payi).
+# Salt okunur kalanlar: /app/certs (sunucu yalniz okur; ACME sertifikalari Postgres'te),
+# /app/server/bin (client_bins: sunucu yalniz okur, yukleme `docker cp` ile disaridan),
+# /app/data (geo veritabani, zaten :ro).
+
+services:
+  zorven-primary:
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777
+    # Dusuk portlar (80/443/25/465/587/993): root olmayan surec NET_BIND_SERVICE'i
+    # kullanamaz (Docker yetenegi yalniz sinir kumesine koyar; no-new-privileges dosya
+    # yetenegini/setcap'i da engeller). Bu sysctl yalniz konteynerin AG AD ALANINDA
+    # gecerlidir (host'u etkilemez); port esleme, komut satiri ve saglik kontrolu
+    # degismeden kalir. Ayrinti ve alternatif (8443/8080 + port esleme): §9.
+    sysctls:
+      net.ipv4.ip_unprivileged_port_start: "0"
+    # Hicbir yetenek gerekmez: dusuk port sysctl ile, dosya erisimi sahiplik/grup ile.
+    # `!reset` taban dosyadaki NET_BIND_SERVICE/DAC_OVERRIDE/FOWNER'i siler (liste
+    # birlestirmesi aksi halde onlari korurdu). cap_drop: ALL ve no-new-privileges tabandan gelir.
+    cap_add: !reset []
+    environment:
+      # Calisma dizini (/app) salt okunur; uretilen admin anahtari yazilabilir birime.
+      - ZORVEN_ADMIN_KEY_FILE=/app/state/zorven-admin-key.txt
+      # Ileride ZORVEN_ROUTE_SNAPSHOT / ZORVEN_IPSET_CACHE acilirsa yollari /app/state
+      # altinda olmali (or. /app/state/routes.snap); baska yer salt okunur, yazim hata verir.
+    volumes:
+      # Yeni birim ilk baglanista imajdaki /app/state'in sahipligini (65532, 0750) alir.
+      - zorven_state:/app/state
+
+volumes:
+  zorven_state:

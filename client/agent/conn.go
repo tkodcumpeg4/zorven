@@ -1031,7 +1031,7 @@ func (a *Agent) readLoop(parent context.Context, conn *websocket.Conn, cork *cor
 				continue
 			}
 			a.Log.Debug("istek alindi",
-				"req_id", req.ReqID, "metot", req.Method, "path", req.Path)
+				"req_id", req.ReqID, "metot", req.Method, "yol", req.Path)
 			cs.handleRequest(ctx, req)
 
 		case protocol.TypeWSOpen:
@@ -1330,7 +1330,7 @@ func (a *Agent) readLoop(parent context.Context, conn *websocket.Conn, cork *cor
 		case protocol.TypeBye:
 			var b protocol.Bye
 			json.Unmarshal(data, &b)
-			a.Log.Info("sunucu baglantiyi sonlandirdi", "sebep", b.Reason)
+			a.Log.Info("sunucu baglantiyi sonlandirdi", "neden", b.Reason)
 			// Kalici hata yalniz yapisal kodla (ya da eski sunucularin acik
 			// "token ..." on ekiyle) anlasilir; serbest metinde "token" gecmesi yetmez.
 			if b.Code == protocol.ByeCodeAuthRevoked || strings.HasPrefix(strings.ToLower(b.Reason), "token ") {

@@ -202,25 +202,25 @@ type uiText struct {
 var ui = map[string]uiText{
 	LangTR: {"Güncellemeler", "Sürümler, güncellemeler ve bakımlar", "Zorven'de ne değişti, ne zaman bakım yapacağız: tüm duyurular tek yerde.",
 		"Güncellemeler — Sürüm notları ve bakım duyuruları | Zorven",
-		"Zorven sürüm notları, güncellemeler ve planlı bakım duyuruları.",
+		"Zorven istemci ve platform sürüm notları, yeni özellikler, hata düzeltmeleri ve planlı bakım duyuruları. RSS ve e-posta ile takip edebilirsin.",
 		"Tüm güncellemeler", "Henüz yayınlanmış bir güncelleme yok.", "Yeni", "Eski", "RSS ile takip et",
 		"Bakım penceresi", "Bu yazı henüz bu dile çevrilmedi; %s sürümü gösteriliyor.", "Güncelleme bulunamadı", "tr_TR",
 		"E-posta duyurularını panelinizin Profil sayfasından yönetebilirsiniz."},
 	LangEN: {"Updates", "Releases, updates and maintenance", "What changed in Zorven and when we will perform maintenance: all announcements in one place.",
 		"Updates — Release notes and maintenance notices | Zorven",
-		"Zorven release notes, product updates and planned maintenance notices.",
+		"Zorven client and platform release notes, new features, bug fixes and planned maintenance notices. Follow them via RSS or email announcements.",
 		"All updates", "No updates have been published yet.", "Newer", "Older", "Follow via RSS",
 		"Maintenance window", "This post has not been translated into this language yet; showing the %s version.", "Update not found", "en_US",
 		"You can manage announcement emails on the Profile page of your dashboard."},
 	LangJA: {"更新情報", "リリース、アップデート、メンテナンス", "Zorven の変更内容と今後のメンテナンス予定をまとめてお知らせします。",
 		"更新情報 — リリースノートとメンテナンス告知 | Zorven",
-		"Zorven のリリースノート、アップデート、計画メンテナンスのお知らせ。",
+		"Zorven のクライアントとプラットフォームのリリースノート、新機能、不具合の修正、計画メンテナンスのお知らせをまとめて掲載しています。RSS やメールで更新を受け取れます。",
 		"すべての更新情報", "公開された更新情報はまだありません。", "新しい記事", "古い記事", "RSS で購読",
 		"メンテナンス時間", "この記事はまだこの言語に翻訳されていません。%s 版を表示しています。", "更新情報が見つかりません", "ja_JP",
 		"お知らせメールの設定はダッシュボードのプロフィールページで変更できます。"},
 	LangZH: {"更新动态", "版本发布、更新与维护", "Zorven 有哪些变化、我们何时进行维护：所有公告集中在这里。",
 		"更新动态 — 版本说明与维护公告 | Zorven",
-		"Zorven 版本说明、产品更新与计划维护公告。",
+		"Zorven 客户端与平台的版本说明、新功能、问题修复以及计划维护公告都集中在这里。你可以通过 RSS 或电子邮件订阅，第一时间了解每次更新的内容。",
 		"全部更新", "尚未发布任何更新。", "较新", "较早", "通过 RSS 订阅",
 		"维护窗口", "本文尚未翻译为该语言，当前显示%s版本。", "未找到该更新", "zh_CN",
 		"你可以在控制台的“个人资料”页面管理公告邮件。"},
@@ -365,7 +365,7 @@ func (s *Site) servePost(w http.ResponseWriter, r *http.Request, lang, slug stri
 		canon = s.abs(PostPath(used, p.Slug)) // ceviri yoksa kanonik asil dildir
 	}
 	s.render(w, r, lang, http.StatusOK, headInfo{
-		title: seoTitle(title) + " | Zorven", desc: Excerpt(body, 160), canonical: canon, alts: alts,
+		title: seoTitle(title) + " | Zorven", desc: Excerpt(body, 157), canonical: canon, alts: alts,
 		ogLocale: t.OGLocale, rss: s.abs(ListPath(lang) + "/rss.xml"),
 	}, b.String())
 }
@@ -460,8 +460,10 @@ func (s *Site) serveSitemap(w http.ResponseWriter, r *http.Request) {
 // seoTitle, <title> icin yazi basligini kisaltir: arama sonuclarinda ~60 karakter
 // gosterilir; uzun surum notu basliklari ("Zorven 0.3.4: tunellerde gRPC, yeni ...")
 // kesilerek anlamsiz gorunuyordu. Kelime sinirindan kisaltir, "…" ekler.
+// Sonuna " | Zorven" (9 karakter) eklendigi icin toplam baslik 60 karakteri gecmez:
+// en fazla 50 karakter + "…" + " | Zorven" = 60.
 func seoTitle(t string) string {
-	const max = 56
+	const max = 50
 	r := []rune(strings.TrimSpace(t))
 	if len(r) <= max {
 		return string(r)

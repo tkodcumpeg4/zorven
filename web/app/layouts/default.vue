@@ -36,6 +36,14 @@ async function onAnnounceAnswer(yes: boolean) {
   else if (yes) toast.success(t('profile.announceSaved'))
 }
 
+// Huni olcumu: kiracinin ilk istemci/tunel cevrimici ani (kisisel veri yok; bkz. composables/useFunnel).
+const funnel = useFunnel()
+async function observeFunnel() {
+  try { return await funnel.observe() } catch { return false }
+}
+watch(() => tenant.value?.id, () => { observeFunnel() }, { immediate: true })
+useLiveRefresh(observeFunnel, { events: ['client.*', 'tunnel.*'], fallbackMs: 30000 })
+
 onMounted(() => {
   initTheme()
   loadProjects()

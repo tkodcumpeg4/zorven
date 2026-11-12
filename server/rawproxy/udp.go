@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/tkodcumpeg4/zorven/server/bandwidth"
+	"github.com/tkodcumpeg4/zorven/server/obs"
 	"github.com/tkodcumpeg4/zorven/server/tunnel"
 )
 
@@ -217,9 +218,12 @@ func (m *Manager) newUDPListener(bind string, port int, ti TunnelInfo) (*udpList
 	}
 	ul.setInfo(ti)
 	ul.meter = bandwidth.NewBatcher(m.Usage, ti.TenantID, bandwidth.UsageTypeUDP)
-	go ul.readLoop()
-	go ul.idleSweep()
-	go ul.rateLoop()
+	// B2: dinleyici duzeyindeki donguler paniklerse yeniden baslar (dinleyici
+	// kapandiysa yeni dongu normal doner); eskiden tek panik tum sureci dusururdu.
+	bg := m.ctx()
+	obs.GoRestart(bg, m.Log, "rawproxy.udp_read", func(context.Context) { ul.readLoop() })
+	obs.GoRestart(bg, m.Log, "rawproxy.udp_sweep", func(context.Context) { ul.idleSweep() })
+	obs.GoRestart(bg, m.Log, "rawproxy.udp_rate", func(context.Context) { ul.rateLoop() })
 	return ul, nil
 }
 
@@ -233,7 +237,10 @@ func (ul *udpListener) setInfo(ti TunnelInfo) {
 	if old != nil && (len(old.Replicas) > 0 || len(ti.Replicas) > 0) && !sameCandidates(*old, ti) {
 		// Asenkron: removeFlow ajana StreamClose yazar (bloklayabilir); setInfo
 		// Manager.Reload icinden, m.mu altinda cagrilir.
-		go ul.dropStaleFlows()
+		go func() {
+			defer obs.Recover(ul.m.Log, "rawproxy.udp_drop", nil)
+			ul.dropStaleFlows()
+		}()
 	}
 }
 
@@ -336,7 +343,7 @@ func (ul *udpListener) logRateDrop(kind string, limit int, now time.Time) {
 		return
 	}
 	ul.m.Log.Warn("rawproxy: udp pps siniri asildi, paketler dusuruluyor",
-		"kind", kind, "limit_pps", limit, "tunnel", ul.info().TunnelID)
+		"tur", kind, "limit_pps", limit, "tunnel", ul.info().TunnelID)
 }
 
 // handle, tek bir gelen datagrami isler. Yalnizca okuma dongusunden cagrilir.
@@ -433,6 +440,8 @@ func (ul *udpListener) openFlow(ti TunnelInfo, src *net.UDPAddr, key string) *ud
 
 // pumpFromLocal, ajandan gelen (yerel->ziyaretci) datagramlari kaynak adrese yazar.
 func (ul *udpListener) pumpFromLocal(f *udpFlow, src *net.UDPAddr, key string) {
+	// B2: flow basina; panikte yalniz bu flow kaldirilir.
+	defer obs.Recover(ul.m.Log, "rawproxy.udp_flow", func(any) { ul.removeFlow(key, f) })
 	// Baglanti sonucunu bekle.
 	select {
 	case ack := <-f.stream.Accept():

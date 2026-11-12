@@ -189,7 +189,7 @@ func (a *Agent) maybeUpdate(ctx context.Context, reason string) {
 		return
 	}
 	a.Log.Info("guncelleme bulundu, indiriliyor",
-		"mevcut", a.Version, "yeni", m.Version, "sebep", reason)
+		"mevcut", a.Version, "yeni", m.Version, "neden", reason)
 
 	if badVersion(exePath, m.Version) {
 		a.Log.Warn("guncelleme atlandi: bu surum daha once geri alindi", "surum", m.Version)

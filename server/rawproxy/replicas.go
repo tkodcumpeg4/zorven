@@ -306,7 +306,7 @@ func (m *Manager) openReplicaTCP(ctx context.Context, ti TunnelInfo, order []str
 		m.clientEnd(cid)
 		failed++
 		m.logDebug("rawproxy: replika yerel hedefe baglanamadi, siradaki deneniyor",
-			"tunnel", ti.TunnelID, "client", cid, "code", ack.Code, "msg", ack.Message, "zaman_asimi", res == ackTimeout)
+			"tunnel", ti.TunnelID, "client", cid, "kod", ack.Code, "mesaj", ack.Message, "zaman_asimi", res == ackTimeout)
 	}
 	if failed == 0 {
 		return nil, nil, TCPRejectOffline

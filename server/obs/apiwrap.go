@@ -77,7 +77,7 @@ func InstrumentAPI(next http.Handler, routeOf func(*http.Request) string, log *s
 				}
 				CountPanic("api")
 				if log != nil {
-					log.Error("API isleyicisi panikledi", "request_id", rid, "yontem", r.Method,
+					log.Error("API isleyicisi panikledi", "request_id", rid, "metot", r.Method,
 						"rota", routeOf(r), "panik", p, "yigin", string(debug.Stack()))
 				}
 				if rec.status == 0 && !rec.hijacked {

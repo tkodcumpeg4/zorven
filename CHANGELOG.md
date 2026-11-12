@@ -6,6 +6,28 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- Server build version embedded in the binary (`-X main.buildVersion`, `scripts/build-server.sh`, `ZORVEN_BUILD_VERSION` build argument in `deploy/Dockerfile`); shown in `zorven_build_info`, authenticated health/status, MCP server info and the startup log.
+- WebSocket tunnels carry `X-Zorven-Request-Id` on the handshake and in the live request log.
+- Non-root, read-only container mode: the server image defaults to uid 65532; `deploy/docker-compose.nonroot.yml` / `docker-compose.nonroot-web.yml` overrides and `deploy/ops/migrate-nonroot.sh` (dry-run, apply, automatic rollback). The base compose file keeps `user: "0:0"` until you switch.
+- Lightweight ops scripts: `scripts/ops/metrics-watch.sh` (reads `/metrics` and `/readyz`, threshold alerts, cron/systemd example), `scripts/ops/uptime-check.sh`, `scripts/ops/upload-client-bins.sh`; `scripts/govulncheck.sh` now uses a known-exception gate and also scans `desktop`.
+- Optional sign-up funnel events in the panel; they are sent only if a Umami `window.umami` object is present (the open edition loads no analytics script).
+- `security` is part of the default system mailbox list.
+
+### Changed
+- Structured log field names unified across server and client (`tenant`, `client`, `tunnel`, `fqdn`, `adres`, `hata`, ...), guarded by tests; remaining mail `log.Printf` calls moved to `slog`.
+- A request that reaches an expired ephemeral tunnel wakes the sweeper, so the API and panel show it as expired without waiting for the next minute.
+- `www.` hosts redirect to the root domain for every marketing path, including release notes.
+- Panel: better-auth 1.7.20, Nuxt 4.6.4 and transitive security updates; the web image installs with `npm ci`; the loading screen icon spins.
+
+### Fixed
+- Panics in per-session, per-stream and short-lived API goroutines (tunnel sessions, stream pumps, raw TCP/UDP proxy, WebSocket pumps, mail inbound SMTP) are recovered and counted instead of crashing the process; the inbound SMTP listener restarts on the same socket.
+- Removing a tunnel replica now verifies that the client belongs to the caller's tenant (it could previously trigger a config push to another tenant's agent).
+- An invitation with an explicit but invalid role returns 422 instead of silently becoming a member.
+- With old agents, a response body with `Content-Length` that stalls for 60 seconds is closed instead of hanging.
+
+## [0.3.8] - 2026-11-11
+
+### Added
 - Zorven Net: WireGuard-based port sharing between devices (shares, nodes, `zorven up/down/autostart`, local control socket, panel Shares page).
 - MCP server (remote endpoint and `zorven mcp` over stdio) and an OAuth 2.1 authorization server for custom connectors; connected-apps tab and connect card in the panel.
 - TCP and UDP tunnel metrics (connections, rejections, bytes, durations, RTT/loss), monthly usage metering, tunnel connection-quality view.

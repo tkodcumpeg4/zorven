@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tkodcumpeg4/zorven/server/obs"
+	"github.com/tkodcumpeg4/zorven/server/reqlog"
 	"github.com/tkodcumpeg4/zorven/server/tunnel"
 	"github.com/tkodcumpeg4/zorven/shared/protocol"
 )
@@ -40,6 +42,10 @@ func (h *Handler) serveWebSocketLog(w http.ResponseWriter, r *http.Request, sess
 	// El sikismasi istek loguna yazilir (panel "Canli Istekler"): durum 101 ya da
 	// yerel servisin/aginin hata durumu. Baglanti suresince akan veri loglanmaz.
 	started := time.Now()
+	zid, fwdID := wsRequestIDs(r, !doLog)
+	// Hijack oncesi hata yanitlari (writeError) da kimligi tasisin.
+	w.Header().Set(headerZorvenRequestID, zid)
+	w.Header().Set(obs.HeaderRequestID, fwdID)
 	logRec := &recorder{ResponseWriter: w, status: http.StatusSwitchingProtocols}
 	logged := false
 	logOnce := func() {
@@ -48,7 +54,7 @@ func (h *Handler) serveWebSocketLog(w http.ResponseWriter, r *http.Request, sess
 			if !doLog {
 				return
 			}
-			h.recordWithID(tunnelID, tenantID, false, r, logRec, started, "")
+			h.recordWithID(tunnelID, tenantID, false, r, logRec, started, zid)
 		}
 	}
 	defer logOnce() // hata yollari; basarili el sikismasi asagida hemen yazilir
@@ -78,6 +84,8 @@ func (h *Handler) serveWebSocketLog(w http.ResponseWriter, r *http.Request, sess
 	// HTTP istekleriyle ayni: gercek ziyaretci IP'si zincirin SONUNA eklenir
 	// (istemcinin gonderdigi X-Forwarded-For tek basina backend'e ulasmaz).
 	setForwardedHeaders(wsHeaders, r)
+	// HTTP yoluyla ayni kural (requestid.go): hedef el sikismasinda kimligi gorur.
+	setRequestIDHeaders(wsHeaders, zid, fwdID)
 	stream, err := sess.OpenWS(ctx, tunnelID, agentPath(r.URL), r.URL.RawQuery, wsHeaders)
 	if errors.Is(err, tunnel.ErrTooManyStreams) {
 		logRec.status = http.StatusServiceUnavailable
@@ -123,22 +131,15 @@ func (h *Handler) serveWebSocketLog(w http.ResponseWriter, r *http.Request, sess
 			status = http.StatusBadGateway
 		}
 		logRec.status = status
-		fmt.Fprintf(conn, "HTTP/1.1 %d %s\r\nConnection: close\r\n\r\n",
-			status, http.StatusText(status))
+		fmt.Fprintf(conn, "HTTP/1.1 %d %s\r\n%s: %s\r\nConnection: close\r\n\r\n",
+			status, http.StatusText(status), headerZorvenRequestID, zid)
 		return
 	}
 
 	// 101 el sikismasini tarayiciya yaz.
 	var sb strings.Builder
 	sb.WriteString("HTTP/1.1 101 Switching Protocols\r\n")
-	for k, vals := range acc.Headers {
-		for _, v := range vals {
-			sb.WriteString(k)
-			sb.WriteString(": ")
-			sb.WriteString(v)
-			sb.WriteString("\r\n")
-		}
-	}
+	writeWSResponseHeaders(&sb, acc.Headers, zid, fwdID)
 	sb.WriteString("\r\n")
 	if _, err := conn.Write([]byte(sb.String())); err != nil {
 		return
@@ -165,20 +166,25 @@ func (h *Handler) serveWebSocketLog(w http.ResponseWriter, r *http.Request, sess
 
 	// tarayici -> yerel: hijack edilen baglantidan oku, ajana ilet.
 	go func() {
+		defer func() {
+			stream.Close("browser closed")
+			conn.Close()
+		}()
+		// B2: bu goroutine net/http'nin kurtarmasi disinda; panik sureci dusurmesin,
+		// yalniz bu akis kapansin (yukaridaki defer).
+		defer obs.Recover(h.Log, "ingress.ws_pump", nil)
 		buf := make([]byte, 32*1024)
 		for {
 			n, rerr := brw.Read(buf)
 			if n > 0 {
 				if serr := stream.Send(context.Background(), buf[:n]); serr != nil {
-					break
+					return
 				}
 			}
 			if rerr != nil {
-				break
+				return
 			}
 		}
-		stream.Close("browser closed")
-		conn.Close()
 	}()
 
 	// yerel -> tarayici: ajandan gelen baytlari hijack edilen baglantiya yaz.
@@ -197,5 +203,48 @@ func (h *Handler) serveWebSocketLog(w http.ResponseWriter, r *http.Request, sess
 		case <-ctx.Done():
 			return
 		}
+	}
+}
+
+// wsRequestIDs, WebSocket el sikismasinin istek kimlikleri (HTTP yoluyla ayni
+// kural, bkz. requestid.go). fromCluster: istek kume anahtariyla dogrulanmis bir
+// kenar dugumden geldi; o dugum kimligi uretip loga yazdi, burada AYNISI
+// kullanilir ki ziyaretcinin 101'de gordugu deger request_logs.id ile eslessin.
+// Ziyaretciden dogrudan gelen X-Zorven-Request-Id ise asla benimsenmez.
+func wsRequestIDs(r *http.Request, fromCluster bool) (zid, fwd string) {
+	if fromCluster {
+		if v := r.Header.Get(headerZorvenRequestID); obs.ValidRequestID(v) {
+			zid = v
+		}
+	}
+	if zid == "" {
+		zid = reqlog.NewID()
+	}
+	return zid, forwardRequestID(r, zid)
+}
+
+// writeWSResponseHeaders, yerel servisin 101 basliklarini ziyaretciye yazar ve
+// kimlikleri ekler: X-Zorven-Request-Id her zaman Zorven'inki (hedefinki atilir);
+// X-Request-Id hedef verdiyse ona dokunulmaz, yoksa hedefe giden deger
+// yankilanir. Ajan basliklari kanonik olmayabilir: karsilastirma harf duyarsiz.
+func writeWSResponseHeaders(sb *strings.Builder, hdr map[string][]string, zid, fwd string) {
+	hasReqID := false
+	for k, vals := range hdr {
+		if strings.EqualFold(k, headerZorvenRequestID) {
+			continue
+		}
+		if strings.EqualFold(k, obs.HeaderRequestID) && len(vals) > 0 {
+			hasReqID = true
+		}
+		for _, v := range vals {
+			sb.WriteString(k)
+			sb.WriteString(": ")
+			sb.WriteString(v)
+			sb.WriteString("\r\n")
+		}
+	}
+	sb.WriteString(headerZorvenRequestID + ": " + zid + "\r\n")
+	if !hasReqID {
+		sb.WriteString(obs.HeaderRequestID + ": " + fwd + "\r\n")
 	}
 }

@@ -514,7 +514,7 @@ func TestSeoTitle(t *testing.T) {
 	}
 	long := "Zorven 0.3.4: tünellerde gRPC, yeni Windows kurulumu ve çok düğümlü altyapı hazırlığı"
 	got := seoTitle(long)
-	if n := len([]rune(got)); n > 58 || !strings.HasSuffix(got, "…") || strings.HasSuffix(strings.TrimSuffix(got, "…"), " ") {
+	if n := len([]rune(got + " | Zorven")); n > 60 || !strings.HasSuffix(got, "…") || strings.HasSuffix(strings.TrimSuffix(got, "…"), " ") {
 		t.Fatalf("uzun baslik kelime sinirinda kisalmali: %q (%d)", got, n)
 	}
 }

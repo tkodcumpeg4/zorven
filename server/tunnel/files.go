@@ -124,7 +124,7 @@ func (s *Session) pushXfer(x *srvXfer, ev srvEv) {
 	case x.ev <- ev:
 	default:
 		x.fail(&FileError{Code: protocol.FileErrProtocol, Message: "olay kuyrugu tasti"})
-		go s.sendFileAbort(x.id, protocol.FileErrProtocol, "kuyruk tasti")
+		s.goSafe("tunnel.file_abort", nil, func() { s.sendFileAbort(x.id, protocol.FileErrProtocol, "kuyruk tasti") })
 	}
 }
 
@@ -180,7 +180,7 @@ func (s *Session) routeFileCtl(t protocol.MessageType, data []byte) {
 		}
 		if !x.credit.Ack(m.Bytes) {
 			x.fail(&FileError{Code: protocol.FileErrProtocol, Message: "gecersiz file_ack"})
-			go s.sendFileAbort(x.id, protocol.FileErrProtocol, "gecersiz file_ack")
+			s.goSafe("tunnel.file_abort", nil, func() { s.sendFileAbort(x.id, protocol.FileErrProtocol, "gecersiz file_ack") })
 		}
 	case protocol.TypeFileOpenAck:
 		var m protocol.FileOpenAck

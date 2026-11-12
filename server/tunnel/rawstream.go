@@ -250,7 +250,7 @@ func (s *Session) routeStreamData(reqID uint64, payload []byte) {
 		// Iptal ve ajana bildirim ayri goroutine'de: Send yazim kilidini bekleyebilir,
 		// okuma dongusu bloklanmamali. Iptal kuyrugu hemen bosaltir.
 		b.q.abort()
-		go s.closeRawBridge(b, "overflow")
+		s.goSafe("tunnel.raw_close", nil, func() { s.closeRawBridge(b, "overflow") })
 	}
 }
 

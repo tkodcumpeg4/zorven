@@ -75,9 +75,9 @@ func (s *Server) autoScanHostname(ctx context.Context, fqdn string) {
 		return
 	}
 	s.Logger.Warn("otomatik tarama supheli hostname isaretledi",
-		"fqdn", fqdn, "score", res.Score, "reason", res.Reason)
+		"fqdn", fqdn, "score", res.Score, "neden", res.Reason)
 	if _, err := s.Store.CreateAbuseReport(ctx, strings.ToLower(fqdn), res.Reason, "auto-scan"); err != nil {
-		s.Logger.Error("otomatik tarama raporu olusturulamadi", "fqdn", fqdn, "err", err)
+		s.Logger.Error("otomatik tarama raporu olusturulamadi", "fqdn", fqdn, "hata", err)
 	}
 }
 

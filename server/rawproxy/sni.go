@@ -2,6 +2,7 @@ package rawproxy
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"errors"
 	"io"
@@ -9,6 +10,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"github.com/tkodcumpeg4/zorven/server/obs"
 )
 
 // SNI demux (FAZ 3 / D2, Mod B). :443'e gelen her TLS baglantisinin ClientHello'su
@@ -45,7 +48,8 @@ func NewDemuxListener(inner net.Listener, tlsConfig *tls.Config, lookup func(str
 		inner: inner, tlsConfig: tlsConfig, lookup: lookup, onRaw: onRaw, log: log,
 		httpCh: make(chan net.Conn), closed: make(chan struct{}),
 	}
-	go d.run()
+	// B2: demux kabul dongusu paniklerse yeniden baslar (kapandiysa normal doner).
+	obs.GoRestart(context.Background(), log, "rawproxy.sni_accept", func(context.Context) { d.run() })
 	return d
 }
 
@@ -81,6 +85,8 @@ func (d *DemuxListener) run() {
 }
 
 func (d *DemuxListener) handle(c net.Conn) {
+	// B2: baglanti basina; panikte yalniz bu baglanti kapanir.
+	defer obs.Recover(d.log, "rawproxy.sni_conn", func(any) { c.Close() })
 	_ = c.SetReadDeadline(time.Now().Add(sniPeekTimeout))
 	sni, replay, err := peekSNI(c)
 	_ = c.SetReadDeadline(time.Time{})

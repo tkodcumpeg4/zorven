@@ -88,9 +88,15 @@ func (s *Server) inviteTeamMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Rol bos ise uye; acikca verilmis gecersiz rol (or. "owner") sessizce uyeye
+	// cevrilmez, reddedilir (cagiran basarili sanip yanlis rol atandigini fark etmezdi).
 	role := strings.TrimSpace(body.Role)
-	if role != "admin" && role != "member" {
+	if role == "" {
 		role = "member"
+	}
+	if role != "admin" && role != "member" {
+		writeJSONError(w, http.StatusUnprocessableEntity, "invalid_role", "Rol yalnizca 'admin' veya 'member' olabilir")
+		return
 	}
 
 	// Entitlements limit kontrolu

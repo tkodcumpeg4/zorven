@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/tkodcumpeg4/zorven/shared/protocol"
 )
@@ -105,6 +106,13 @@ type Exchange struct {
 	// reqCredit, istek govdesi kredisi (body_credit onerildiyse; aksi halde nil).
 	// Exchange tabloya girmeden ONCE yazilir, sonra yalniz okunur.
 	reqCredit *reqBodyCredit
+
+	// stallCL: eski ajan + Content-Length'li govde (legacybody.go); > 0 ise
+	// okuyucu bos kuyrukta legacyBodyStall'dan uzun beklemez. Okuma dongusu
+	// deliverHead'den ONCE yazar (head kanali gorunurluk saglar), sonra yalniz
+	// okunur. received: kuyruga giren toplam govde bayti.
+	stallCL  int64
+	received atomic.Int64
 }
 
 // exchangeBufferMinFrame, cerceve-sayisi tavanini hesaplarken varsayilan
@@ -172,13 +180,24 @@ func (e *Exchange) Read(p []byte) (int, error) {
 		if e.ctx != nil {
 			ctxDone = e.ctx.Done()
 		}
+		var stall *time.Timer
+		var stallC <-chan time.Time
+		if e.stallCL > 0 && e.received.Load() < e.stallCL {
+			stall = time.NewTimer(legacyBodyStall)
+			stallC = stall.C
+		}
 		select {
 		case <-e.notify:
 		case <-ctxDone:
+			stopTimer(stall)
 			return 0, e.ctx.Err()
 		case <-e.done:
+			stopTimer(stall)
 			return 0, ErrReaderGone
+		case <-stallC:
+			return 0, ErrBodyStalled
 		}
+		stopTimer(stall)
 	}
 	n := copy(p, e.cur)
 	e.cur = e.cur[n:]
@@ -260,9 +279,16 @@ func (e *Exchange) writeBody(p []byte) error {
 	}
 	e.frames = append(e.frames, p)
 	e.queued.Add(int64(len(p)))
+	e.received.Add(int64(len(p)))
 	e.mu.Unlock()
 	e.signal()
 	return nil
+}
+
+func stopTimer(t *time.Timer) {
+	if t != nil {
+		t.Stop()
+	}
 }
 
 // closeBody, govde akisini sonlandirir. err nil ise normal EOF.

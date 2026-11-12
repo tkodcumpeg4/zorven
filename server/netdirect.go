@@ -42,7 +42,7 @@ func setupNetDirect(ctx context.Context, mgr *netctl.Manager, getenv func(string
 	pc, err := stunSrv.Listen(addr)
 	if err != nil {
 		log.Warn("STUN portu acilamadi; NAT delme icin genel adres yansimasi yok (yalniz relay/yerel adaylar)",
-			"addr", addr, "hata", err)
+			"adres", addr, "hata", err)
 		return
 	}
 	if _, p, err := net.SplitHostPort(pc.LocalAddr().String()); err == nil {

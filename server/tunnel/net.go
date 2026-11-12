@@ -59,7 +59,7 @@ func (s *Session) handleNet(ctx context.Context, t protocol.MessageType, data []
 			Punch: s.netPunch, Tun: s.netTun, ALog: s.netALog,
 		}, ob)
 		s.netConn = nc
-		go func() {
+		s.goSafe("tunnel.net_pump", nil, func() {
 			err := ob.Pump(ctx, func(ctx context.Context, bin bool, b []byte) error {
 				return s.writeRaw(ctx, bin, b)
 			})
@@ -67,7 +67,7 @@ func (s *Session) handleNet(ctx context.Context, t protocol.MessageType, data []
 				// Kontrol kuyrugu tasti veya yazma basarisiz: istemci yeniden baglanip tam netmap alir.
 				s.conn.Close(websocket.StatusTryAgainLater, "net queue")
 			}
-		}()
+		})
 	}
 	s.netMu.Unlock()
 	if nc == nil {

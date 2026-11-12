@@ -66,7 +66,7 @@ func (s *Server) issueTerminalTicket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ticket := s.Tickets.issueTerminalWithShell(tenantID, body.ClientID, body.Shell, body.Attach, owner)
-	s.logger().Info("terminal bileti verildi", "tenant_id", tenantID, "client_id", body.ClientID, "remote_addr", r.RemoteAddr)
+	s.logger().Info("terminal bileti verildi", "tenant", tenantID, "client", body.ClientID, "adres", r.RemoteAddr)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ticket":     ticket,
 		"expires_in": int(ticketTTL.Seconds()),
@@ -88,7 +88,7 @@ func (s *Server) terminalHandler(w http.ResponseWriter, r *http.Request) {
 	// CSWSH Koruması: Origin doğrulaması
 	if !s.isAllowedOrigin(r) {
 		s.logger().Warn("terminal ws reddedildi: yetkisiz origin",
-			"origin", r.Header.Get("Origin"), "remote_addr", r.RemoteAddr)
+			"origin", r.Header.Get("Origin"), "adres", r.RemoteAddr)
 		writeJSONError(w, http.StatusForbidden, "forbidden_origin", "Gecersiz veya yetkisiz Origin.")
 		return
 	}
@@ -105,7 +105,7 @@ func (s *Server) terminalHandler(w http.ResponseWriter, r *http.Request) {
 	tenantID, valid := s.Tickets.redeem(ticketKindTerminal, ticket, reqTenant, clientID)
 	if !valid || tenantID == "" {
 		s.logger().Warn("terminal ws reddedildi: gecersiz veya suresi dolmus bilet",
-			"client_id", clientID, "remote_addr", r.RemoteAddr)
+			"client", clientID, "adres", r.RemoteAddr)
 		writeJSONError(w, http.StatusUnauthorized, "invalid_ticket",
 			"Gecersiz veya suresi dolmus terminal bileti.")
 		return
@@ -114,7 +114,7 @@ func (s *Server) terminalHandler(w http.ResponseWriter, r *http.Request) {
 	// İstemcinin biletteki kiracıya ait olduğunu doğrula (IDOR önlemi)
 	if _, err := s.Store.GetClient(r.Context(), tenantID, clientID); err != nil {
 		s.logger().Warn("terminal ws reddedildi: istemci bu kiraciya ait degil veya bulunamadi",
-			"client_id", clientID, "tenant_id", tenantID, "remote_addr", r.RemoteAddr)
+			"client", clientID, "tenant", tenantID, "adres", r.RemoteAddr)
 		writeJSONError(w, http.StatusForbidden, "forbidden", "Bu istemciye erisim yetkiniz yok.")
 		return
 	}
@@ -122,7 +122,7 @@ func (s *Server) terminalHandler(w http.ResponseWriter, r *http.Request) {
 	sess, online := s.Hub.Get(clientID)
 	if !online {
 		s.logger().Warn("terminal ws baglanamadi: istemci cevrimdisi",
-			"client_id", clientID, "remote_addr", r.RemoteAddr)
+			"client", clientID, "adres", r.RemoteAddr)
 		writeJSONError(w, http.StatusBadGateway, "client_offline",
 			"Istemci su anda bagli degil; terminal acilamaz.")
 		return
@@ -154,7 +154,7 @@ func (s *Server) terminalHandler(w http.ResponseWriter, r *http.Request) {
 		InsecureSkipVerify: true,
 	})
 	if err != nil {
-		s.logger().Warn("terminal ws upgrade basarisiz", "client_id", clientID, "hata", err)
+		s.logger().Warn("terminal ws upgrade basarisiz", "client", clientID, "hata", err)
 		return // Accept zaten yaniti yazdi
 	}
 	defer conn.CloseNow()
@@ -177,12 +177,12 @@ func (s *Server) terminalHandler(w http.ResponseWriter, r *http.Request) {
 		pt, err = reg.open(sess, sessionID, tenantID, clientID, tinfo.Owner, shell)
 		if err != nil {
 			s.logger().Error("istemcide terminal oturumu acilamadi",
-				"client_id", clientID, "session_id", sessionID, "hata", err)
+				"client", clientID, "session", sessionID, "hata", err)
 			conn.Close(websocket.StatusInternalError, "terminal acilamadi")
 			return
 		}
 	}
-	s.logger().Info("terminal ws baglandi", "client_id", clientID, "session_id", pt.id, "resumed", resumed)
+	s.logger().Info("terminal ws baglandi", "client", clientID, "session", pt.id, "resumed", resumed)
 
 	replay, data, exitCh, exited := pt.attach()
 	var killed atomic.Bool
@@ -192,7 +192,7 @@ func (s *Server) terminalHandler(w http.ResponseWriter, r *http.Request) {
 		} else {
 			pt.detach(data)
 		}
-		s.logger().Info("terminal ws ayrildi", "client_id", clientID, "session_id", pt.id, "kapatildi", killed.Load())
+		s.logger().Info("terminal ws ayrildi", "client", clientID, "session", pt.id, "kapatildi", killed.Load())
 	}()
 
 	writeJSONMsg := func(v any) error {

@@ -92,7 +92,7 @@ func (h *Handler) serveReport(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	byIP, byID, _, err := h.AbuseReports.AbuseReportCounts(ctx, now.Add(-time.Hour), ip, rid, fqdn)
 	if err == nil && (byIP >= reportPerHour || byID >= reportPerHour) {
-		h.Log.Warn("kotuye kullanim bildirimi hiz siniri", "ip", ip, "rid", rid, "host", fqdn)
+		h.Log.Warn("kotuye kullanim bildirimi hiz siniri", "ip", ip, "rid", rid, "fqdn", fqdn)
 		reportPage(w, http.StatusTooManyRequests, "Çok fazla bildirim", "Kısa sürede çok fazla bildirim gönderdiniz. Lütfen daha sonra tekrar deneyin.")
 		return
 	}
@@ -117,11 +117,11 @@ func (h *Handler) serveReport(w http.ResponseWriter, r *http.Request) {
 		ReporterTLS: tlsfp,
 	})
 	if err != nil {
-		h.Log.Error("kotuye kullanim bildirimi kaydedilemedi", "host", fqdn, "hata", err)
+		h.Log.Error("kotuye kullanim bildirimi kaydedilemedi", "fqdn", fqdn, "hata", err)
 		reportPage(w, http.StatusInternalServerError, "Bildirim kaydedilemedi", "Lütfen daha sonra tekrar deneyin ya da abuse@"+h.PlatformDomain+" adresine yazın.")
 		return
 	}
-	h.Log.Warn("ziyaretci kotuye kullanim bildirimi", "id", rep.ID, "host", fqdn, "kategori", cat, "ip", ip, "rid", rid)
+	h.Log.Warn("ziyaretci kotuye kullanim bildirimi", "id", rep.ID, "fqdn", fqdn, "kategori", cat, "ip", ip, "rid", rid)
 	reportPage(w, http.StatusOK, "Bildiriminiz alındı", "Teşekkürler. Bildiriminiz Zorven ekibi tarafından incelenecek.")
 }
 
