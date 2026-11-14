@@ -89,6 +89,7 @@ func (s *Server) deleteOrganization(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	s.tokenRevoked()
 	// Bellek sicak onbelleginde kalan govde yakalamalarini da at.
 	s.Captures.ForgetTenant(tenantID)
 	// Silinen istemcilerin canli baglantilarini kopar: token'lari artik yok.

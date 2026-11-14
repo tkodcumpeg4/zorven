@@ -160,6 +160,7 @@ func (s *Server) accountPurgeInternal(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	s.tokenRevoked()
 	s.afterAccountPurge(req.UserID, res)
 	s.logger().Info("hesap verisi silindi", "takma_ad", res.Pseudonym,
 		"silinen_org", len(res.DeletedOrgs), "ayrilan_org", len(res.LeftOrgs),

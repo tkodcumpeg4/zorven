@@ -976,6 +976,8 @@ export interface TeamInvitation {
   role: 'admin' | 'member' | string
   status: 'pending' | 'accepted' | 'rejected' | 'canceled' | string
   inviter_name?: string
+  /** Süresi dolmuş bekleyen davet (GET /invitations/{id}). */
+  expired?: boolean
   expires_at: string
 }
 

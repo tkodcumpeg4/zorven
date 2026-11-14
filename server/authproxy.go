@@ -9,6 +9,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/tkodcumpeg4/zorven/server/api"
 	"github.com/tkodcumpeg4/zorven/server/auth"
@@ -20,21 +21,40 @@ type memberQuota interface {
 	CanAddMember(ctx context.Context, tenantID string) error
 }
 
+// memberQuotaLocker, (kiraci, kaynak) icin say+ekle kilidi (entitlements.Service).
+type memberQuotaLocker interface {
+	LockQuota(ctx context.Context, tenantID, resource string) (func(), error)
+}
+
+const (
+	// quotaLockWait: kilit alma bekleme siniri; asilirsa mevcut davranis (kilitsiz denetim).
+	quotaLockWait = 10 * time.Second
+	// quotaProxyTimeout: kilit altindaki vekil cagrisinin ust siniri (kilit hic sonsuz tutulmaz).
+	quotaProxyTimeout = 15 * time.Second
+)
+
 // memberQuotaGate, native organization/invite-member istegini Better Auth'a
 // iletmeden ONCE Go tarafindaki uye kotasiyla denetler (F-22/F-45).
 type memberQuotaGate struct {
 	Quota memberQuota
+	// Locker doluysa ayni (kiraci, members) kota kilidi, denetimden vekil cagrisinin
+	// bitisine kadar tutulur: denetim ile Better Auth'un davet eklemesi arasinda
+	// es zamanli iki istek ayni son koltugu gormesin. nil ise kilitsiz (eski davranis).
+	Locker memberQuotaLocker
 	// ActiveOrg, oturum token'inin aktif organizasyonunu doner (govdede
 	// organizationId yoksa kullanilir); bilinmiyorsa "".
 	ActiveOrg func(ctx context.Context, token string) string
 }
 
-// check, istek kota denetimine tabi degilse veya kota uygunsa true doner;
-// aksi halde Go'nun entitlement hata bicimiyle yanit yazar ve false doner.
-func (g *memberQuotaGate) check(w http.ResponseWriter, r *http.Request) bool {
+// check, istek kota denetimine tabi degilse veya kota uygunsa (devam, release, true)
+// doner; cagiran vekil cagrisi bitince release() cagirmalidir. Aksi halde Go'nun
+// entitlement hata bicimiyle yanit yazar ve false doner. Kilit alinabildiyse istegin
+// baglami quotaProxyTimeout ile sinirlanir.
+func (g *memberQuotaGate) check(w http.ResponseWriter, r *http.Request) (*http.Request, func(), bool) {
+	noop := func() {}
 	if g == nil || g.Quota == nil || r.Method != http.MethodPost ||
 		!strings.HasSuffix(strings.TrimSuffix(r.URL.Path, "/"), "/organization/invite-member") {
-		return true
+		return r, noop, true
 	}
 	var buf []byte
 	if r.Body != nil {
@@ -53,13 +73,26 @@ func (g *memberQuotaGate) check(w http.ResponseWriter, r *http.Request) bool {
 	}
 	if org == "" {
 		// Kiraci belirlenemedi: Better Auth kendi yetki kontrolunu yapar.
-		return true
+		return r, noop, true
+	}
+	release := noop
+	if g.Locker != nil {
+		lctx, cancel := context.WithTimeout(r.Context(), quotaLockWait)
+		unlock, err := g.Locker.LockQuota(lctx, org, "members")
+		cancel()
+		if err == nil && unlock != nil {
+			pctx, pcancel := context.WithTimeout(r.Context(), quotaProxyTimeout)
+			r = r.WithContext(pctx)
+			release = func() { pcancel(); unlock() }
+		}
+		// Kilit alinamadiysa (zaman asimi/depo hatasi) kilitsiz denetim: eski davranis.
 	}
 	if err := g.Quota.CanAddMember(r.Context(), org); err != nil {
+		release()
 		api.WriteEntitlementError(w, err)
-		return false
+		return r, noop, false
 	}
-	return true
+	return r, release, true
 }
 
 // sessionCache, auth proxy'sinin Go oturum onbellegini temizlemek icin
@@ -108,9 +141,11 @@ func newAuthProxy(upstream *url.URL, cache sessionCache, gates ...*memberQuotaGa
 	}
 	if cache == nil {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if !gate.check(w, r) {
+			r, release, ok := gate.check(w, r)
+			if !ok {
 				return
 			}
+			defer release()
 			proxy.ServeHTTP(w, r)
 		})
 	}
@@ -128,9 +163,11 @@ func newAuthProxy(upstream *url.URL, cache sessionCache, gates ...*memberQuotaGa
 		return nil
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !gate.check(w, r) {
+		r, release, ok := gate.check(w, r)
+		if !ok {
 			return
 		}
+		defer release()
 		if st := authCacheStateFor(r, cache); st != nil {
 			st.invalidate(cache)
 			r = r.WithContext(context.WithValue(r.Context(), authCacheKey{}, st))

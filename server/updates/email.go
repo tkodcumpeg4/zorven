@@ -45,7 +45,8 @@ func BuildEmail(p store.UpdatePost, lang, baseURL string, key []byte, userID str
 	} else if p.Version != "" && !strings.Contains(title, p.Version) {
 		subject = "Zorven " + p.Version + " — " + title
 	}
-	postURL := strings.TrimRight(baseURL, "/") + PostPath(lang, p.Slug)
+	// Kaynak etiketi: e-postadan gelen ziyaret "email / announcement" kaynagi olarak etiketlenir.
+	postURL := strings.TrimRight(baseURL, "/") + PostPath(lang, p.Slug) + "?utm_source=email&utm_medium=announcement"
 	unsub := UnsubURL(baseURL, key, userID, lang)
 
 	window := WindowUTC(p.MaintenanceStart, p.MaintenanceEnd)

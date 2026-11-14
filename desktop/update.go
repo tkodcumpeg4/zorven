@@ -36,7 +36,7 @@ import (
 var version = "dev"
 
 const (
-	desktopDownloadPage = "https://zorven.app/download"
+	desktopDownloadPage = "https://zorven.app/download?utm_source=desktop"
 	updatesPageBase     = "https://zorven.app"
 	maxUpdateBytes      = 200 << 20
 )
@@ -77,13 +77,13 @@ func (a *App) GetVersion() string { return version }
 func releaseNotesURL(lang string) string {
 	switch lang {
 	case i18n.EN:
-		return updatesPageBase + "/en/updates"
+		return updatesPageBase + "/en/updates?utm_source=desktop"
 	case i18n.JA:
-		return updatesPageBase + "/ja/updates"
+		return updatesPageBase + "/ja/updates?utm_source=desktop"
 	case i18n.ZH:
-		return updatesPageBase + "/zh/updates"
+		return updatesPageBase + "/zh/updates?utm_source=desktop"
 	}
-	return updatesPageBase + "/updates"
+	return updatesPageBase + "/updates?utm_source=desktop"
 }
 
 // OpenReleaseNotes, surum notlari sayfasini tarayicida acar.

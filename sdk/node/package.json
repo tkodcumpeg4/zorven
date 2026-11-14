@@ -6,7 +6,7 @@
   "types": "index.d.ts",
   "license": "AGPL-3.0-or-later",
   "keywords": ["zorven", "tunnel", "ngrok", "reverse-proxy", "self-hosted"],
-  "homepage": "https://zorven.app",
+  "homepage": "https://zorven.app/?utm_source=sdk&utm_medium=npm",
   "repository": { "type": "git", "url": "https://github.com/tkodcumpeg4/zorven" },
   "engines": { "node": ">=16" },
   "files": ["index.js", "index.d.ts", "README.md"]

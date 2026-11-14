@@ -3,9 +3,11 @@ package pgstore
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/tkodcumpeg4/zorven/server/store"
 )
 
@@ -212,36 +214,48 @@ func (s *Store) RecordBandwidth(ctx context.Context, tenantID, period string, by
 	return err
 }
 
-// FlushBandwidthDeltas, biriken kiraci trafik farklarini tek toplu (batch) islemde veritabanina aktarir.
+// FlushBandwidthDeltas, biriken kiraci trafik farklarini veritabanina aktarir.
+// Her kiracinin yazimi bagimsizdir (ortak transaction yok): silinmis bir
+// kiraciya ait fark (FK ihlali) dusurulur ve digerlerini engellemez.
 func (s *Store) FlushBandwidthDeltas(ctx context.Context, period string, deltas map[string][2]int64) error {
-	if len(deltas) == 0 {
-		return nil
-	}
-	batch := &pgx.Batch{}
+	return s.flushDeltasPerTenant(ctx, period, deltas,
+		`INSERT INTO tenant_bandwidth (tenant_id, period, bytes_in, bytes_out, updated_at)
+		 VALUES ($1, $2, $3, $4, now())
+		 ON CONFLICT (tenant_id, period) DO UPDATE SET
+		     bytes_in = tenant_bandwidth.bytes_in + EXCLUDED.bytes_in,
+		     bytes_out = tenant_bandwidth.bytes_out + EXCLUDED.bytes_out,
+		     updated_at = now()`)
+}
+
+// flushDeltasPerTenant, farklari kiraci basina ayri (otomatik commit) yazar.
+// FK ihlali (var olmayan kiraci) farki dusurulur ve loglanir; gecici hatalarda
+// basarisiz kiracilar *store.FlushError ile bildirilir (cagiran yalniz onlari
+// yeniden dener, basarili olanlar cift sayilmaz).
+func (s *Store) flushDeltasPerTenant(ctx context.Context, period string, deltas map[string][2]int64, query string) error {
+	var failed map[string][2]int64
+	var firstErr error
 	for tenantID, d := range deltas {
 		if d[0] == 0 && d[1] == 0 {
 			continue
 		}
-		batch.Queue(
-			`INSERT INTO tenant_bandwidth (tenant_id, period, bytes_in, bytes_out, updated_at)
-			 VALUES ($1, $2, $3, $4, now())
-			 ON CONFLICT (tenant_id, period) DO UPDATE SET
-			     bytes_in = tenant_bandwidth.bytes_in + EXCLUDED.bytes_in,
-			     bytes_out = tenant_bandwidth.bytes_out + EXCLUDED.bytes_out,
-			     updated_at = now()`,
-			tenantID, period, d[0], d[1])
-	}
-	if batch.Len() == 0 {
-		return nil
-	}
-
-	br := s.pool.SendBatch(ctx, batch)
-	defer br.Close()
-
-	for range batch.Len() {
-		if _, err := br.Exec(); err != nil {
-			return err
+		_, err := s.pool.Exec(ctx, query, tenantID, period, d[0], d[1])
+		if err == nil {
+			continue
 		}
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23503" {
+			slog.Warn("bandwidth: var olmayan kiraciya ait trafik farki dusuruldu",
+				"tenant", tenantID, "donem", period, "hata", err)
+			continue
+		}
+		if failed == nil {
+			failed = make(map[string][2]int64)
+			firstErr = err
+		}
+		failed[tenantID] = d
+	}
+	if failed != nil {
+		return &store.FlushError{Failed: failed, Err: firstErr}
 	}
 	return nil
 }

@@ -99,6 +99,14 @@ func (s *Server) inviteTeamMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Koltuk denetimi + davet ekleme kiraci kota kilidi altinda (O1): kilitsiz iken
+	// es zamanli davetler hepsi limitin altinda sayip plan uye limitini asiyordu.
+	unlock, ok := s.lockQuota(w, r, tenantID, entitlements.QuotaMembers)
+	if !ok {
+		return
+	}
+	defer unlock()
+
 	// Entitlements limit kontrolu
 	if s.Entitlements != nil {
 		if err := s.Entitlements.CanAddMember(r.Context(), tenantID); err != nil {
@@ -115,6 +123,7 @@ func (s *Server) inviteTeamMember(w http.ResponseWriter, r *http.Request) {
 	}
 
 	m, err := s.Store.AddTeamMember(r.Context(), tenantID, email, strings.TrimSpace(body.Name), role, inviterID)
+	unlock() // e-posta gonderimi gibi yavas isler kilit disinda
 	if err != nil {
 		if strings.Contains(err.Error(), "zaten ekibin bir uyesi") || strings.Contains(err.Error(), "zaten bekleyen bir davet") {
 			writeJSONError(w, http.StatusConflict, "already_member", err.Error())
@@ -219,6 +228,7 @@ func (s *Server) removeTeamMember(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	s.tokenRevoked() // uyenin kisisel API token'lari iptal edildi
 	// Onbellekteki oturum eski uyeligi ~30 sn tasimasin.
 	if s.BetterAuth != nil {
 		s.BetterAuth.InvalidateUser(target.UserID)

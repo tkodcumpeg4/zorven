@@ -206,6 +206,12 @@ type Agent struct {
 	// Bos ise: servis -> sistem dosyasi, aksi halde config.Load() (kullanici, sonra sistem).
 	ConfigPath string
 
+	// ServerExplicit / TokenExplicit: sunucu adresi / token komut satiri bayragi ya da
+	// ortam degiskeniyle verildi (ayar dosyasindan gelmedi). Canli yeniden yuklemede
+	// (reload) dosyadaki deger bu degerlerin ustune ALINMAZ: bayrak > dosya.
+	ServerExplicit bool
+	TokenExplicit  bool
+
 	// cfgMu, canli degisebilen ServerAddr/Token'i korur (reload).
 	cfgMu sync.RWMutex
 

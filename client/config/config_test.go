@@ -49,3 +49,23 @@ func TestConfigLoadSave(t *testing.T) {
 		t.Errorf("file not written: %v", err)
 	}
 }
+
+// Dosyada sunucu yokken SaveFile varsayilan sunucuyu yazmaz; varsa korur.
+func TestSaveFileOmitsDefaultServerWhenAbsent(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.json")
+	cfg, _ := LoadFile(p)
+	cfg.Token = "t"
+	if err := SaveFile(p, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if FileHasServer(p) {
+		t.Fatal("varsayilan sunucu dosyaya yazildi")
+	}
+	cfg.ServerAddr = "a.example:1"
+	if err := SaveFile(p, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !FileHasServer(p) {
+		t.Fatal("acik sunucu yazilmadi")
+	}
+}

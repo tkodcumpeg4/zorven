@@ -13,7 +13,9 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
+	"github.com/tkodcumpeg4/zorven/server/entitlements"
 	"github.com/tkodcumpeg4/zorven/server/store"
 )
 
@@ -81,7 +83,13 @@ func (s *Server) getInvitation(w http.ResponseWriter, r *http.Request) {
 		writeInvitationError(w, store.ErrInvitationEmail)
 		return
 	}
-	writeJSON(w, http.StatusOK, inv)
+	// Mevcut alanlar korunur; suresi dolmus bekleyen davet acikca isaretlenir
+	// (panel Kabul/Reddet yerine "suresi dolmus" gosterir).
+	expired := inv.Status == "pending" && !inv.ExpiresAt.After(time.Now())
+	writeJSON(w, http.StatusOK, struct {
+		store.TeamInvitation
+		Expired bool `json:"expired"`
+	}{inv, expired})
 }
 
 func (s *Server) acceptInvitation(w http.ResponseWriter, r *http.Request) {
@@ -107,6 +115,12 @@ func (s *Server) acceptInvitation(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if role == "" {
+				// Kabul de ayni kota kilidi altinda: es zamanli davet/kabul sayimi tutarli kalsin.
+				unlock, ok := s.lockQuota(w, r, pre.OrganizationID, entitlements.QuotaMembers)
+				if !ok {
+					return
+				}
+				defer unlock()
 				if err := s.Entitlements.CanAcceptMember(r.Context(), pre.OrganizationID); err != nil {
 					writeEntitlementError(w, err)
 					return

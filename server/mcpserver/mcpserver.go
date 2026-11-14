@@ -46,7 +46,10 @@ import (
 const Path = "/mcp"
 
 const (
-	identityTTL     = 30 * time.Second
+	// identityTTL: kimlik onbellegi omru. API token iptali yalniz istegi alan dugumde
+	// anlik temizlenir (kumede dugumler arasi iptal yayini yok); diger dugumlerde eski
+	// kimlik en cok bu sure kabul edilir. Kisa tutulur (docs/operasyon-gozlemlenebilirlik.md bolum 17).
+	identityTTL     = 10 * time.Second
 	identityMaxKeys = 2048
 	maxBodyBytes    = 1 << 20
 )
@@ -308,6 +311,14 @@ func (h *Handler) authenticate(w http.ResponseWriter, r *http.Request) (identity
 	h.store(key, id)
 	id.principal = prin
 	return id, true
+}
+
+// InvalidateIdentities, kimlik onbellegini tamamen bosaltir (API token iptal/rotate
+// edildiginde): iptal edilen token bir sonraki istekte yeniden dogrulanir ve 401 alir.
+func (h *Handler) InvalidateIdentities() {
+	h.mu.Lock()
+	h.cache = map[string]identity{}
+	h.mu.Unlock()
 }
 
 func (h *Handler) cached(key string) (identity, bool) {

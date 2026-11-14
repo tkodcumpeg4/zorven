@@ -314,9 +314,11 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 			obs.GoFatal(ctx, log, "net_manager", func(ctx context.Context) { netMgr.Run(ctx) })
 			setupNetDirect(ctx, netMgr, os.Getenv, log) // W2: STUN + dogrudan P2P yol koordinasyonu
 
+			var mcpIdent atomic.Pointer[mcpserver.Handler]
 			apiSrv := &api.Server{
-				Net:   netMgr,
-				Store: st, Hub: hub, Log: requests, Events: broker,
+				OnAPITokenRevoked: mcpIdentityInvalidator(&mcpIdent),
+				Net:               netMgr,
+				Store:             st, Hub: hub, Log: requests, Events: broker,
 				Logger: log, Version: buildVersion,
 				GitHub: github, Sessions: sessions,
 				Tickets:      api.NewTicketStore(),
@@ -892,7 +894,7 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				if betterAuthVerifier != nil {
 					cache = betterAuthVerifier
 				}
-				gate := &memberQuotaGate{Quota: entitlementSvc}
+				gate := &memberQuotaGate{Quota: entitlementSvc, Locker: entitlementSvc}
 				if betterAuthVerifier != nil {
 					gate.ActiveOrg = func(ctx context.Context, tok string) string {
 						if sess, err := betterAuthVerifier.VerifySession(ctx, tok); err == nil && sess != nil {
@@ -1112,6 +1114,7 @@ Yalnizca lokal gelistirme icin --allow-insecure ile bu kontrolu atlayabilirsiniz
 				Logger:        log,
 				OAuth:         oauthVerifier,
 			})
+			mcpIdent.Store(mcpHandler)
 
 			cspMode := cspModeFromEnvs(os.Getenv("ZORVEN_CSP_MODE"), os.Getenv("ZORVEN_CSP_REPORT_ONLY"))
 			var controlAPIObs http.Handler

@@ -261,8 +261,8 @@ func TestParseArgs(t *testing.T) {
 
 func TestReleaseNotesURL(t *testing.T) {
 	for lang, want := range map[string]string{
-		"tr": "https://zorven.app/updates", "en": "https://zorven.app/en/updates",
-		"ja": "https://zorven.app/ja/updates", "zh": "https://zorven.app/zh/updates",
+		"tr": "https://zorven.app/updates?utm_source=desktop", "en": "https://zorven.app/en/updates?utm_source=desktop",
+		"ja": "https://zorven.app/ja/updates?utm_source=desktop", "zh": "https://zorven.app/zh/updates?utm_source=desktop",
 	} {
 		if got := releaseNotesURL(lang); got != want {
 			t.Errorf("%s: %s", lang, got)

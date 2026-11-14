@@ -258,19 +258,21 @@ func (s *Server) captchaSolve(w http.ResponseWriter, r *http.Request) {
 	}
 	var body struct {
 		Token   string           `json:"token"`
-		Counter json.Number      `json:"counter"`
+		Counter json.RawMessage  `json:"counter"`
 		Signals *captcha.Signals `json:"signals"`
 	}
 	if !captchaDecode(w, r, &body) {
 		return
 	}
-	if body.Token == "" || body.Counter == "" {
+	// counter sayi ya da sayi-dizgesi olabilir; bos dizge/null/eksik = missing_fields.
+	counter := strings.Trim(strings.TrimSpace(string(body.Counter)), `"`)
+	if body.Token == "" || counter == "" || counter == "null" {
 		writeJSONError(w, http.StatusBadRequest, "missing_fields", "token ve counter zorunlu")
 		return
 	}
 	host, ua, al := captchaReqCtx(r)
 	res, err := svc.Solve(r.Context(), captcha.SolveRequest{
-		Token: body.Token, Counter: body.Counter.String(), Signals: body.Signals,
+		Token: body.Token, Counter: counter, Signals: body.Signals,
 		OriginHost: host, UserAgent: ua, AcceptLang: al})
 	if err != nil {
 		captchaErr(w, err)

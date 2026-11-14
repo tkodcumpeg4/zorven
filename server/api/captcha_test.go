@@ -518,3 +518,16 @@ func TestIsCaptchaPublicPath(t *testing.T) {
 		}
 	}
 }
+
+func TestCaptchaSolveMissingFields(t *testing.T) {
+	rg := newCaptchaRig(t)
+	for _, body := range []string{`{"token":"x","counter":""}`, `{"token":"x"}`, `{"token":"x","counter":null}`, `{"token":"","counter":"5"}`, `{"token":"","counter":5}`} {
+		rec := rg.public("POST", "/api/v1/captcha/solve", "", "application/json", body)
+		if rec.Code != 400 || !strings.Contains(rec.Body.String(), "missing_fields") {
+			t.Errorf("%s: %d %s", body, rec.Code, rec.Body.String())
+		}
+	}
+	if rec := rg.public("POST", "/api/v1/captcha/solve", "", "application/json", `{`); rec.Code != 400 || !strings.Contains(rec.Body.String(), "invalid_json") {
+		t.Errorf("bozuk json: %d %s", rec.Code, rec.Body.String())
+	}
+}

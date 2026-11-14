@@ -18,18 +18,20 @@ const goodToken = "zrv_api_abc.secret"
 // fakeAPI, api.Middleware + mux taklidi: bilinen token'i kabul eder, /me
 // kapsamlari doner, digerlerini kaydeder.
 type fakeAPI struct {
-	mu     sync.Mutex
-	scopes []string
-	seen   []string
-	auths  []string
+	mu      sync.Mutex
+	scopes  []string
+	seen    []string
+	auths   []string
+	revoked bool
 }
 
 func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	f.seen = append(f.seen, r.Method+" "+r.URL.RequestURI())
 	f.auths = append(f.auths, r.Header.Get("Authorization"))
+	revoked := f.revoked
 	f.mu.Unlock()
-	if r.Header.Get("Authorization") != "Bearer "+goodToken {
+	if revoked || r.Header.Get("Authorization") != "Bearer "+goodToken {
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = w.Write([]byte(`{"error":{"code":"invalid_token","message":"x"}}`))
 		return
@@ -293,5 +295,30 @@ func TestInprocBackendProjectPrecedence(t *testing.T) {
 	_, _ = be.Do(context.Background(), reqOf("GET", "/x", "arg"))
 	if got != "arg|Bearer t|zorven.app" {
 		t.Errorf("arac argumani onceligi: %s", got)
+	}
+}
+
+func TestInvalidateIdentities_RevokedTokenRejectedImmediately(t *testing.T) {
+	api := &fakeAPI{scopes: []string{"*"}}
+	h := New(Config{API: api, FailLimiter: ratelimit.New(1000, 1000), Version: "test"})
+	mux := http.NewServeMux()
+	mux.Handle("/mcp", h)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+	auth := map[string]string{"Authorization": "Bearer " + goodToken}
+
+	if resp := post(t, ts.URL, auth); resp.StatusCode == 401 {
+		t.Fatalf("gecerli token reddedildi: %d", resp.StatusCode)
+	}
+	api.mu.Lock()
+	api.revoked = true
+	api.mu.Unlock()
+	// Onbellek yuzunden iptal hemen gorunmez (TTL davranisi).
+	if resp := post(t, ts.URL, auth); resp.StatusCode == 401 {
+		t.Fatalf("onbellekli kimlik beklenirdi: %d", resp.StatusCode)
+	}
+	h.InvalidateIdentities()
+	if resp := post(t, ts.URL, auth); resp.StatusCode != 401 {
+		t.Fatalf("iptalden sonra 401 beklenirdi: %d", resp.StatusCode)
 	}
 }

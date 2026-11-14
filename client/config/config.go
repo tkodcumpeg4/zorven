@@ -12,7 +12,7 @@ import (
 
 // Config, kullanicinin yerel istemci ayarlari.
 type Config struct {
-	ServerAddr string `json:"server_addr"`
+	ServerAddr string `json:"server_addr,omitempty"` // bos: dosyaya yazilmaz, okurken varsayilan gelir
 	// Servers (istege bagli): ek sunucu adresleri (host:port). Ajan ServerAddr
 	// ile birlikte aday olarak kullanir, ilk baglantida sunucunun bildirdigi
 	// dugum listesiyle birlestirir. ServerPinned ise kullanilmaz.
@@ -143,6 +143,18 @@ func LoadFile(path string) (Config, error) {
 	return cfg, nil
 }
 
+// FileHasServer: dosya var ve bos olmayan bir server_addr iceriyor mu?
+func FileHasServer(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var m struct {
+		S string `json:"server_addr"`
+	}
+	return json.Unmarshal(data, &m) == nil && strings.TrimSpace(m.S) != ""
+}
+
 // corruptWarned, bozuk ayar dosyasi uyarisinin surec basina bir kez basilmasini saglar.
 var corruptWarned sync.Map
 
@@ -202,6 +214,11 @@ func SaveFile(path string, cfg Config) error {
 		return fmt.Errorf("yapilandirma dizini olusturulamadi: %w", err)
 	}
 
+	// Dosyada sunucu yokken LoadFile'in doldurdugu varsayilan sunucu dosyaya YAZILMAZ
+	// (config set / login / logout / ayar TUI'si calisan ajani varsayilana itmesin).
+	if cfg.ServerAddr == DefaultConfig().ServerAddr && !FileHasServer(path) {
+		cfg.ServerAddr = ""
+	}
 	res, err := MarshalMerged(path, cfg)
 	if err != nil {
 		return fmt.Errorf("ayar verisi serilestirilemedi: %w", err)

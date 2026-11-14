@@ -1,6 +1,6 @@
 # zorven (Python)
 
-Open a public [Zorven](https://zorven.app) tunnel to a local port from Python.
+Open a public [Zorven](https://zorven.app/?utm_source=sdk&utm_medium=python) tunnel to a local port from Python.
 Wraps the `zorven` CLI (install: `curl -fsSL https://zorven.app/install.sh | sh`).
 
 ```python

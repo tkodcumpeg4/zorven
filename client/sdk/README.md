@@ -1,6 +1,6 @@
 # Zorven Go SDK
 
-Open a public [Zorven](https://zorven.app) tunnel to a local service from Go.
+Open a public [Zorven](https://zorven.app/?utm_source=sdk&utm_medium=go) tunnel to a local service from Go.
 Native — embeds the agent, no external binary needed.
 
 ```go

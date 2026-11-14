@@ -9,6 +9,7 @@ const (
 	QuotaTunnels  = "tunnels"
 	QuotaClients  = "clients"
 	QuotaProjects = "projects"
+	QuotaMembers  = "members"
 )
 
 // LockQuota, acik surumde no-op: plan limiti yok, siraya sokulacak say+ekle bolumu yok.

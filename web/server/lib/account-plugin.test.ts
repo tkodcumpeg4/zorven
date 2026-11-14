@@ -6,6 +6,7 @@ import { test } from "node:test"
 import assert from "node:assert/strict"
 import { betterAuth } from "better-auth"
 import { memoryAdapter } from "better-auth/adapters/memory"
+import { bearer } from "better-auth/plugins"
 import { accountPlugin } from "./account-plugin.ts"
 import { deleteUserOptions, DELETE_SESSION_FRESH_MS, DELETE_TOKEN_EXPIRES_SECONDS } from "./account-delete.ts"
 import { AccountBlockedError, AccountServiceError, type AccountClient, type AccountPlan } from "./account-internal.ts"
@@ -94,7 +95,7 @@ function setup(opts: { rateLimit?: boolean } = {}) {
     trustedOrigins: [ORIGIN],
     emailAndPassword: { enabled: true, requireEmailVerification: false },
     user: { deleteUser: deleteUserOptions(deps) },
-    plugins: [accountPlugin(deps)],
+    plugins: [accountPlugin(deps), bearer()], // auth.ts ile ayni sira
     ...(opts.rateLimit
       ? { rateLimit: { enabled: true, window: 60, max: 1000 }, advanced: { ipAddress: { ipAddressHeaders: ["x-forwarded-for"] } } }
       : {}),
@@ -105,12 +106,13 @@ function setup(opts: { rateLimit?: boolean } = {}) {
     method: string,
     path: string,
     body?: unknown,
-    h: { cookie?: string; acceptLanguage?: string; origin?: string | null; ip?: string } = {},
+    h: { bearer?: string; cookie?: string; acceptLanguage?: string; origin?: string | null; ip?: string } = {},
   ) {
     const headers: Record<string, string> = { "content-type": "application/json" }
     if (h.origin !== null) headers.origin = h.origin ?? ORIGIN
     const cookie = jar.header(h.cookie)
     if (cookie) headers.cookie = cookie
+    if (h.bearer) headers.authorization = `Bearer ${h.bearer}`
     if (h.acceptLanguage) headers["accept-language"] = h.acceptLanguage
     if (h.ip) headers["x-forwarded-for"] = h.ip
     const res: Response = await auth.handler(
@@ -461,6 +463,27 @@ test("parolasiz (yalniz sosyal giris) hesap: parola istenmez ama taze oturum sar
   assert.equal(sent.length, 1)
 })
 
+test("Bearer ile de ayni on kontrol: eski oturum + parolasiz istek reddedilir, dogrulama satiri olusmaz", async () => {
+  const { call, signUp, sent, db, state } = setup()
+  const jar = await signUp("a@example.com")
+  const token = db.session[0].token as string
+  const signed = [...jar.c.values()][0] // imzali bicim (cerezdeki deger, yuzde-kodlu)
+  state.clock = DELETE_SESSION_FRESH_MS + 1000
+  assert.equal((await call(new Jar(), "POST", "/delete-user", {}, { bearer: signed })).status, 403)
+  const stale = await call(new Jar(), "POST", "/delete-user", {}, { bearer: token })
+  assert.equal(stale.status, 403, stale.text)
+  assert.equal(stale.json.code, "ACCOUNT_DELETE_SESSION_NOT_FRESH")
+  state.clock = 0
+  const noPw = await call(new Jar(), "POST", "/delete-user", {}, { bearer: token })
+  assert.equal(noPw.status, 400, noPw.text)
+  assert.equal(noPw.json.code, "ACCOUNT_DELETE_PASSWORD_REQUIRED")
+  assert.equal(db.verification.length, 0)
+  assert.equal(sent.length, 0)
+  const ok = await call(new Jar(), "POST", "/delete-user", { password: PW }, { bearer: token })
+  assert.equal(ok.status, 200, ok.text)
+  assert.equal(sent.length, 1)
+})
+
 test("hiz siniri: /delete-user IP basina saatte 5 (eklenti kurali)", async () => {
   const { call, signUp } = setup({ rateLimit: true })
   const a = await signUp("a@example.com")
@@ -470,4 +493,22 @@ test("hiz siniri: /delete-user IP basina saatte 5 (eklenti kurali)", async () =>
     if (i < 5) assert.notEqual(last, 429, "istek " + (i + 1))
   }
   assert.equal(last, 429)
+})
+
+test("yanlis parola engel bilgisini sizdirmaz: Go plan sorgusu bile yapilmaz; dogru parolada engel bildirilir", async () => {
+  const { call, signUp, sent, state, goCalls } = setup()
+  const a = await signUp("a@example.com")
+  state.plan = okPlan({
+    can_delete: false,
+    blocking_orgs: [{ id: "ten_x", slug: "x", name: "X", role: "owner", members: 3, reason: "owner" }],
+  })
+  const wrong = await call(a, "POST", "/delete-user", { password: "yanlis-parola-1", callbackURL: "/" })
+  assert.equal(wrong.status, 400)
+  assert.equal(wrong.json.code, "INVALID_PASSWORD")
+  assert.ok(!/ten_x|X \(|owner/i.test(wrong.text), "engel bilgisi donmemeli: " + wrong.text)
+  assert.ok(!goCalls.some((c) => c.startsWith("plan")), "parola dogrulanmadan plan sorgulanmamali")
+  const right = await call(a, "POST", "/delete-user", { password: PW, callbackURL: "/" })
+  assert.equal(right.status, 409)
+  assert.equal(right.json.code, "ACCOUNT_DELETE_OWNER_BLOCKED")
+  assert.equal(sent.length, 0)
 })

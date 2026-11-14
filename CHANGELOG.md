@@ -24,6 +24,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Removing a tunnel replica now verifies that the client belongs to the caller's tenant (it could previously trigger a config push to another tenant's agent).
 - An invitation with an explicit but invalid role returns 422 instead of silently becoming a member.
 - With old agents, a response body with `Content-Length` that stalls for 60 seconds is closed instead of hanging.
+- Bandwidth counters: a partial database failure while flushing usage re-queues only the tenants that could not be written (`store.FlushError`) instead of losing or double-counting deltas.
+- The API token list shows non-privileged members only their own tokens (owners and admins still see all).
+- Expired pending invitations are reported with an `expired` flag and the invitation page explains it; invitation accept/create are serialized with the member quota lock hook.
+- Sign-up CAPTCHA reports `missing_fields` precisely when the token or answer is absent.
+- Remote MCP identity cache is dropped as soon as an API token is revoked or rotated, and its TTL is 10 seconds.
+- Mail: delivery to a mailbox that does not exist is a permanent rejection (550, unknown recipient); a missing tenant lookup is no longer a temporary 451.
+- Client configuration precedence: explicit `--server` / `--token` values are no longer overridden by a saved config file.
+- Account deletion: the Bearer-token pre-check now applies, and the password is verified before any blocker information is revealed.
+- Desktop 0.3.9: links to the website carry a `utm_source=desktop` tag; SDK READMEs and announcement e-mails carry source tags as well.
 
 ## [0.3.8] - 2026-11-11
 

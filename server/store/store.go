@@ -1422,3 +1422,14 @@ const (
 	SettingAdminTokenID   = "admin_token_id"
 	SettingAdminTokenHash = "admin_token_hash"
 )
+
+// FlushError, FlushBandwidthDeltas/FlushAppBandwidthDeltas'in kismi basarisizligini
+// bildirir: yalniz Failed'daki kiracilarin farklari yazilamadi (yeniden denenmeli);
+// digerleri yazildi ya da kalici olarak dusuruldu.
+type FlushError struct {
+	Failed map[string][2]int64
+	Err    error
+}
+
+func (e *FlushError) Error() string { return e.Err.Error() }
+func (e *FlushError) Unwrap() error { return e.Err }

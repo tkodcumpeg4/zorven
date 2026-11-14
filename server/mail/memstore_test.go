@@ -84,7 +84,7 @@ func key(t, mb, f string) string { return t + "|" + strings.ToLower(mb) + "|" + 
 func (m *memMailStore) GetTenantBySlug(_ context.Context, slug string) (store.Tenant, error) {
 	t, ok := m.tenants[slug]
 	if !ok {
-		return store.Tenant{}, store.ErrNotFound
+		return store.Tenant{}, store.ErrTenantNotFound // pgstore ile ayni hata
 	}
 	return t, nil
 }

@@ -277,7 +277,8 @@ func (a *Agent) loadReloadConfig() (config.Config, error) {
 
 // Reload (localctl.Reloader), ajanin ayar dosyasini yeniden okur ve uygular:
 //   - terminal / ekran izin tavani canli degisir (kapanan izne ait oturumlar kapanir);
-//   - sunucu adresi veya token degistiyse yeni degerler alinir ve yeniden baglanilir;
+//   - sunucu adresi veya token degistiyse yeni degerler alinir ve yeniden baglanilir
+//     (bayrak/ortam degiskeniyle verilmisse dosya onu ezmez: ServerExplicit/TokenExplicit);
 //   - deploy tavani canli degismez (degisim varsa "deploy_restart" bildirilir).
 func (a *Agent) Reload(ctx context.Context) (localctl.ReloadInfo, error) {
 	cfg, err := a.loadReloadConfig()
@@ -308,12 +309,12 @@ func (a *Agent) applyReload(cfg config.Config) (localctl.ReloadInfo, error) {
 	}
 	a.cfgMu.Lock()
 	reconnect := false
-	if cfg.ServerAddr != "" && cfg.ServerAddr != a.ServerAddr {
+	if !a.ServerExplicit && cfg.ServerAddr != "" && cfg.ServerAddr != a.ServerAddr {
 		a.ServerAddr = cfg.ServerAddr
 		info.Changed = append(info.Changed, "server")
 		reconnect = true
 	}
-	if cfg.Token != "" && cfg.Token != a.Token {
+	if !a.TokenExplicit && cfg.Token != "" && cfg.Token != a.Token {
 		a.Token = cfg.Token
 		info.Changed = append(info.Changed, "token")
 		reconnect = true

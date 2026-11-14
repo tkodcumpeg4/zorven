@@ -154,6 +154,7 @@ func buildRoot() *cobra.Command {
 		if activeToken == "" {
 			activeToken = strings.TrimSpace(os.Getenv("ZORVEN_TOKEN"))
 		}
+		tokenExplicit := activeToken != ""
 		if activeToken == "" {
 			activeToken = strings.TrimSpace(cfg.Token)
 		}
@@ -221,7 +222,9 @@ func buildRoot() *cobra.Command {
 
 		ag := &agent.Agent{
 			ServerAddr:        activeServer,
+			ServerExplicit:    strings.TrimSpace(server) != "" || strings.TrimSpace(os.Getenv("ZORVEN_SERVER")) != "",
 			Token:             activeToken,
+			TokenExplicit:     tokenExplicit,
 			LocalURL:          target,
 			RequestedTarget:   target,
 			RequestedTTLSec:   ephemeralTTLSec,

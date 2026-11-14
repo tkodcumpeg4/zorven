@@ -7,6 +7,7 @@ import (
 
 	"github.com/tkodcumpeg4/zorven/server/auth"
 	"github.com/tkodcumpeg4/zorven/server/entitlements"
+	"github.com/tkodcumpeg4/zorven/server/store"
 )
 
 // maxTokenLifetimeDays, expires_in_days ust siniri (~10 yil).
@@ -76,12 +77,49 @@ func (s *Server) listAPITokens(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	tokens, total, err := s.Store.ListAPITokensPage(r.Context(), tenantID, pg)
-	if err != nil {
-		s.fail(w, err)
-		return
+	// Ayricaliksiz cagiran yalnizca KENDI kisisel token'larini gorur
+	// (authorizeTokenChange ile ayni sahiplik olcutu); owner/admin hepsini.
+	privileged := isPlatformAdmin(r.Context())
+	if u, ok := userFromContext(r.Context()); !ok {
+		privileged = true // kullaniciya bagli olmayan kiraci kimligi
+	} else if !privileged {
+		role := u.Role
+		if role == "" || role == "api_token" {
+			var rerr error
+			role, rerr = s.Store.GetMemberRole(r.Context(), tenantID, u.ID)
+			if rerr != nil {
+				s.fail(w, rerr)
+				return
+			}
+		}
+		privileged = isPrivilegedRole(role)
 	}
-	setPageTotals(w, pg, len(tokens), total)
+	var tokens []store.APIToken
+	if privileged {
+		var total int
+		var err error
+		tokens, total, err = s.Store.ListAPITokensPage(r.Context(), tenantID, pg)
+		if err != nil {
+			s.fail(w, err)
+			return
+		}
+		setPageTotals(w, pg, len(tokens), total)
+	} else {
+		all, err := s.Store.ListAPITokens(r.Context(), tenantID)
+		if err != nil {
+			s.fail(w, err)
+			return
+		}
+		mine := []store.APIToken{}
+		if u, ok := userFromContext(r.Context()); ok && u != nil && u.ID != "" {
+			for _, t := range all {
+				if t.UserID != nil && *t.UserID == u.ID {
+					mine = append(mine, t)
+				}
+			}
+		}
+		tokens = slicePage(w, pg, mine)
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"tokens": tokens,
@@ -203,6 +241,7 @@ func (s *Server) rotateAPIToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.tokenRevoked()
 	s.audit(r, "token.rotate", tok.ID, tok.Name)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"token":     full,
@@ -233,6 +272,14 @@ func (s *Server) revokeAPIToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.tokenRevoked()
 	s.audit(r, "token.revoke", id, "")
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// tokenRevoked, API token'a dayanan onbellekleri (MCP kimligi) hemen dusurur.
+func (s *Server) tokenRevoked() {
+	if s.OnAPITokenRevoked != nil {
+		s.OnAPITokenRevoked()
+	}
 }

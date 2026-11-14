@@ -31,6 +31,8 @@ async function load() {
   }
   try {
     inv.value = await api.getInvitation(id.value)
+    // Süresi dolmuş davette Kabul/Reddet yerine "süresi dolmuş" mesajı göster.
+    if (inv.value?.expired) errorCode.value = 'invitation_expired'
   } catch (e: any) {
     errorCode.value = e?.data?.error?.code || 'unknown'
     errorMsg.value = e?.data?.error?.message || e?.message || ''

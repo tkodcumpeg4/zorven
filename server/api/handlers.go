@@ -88,6 +88,12 @@ type Server struct {
 	MCPOAuthReady   bool
 	MCPRevokeGrants func(ctx context.Context, tenantID string, resourceKeys []string) (int, error)
 
+	// OnAPITokenRevoked, bir API token'i iptal/rotate edildiginde ya da servis hesabi
+	// (ve token'lari) silindiginde cagrilir: MCP kimlik onbellegi hemen dusurulur.
+	// Cok dugumlu kurulumda yalniz bu dugumun onbellegi temizlenir (dugumler arasi
+	// iptal yayini yok); digerleri identityTTL (10 sn) icinde kendiliginden duser. nil olabilir.
+	OnAPITokenRevoked func()
+
 	// OnTunnelChange, tunel eklendiginde/degistiginde/silindiginde cagrilir.
 	// Ingress router'ini HEMEN tazelemek icin: 10sn yoklamayi beklemeye gerek kalmaz.
 	OnTunnelChange func()
@@ -218,6 +224,20 @@ func (s *Server) lockQuota(w http.ResponseWriter, r *http.Request, tenantID, res
 	unlock, err := l.LockQuota(r.Context(), tenantID, resource)
 	if err != nil {
 		s.fail(w, err)
+		return nil, false
+	}
+	return unlock, true
+}
+
+// lockQuotaOrErr, lockQuota'nin yanit yazmayan sekli (yonlendirme akislari icin).
+func (s *Server) lockQuotaOrErr(r *http.Request, tenantID, resource string) (func(), bool) {
+	l, ok := s.Entitlements.(quotaLocker)
+	if !ok || s.Entitlements == nil {
+		return func() {}, true
+	}
+	unlock, err := l.LockQuota(r.Context(), tenantID, resource)
+	if err != nil {
+		s.logger().Error("kota kilidi alinamadi", "tenant", tenantID, "kaynak", resource, "hata", err)
 		return nil, false
 	}
 	return unlock, true

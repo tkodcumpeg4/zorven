@@ -143,3 +143,37 @@ func TestSettingsTUIPreservesDesktopFields(t *testing.T) {
 		t.Errorf("terminal kapatilinca anahtar silinmeli: %v", f)
 	}
 }
+
+// Dosyada sunucu yokken ilgisiz bir anahtar yazmak varsayilan sunucuyu (zorven.app:443)
+// dosyaya doldurmaz; sunucu anahtari ise yazilir ve sonraki yazimlarda korunur.
+func TestConfigSetUnrelatedKeyDoesNotWriteDefaultServer(t *testing.T) {
+	isolateHome(t)
+	old := outW
+	outW = io.Discard
+	t.Cleanup(func() { outW = old })
+	p, err := config.Path()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mutateConfig(false, "enable_terminal", setKeyFn("enable_terminal", "true"), false); err != nil {
+		t.Fatal(err)
+	}
+	f := rawConfigFields(t, p)
+	if _, ok := f["server_addr"]; ok {
+		t.Errorf("server_addr yazilmamali: %v", f)
+	}
+	if f["enable_terminal"] != "true" {
+		t.Errorf("enable_terminal yazilmadi: %v", f)
+	}
+	if c, _ := config.LoadFile(p); c.ServerAddr != config.DefaultConfig().ServerAddr {
+		t.Errorf("okurken varsayilan gelmeli: %q", c.ServerAddr)
+	}
+	if err := mutateConfig(false, "server", setKeyFn("server", "a.example:1"), false); err != nil {
+		t.Fatal(err)
+	}
+	wantRaw(t, rawConfigFields(t, p), map[string]string{"server_addr": `"a.example:1"`})
+	if err := mutateConfig(false, "enable_screen", setKeyFn("enable_screen", "true"), false); err != nil {
+		t.Fatal(err)
+	}
+	wantRaw(t, rawConfigFields(t, p), map[string]string{"server_addr": `"a.example:1"`})
+}

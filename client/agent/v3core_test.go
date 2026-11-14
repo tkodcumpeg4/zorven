@@ -459,3 +459,18 @@ func TestByeCodeJSON(t *testing.T) {
 		t.Fatal("Bye.Code tasinmiyor")
 	}
 }
+
+// Bayrak/ortam degiskeniyle verilen sunucu ve token, canli yeniden yuklemede
+// dosyadaki degerle EZILMEZ (bayrak > dosya).
+func TestApplyReloadExplicitNotOverridden(t *testing.T) {
+	a := &Agent{ServerAddr: "flag:1", Token: "tf", ServerExplicit: true, TokenExplicit: true, Log: quietLog()}
+	a.settings = newSettingsState(localCaps{}, true)
+	a.wakeCh = make(chan struct{}, 1)
+	info, err := a.applyReload(config.Config{ServerAddr: "zorven.app:443", Token: "tfile"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.serverAddr() != "flag:1" || a.token() != "tf" || info.Reconnecting || len(info.Changed) != 0 {
+		t.Fatalf("bayrak degerleri ezildi: %s %s %+v", a.serverAddr(), a.token(), info)
+	}
+}

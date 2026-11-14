@@ -73,7 +73,8 @@ async function toggleAnnounce() {
   }
 }
 
-onMounted(() => { loadSession(); loadAnnounce() })
+// Duyuru tercihi yalniz Better Auth hesabinda vardir (admin anahtarinda uc 403 doner).
+onMounted(() => { loadSession(); if (method.value === 'better-auth') loadAnnounce() })
 
 async function saveName() {
   const n = nameInput.value.trim()
@@ -131,7 +132,9 @@ async function savePassword() {
       <p class="mt-0.5 text-sm text-fg-muted">{{ t('profile.subtitle') }}</p>
     </header>
 
-    <div v-if="method !== 'better-auth'" class="rounded-xl border border-line bg-surface/60 p-5 text-sm text-fg-muted">{{ t('profile.onlyEmailAccounts') }}</div>
+    <template v-if="method !== 'better-auth'">
+      <div class="rounded-xl border border-line bg-surface/60 p-5 text-sm text-fg-muted">{{ t('profile.onlyEmailAccounts') }}</div>
+    </template>
 
     <template v-else>
       <!-- Özet -->

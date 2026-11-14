@@ -2,6 +2,7 @@ package bandwidth
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -178,7 +179,7 @@ func (r *LocalUsageRecorder) Flush(ctx context.Context) error {
 		if err := r.st.FlushBandwidthDeltas(ctx, period, byTenant); err != nil {
 			// Yazilamayan farklar kaybolmasin (kota/fatura dogrulugu): bellek
 			// sayaclarina geri EKLE (yeni gelen artislarin uzerine yazmadan).
-			r.restoreDeltas(period, byTenant)
+			r.restoreDeltas(period, failedDeltas(err, byTenant))
 			r.logFlushFailure(err)
 			if firstErr == nil {
 				firstErr = err
@@ -186,6 +187,16 @@ func (r *LocalUsageRecorder) Flush(ctx context.Context) error {
 		}
 	}
 	return firstErr
+}
+
+// failedDeltas, kismi basarisizlikta (store.FlushError) yalniz yazilamayan
+// kiracilarin farklarini, aksi halde tumunu doner.
+func failedDeltas(err error, all map[string][2]int64) map[string][2]int64 {
+	var fe *store.FlushError
+	if errors.As(err, &fe) {
+		return fe.Failed
+	}
+	return all
 }
 
 // restoreDeltas, basarisiz bir flush'in farklarini canli tampona toplar.

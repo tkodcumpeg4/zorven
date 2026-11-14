@@ -71,7 +71,9 @@ func (l *Local) Resolve(ctx context.Context, addr string) (tenantID string, loca
 	if l.MailDomain != "" && domain == l.MailDomain {
 		t, gerr := l.Store.GetTenantBySlug(ctx, lp)
 		if gerr != nil {
-			if errors.Is(gerr, store.ErrNotFound) {
+			// Postgres deposu olmayan slug icin ErrTenantNotFound doner (ErrNotFound'u sarmaz); ikisi de
+			// "boyle bir kutu yok" demektir. Aksi halde gonderen MTA 451 alip gunlerce yeniden denerdi.
+			if errors.Is(gerr, store.ErrNotFound) || errors.Is(gerr, store.ErrTenantNotFound) {
 				return "", true, ErrNoSuchMailbox
 			}
 			return "", true, fmt.Errorf("kutu cozumlenemedi: %w", gerr)

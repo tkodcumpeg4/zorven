@@ -97,9 +97,37 @@ export interface DeleteDeps {
 }
 
 /**
+ * Authorization: Bearer <jeton> basligindan oturumu cozer. KOK NEDEN: Better Auth bearer eklentisi
+ * Authorization'i oturum cerezine kendi before kancasinda cevirir, ama kanca sonuclari (headers)
+ * TUM before kancalari bittikten sonra uygulanir; sonraki kancalar (bizimki) cerezi GORMEZ (eklenti
+ * sirasi fark etmez). Bu yuzden Bearer'li istekte getAuthoritativeSessionFromCtx null donuyor ve on
+ * kontrol atlaniyordu. Burada ayni jeton biciminden ("<jeton>" ya da "<jeton>.<imza>", yuzde-kodlu
+ * olabilir) oturum satiri okunur. Imza BURADA dogrulanmaz: gecersiz imzada uc kendisi (bearer) 401
+ * verir; ham jeton zaten bearer'in kabul ettigi sirdir, yani bu yol yalniz EK kontrol uygular.
+ * Suresi dolmus/yok oturum -> null.
+ */
+async function bearerSession(ctx: any): Promise<{ session: any; user: any } | null> {
+  const auth = ctx.request?.headers?.get?.("authorization") ?? ctx.headers?.get?.("authorization")
+  if (typeof auth !== "string" || auth.slice(0, 7).toLowerCase() !== "bearer ") return null
+  let token = auth.slice(7).trim()
+  if (!token) return null
+  if (token.includes("%")) {
+    try {
+      token = decodeURIComponent(token)
+    } catch {}
+  }
+  token = token.split(".")[0] ?? ""
+  if (!token) return null
+  const found = await ctx.context.internalAdapter.findSession(token)
+  if (!found?.session || !found.user) return null
+  if (new Date(found.session.expiresAt).getTime() <= Date.now()) return null
+  return found
+}
+
+/**
  * POST /delete-user ON KONTROLU (sendDeleteAccountVerification'dan ONCE calisir):
  *   - oturum taze olmali (yeniden giris gerekebilir),
- *   - parolali hesapta parola gonderilmeli (dogrulugunu Better Auth kontrol eder),
+ *   - parolali hesapta parola gonderilmeli VE dogru olmali (engel bilgisinden ONCE dogrulanir),
  *   - Go on kontrolu: baska uyeli organizasyonun tek sahibi / platform yoneticisi ise engel.
  * Onay jetonuyla tamamlama (body.token) e-posta sahipligiyle zaten dogrulanmistir; atlanir.
  * Oturum yoksa hicbir sey yapmaz (uc kendisi 401 verir).
@@ -109,7 +137,8 @@ export function createDeleteGuard(deps: DeleteDeps) {
   return async function deleteGuard(ctx: any): Promise<void> {
     const body = (ctx.body ?? {}) as { token?: unknown; password?: unknown }
     if (body.token) return
-    const session = await getAuthoritativeSessionFromCtx(ctx)
+    // Cerez ve Bearer AYNI kontrolden gecer (Bearer gecerliyse oturum odur; bearer eklentisi de oyle ceviriyor).
+    const session = (await bearerSession(ctx)) ?? (await getAuthoritativeSessionFromCtx(ctx))
     if (!session?.session || !session.user) return
     const lang = await deps.langFor(session.user.id, ctx)
 
@@ -128,6 +157,19 @@ export function createDeleteGuard(deps: DeleteDeps) {
         code: "ACCOUNT_DELETE_PASSWORD_REQUIRED",
         message: deleteErrorMessage("ACCOUNT_DELETE_PASSWORD_REQUIRED", lang),
       })
+    }
+
+    // Parola, engel bilgisi (Go plan sorgusu) verilmeden ONCE dogrulanir: oturumu olan ama parolayi
+    // bilmeyen biri "tek sahipli kurum" gibi bilgiyi ogrenemesin. Hata biçimi Better Auth ile ayni
+    // (INVALID_PASSWORD / PASSWORD_TOO_LONG); uc ayrica kendisi de dogrular. Parolasiz (yalniz sosyal
+    // giris) hesapta parola kontrolu yoktur: akis ayni kalir.
+    if (credential?.password) {
+      const password = body.password as string
+      if (password.length > ctx.context.password.config.maxPasswordLength) {
+        throw new APIError("BAD_REQUEST", { code: "PASSWORD_TOO_LONG", message: "Password too long" })
+      }
+      const ok = await ctx.context.password.verify({ hash: credential.password, password })
+      if (!ok) throw new APIError("BAD_REQUEST", { code: "INVALID_PASSWORD", message: "Invalid password" })
     }
 
     let plan: AccountPlan
