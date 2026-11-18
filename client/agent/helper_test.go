@@ -134,6 +134,8 @@ type fakeBackend struct {
 	capCalls int
 	inputs   []protocol.ScreenInput
 	clip     string
+	img      []byte
+	imgErr   error
 }
 
 type fakeFrame struct {
@@ -151,13 +153,15 @@ func solid(w, h int, v byte) *image.RGBA {
 	return img
 }
 
-func (f *fakeBackend) NumDisplays() int           { return 1 }
-func (f *fakeBackend) Bounds(int) image.Rectangle { return image.Rect(0, 0, 8, 6) }
-func (f *fakeBackend) Method() string             { return "fake" }
-func (f *fakeBackend) Attach() bool               { return true }
-func (f *fakeBackend) ClipSeq() uint32            { return 7 }
-func (f *fakeBackend) ClipGet() (string, error)   { return f.clip, nil }
-func (f *fakeBackend) ClipSet(s string) error     { f.clip = s; return nil }
+func (f *fakeBackend) NumDisplays() int              { return 1 }
+func (f *fakeBackend) Bounds(int) image.Rectangle    { return image.Rect(0, 0, 8, 6) }
+func (f *fakeBackend) Method() string                { return "fake" }
+func (f *fakeBackend) Attach() bool                  { return true }
+func (f *fakeBackend) ClipSeq() uint32               { return 7 }
+func (f *fakeBackend) ClipGet() (string, error)      { return f.clip, nil }
+func (f *fakeBackend) ClipSet(s string) error        { f.clip = s; return nil }
+func (f *fakeBackend) ClipGetImage() ([]byte, error) { return f.img, f.imgErr }
+func (f *fakeBackend) ClipSetImage(p []byte) error   { f.img = p; return nil }
 func (f *fakeBackend) Input(m protocol.ScreenInput, r displayRect) inputResult {
 	f.mu.Lock()
 	f.inputs = append(f.inputs, m)
@@ -276,6 +280,36 @@ func TestHelperInputAndClipboard(t *testing.T) {
 	}
 	if cb.Seq() != 7 {
 		t.Fatal("seq")
+	}
+}
+
+func TestHelperClipboardImage(t *testing.T) {
+	be := &fakeBackend{frames: []fakeFrame{{img: solid(8, 6, 1)}}}
+	cl := newHelperClient(&fakeConnector{be: be})
+	defer cl.Close()
+	cb := helperClipboard{cl}
+	if png, err := cb.GetImage(); err != nil || png != nil {
+		t.Fatalf("gorsel yokken (nil,nil) beklenir: %v %v", png, err)
+	}
+	want := encPNG(t, testImage(5, 3, true))
+	if err := cb.SetImage(want); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := cb.GetImage(); err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("gidis-donus: %d bayt, %v", len(got), err)
+	}
+	// Kalici hata turleri sinirdan gecince korunur.
+	be.imgErr = errClipImageTooLarge
+	if _, err := cb.GetImage(); !errors.Is(err, errClipImageTooLarge) {
+		t.Fatalf("too large turu korunmali: %v", err)
+	}
+	be.imgErr = errClipImageInvalid
+	if _, err := cb.GetImage(); !errors.Is(err, errClipImageInvalid) {
+		t.Fatalf("invalid turu korunmali: %v", err)
+	}
+	be.imgErr = errors.New("pano baska bir uygulamada acik")
+	if _, err := cb.GetImage(); err == nil || errors.Is(err, errClipImageInvalid) || errors.Is(err, errClipImageTooLarge) {
+		t.Fatalf("gecici hata kalici sayilmamali: %v", err)
 	}
 }
 

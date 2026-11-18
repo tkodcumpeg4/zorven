@@ -385,6 +385,19 @@ func (h *Handler) handshake(ctx context.Context, s *Session) error {
 			s.screenClipboard = true
 			enabled = append(enabled, protocol.FeatureScreenClipboard)
 		}
+		// Gorsel panosu yalniz metin panosuyla birlikte anlasilir.
+		if f == protocol.FeatureScreenClipboardImage && featureListed(hello.Features, protocol.FeatureScreenClipboard) {
+			s.screenClipboardImage = true
+			enabled = append(enabled, protocol.FeatureScreenClipboardImage)
+		}
+		if f == protocol.FeatureScreenInfo {
+			s.screenInfo = true
+			enabled = append(enabled, protocol.FeatureScreenInfo)
+		}
+		if f == protocol.FeatureScreenPing {
+			s.screenPing = true
+			enabled = append(enabled, protocol.FeatureScreenPing)
+		}
 	}
 
 	enabled = append(enabled, s.negotiateNet(h.Net, hello.Features)...)

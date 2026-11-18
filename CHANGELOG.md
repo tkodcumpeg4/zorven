@@ -5,6 +5,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-18
+
+### Added
+- Remote desktop: image clipboard transfer in both directions (PNG up to 8 MB, a new `screen_clipboard_image` feature negotiated on top of text clipboard; Windows DIB/PNG, Linux and macOS through the system clipboard tools). Browsers without image clipboard access fall back to the Zorven folder file upload.
+- Remote desktop: monitor picker for multi-monitor machines (`screen_info`), live latency badge with browser-server and server-client round trip (`screen_ping`/`screen_pong`), full screen mode with a keyboard lock hint and extra shortcuts (Ctrl+Shift+Esc, Print Screen), automatic reconnect with a countdown, and touch gestures (tap, double tap, long press, two-finger scroll, pinch zoom, drag lock) with an on-screen keyboard and sticky modifier keys.
+- Search engine bots are now verified by their published IP ranges in addition to reverse+forward DNS (Google, Bing, Yandex, Apple, Baidu, Naver, Seznam, Yahoo, DuckDuckGo, ChatGPT and Perplexity search bots); `scripts/update-bot-ranges.py` refreshes `server/botguard/botranges.json`. Requests that only spoof a bot name still get the human check.
+
+### Changed
+- Desktop and CLI client version 0.4.0 (they are released together).
+
+## [0.3.9] - 2026-11-14
+
 ### Added
 - Server build version embedded in the binary (`-X main.buildVersion`, `scripts/build-server.sh`, `ZORVEN_BUILD_VERSION` build argument in `deploy/Dockerfile`); shown in `zorven_build_info`, authenticated health/status, MCP server info and the startup log.
 - WebSocket tunnels carry `X-Zorven-Request-Id` on the handshake and in the live request log.

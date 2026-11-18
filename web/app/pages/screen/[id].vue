@@ -7,6 +7,12 @@ import { loadVideoPref, saveVideoPref } from '~/lib/screenVideo'
 import { clampFps, effectiveFpsLimit, fpsOptions } from '~/lib/screenFps'
 import { FileTransferError, MAX_FILE_BYTES } from '~/composables/useScreenFiles'
 import type { RemoteFile } from '~/composables/useScreenFiles'
+import { DeferredPaste, RECONNECT_MAX_ATTEMPTS, clipboardFits, collectPaste, isPasteCombo, pastedFileName, reconnectDelayMs, shouldAutoRetry } from '~/lib/screenClipboard'
+import { isEchoImage, pickPasteImage, pngWithinLimit, remoteImageFileName, renderPngBrowser } from '~/lib/screenImagePaste'
+import { RttWindow, formatRtt, isRttStale, rttTone } from '~/lib/screenLatency'
+import type { RttAverage } from '~/lib/screenLatency'
+import { TouchGestures, ZOOM_IDENTITY, applyPinch, codeForChar, consumeSticky, zoomTransform } from '~/lib/screenTouch'
+import type { TouchAction, ZoomState } from '~/lib/screenTouch'
 
 const route = useRoute()
 const clientID = route.params.id as string
@@ -40,6 +46,49 @@ const control = ref(true) // fare/klavye kontrolu acik mi
 const viewOnlyLocked = ref(false) // sunucu zorlamali salt-izleme: kullanici acamaz
 const viewers = ref<{ count: number, controllers: number } | null>(null)
 
+// Tam ekran: sahne (uzak ekran) tum ekrani kaplar. Destekleyen tarayicilarda klavye kilidiyle Esc ve
+// sistem kisayollari da uzak makineye gider; cikmak icin Esc basili tutulur ya da ustteki dugme kullanilir.
+const isFullscreen = ref(false)
+const fsBar = ref(false)
+let fsBarTimer: ReturnType<typeof setTimeout> | null = null
+const fullscreenSupported = ref(false)
+function showFsBar(ms = 2500) {
+  fsBar.value = true
+  if (fsBarTimer) clearTimeout(fsBarTimer)
+  // Kisayol menusu aciksa cubuk kapanmaz (menu cubugun icinde).
+  fsBarTimer = setTimeout(() => { if (showShortcuts.value) showFsBar(ms); else fsBar.value = false }, ms)
+}
+// Klavye kilidi durumu (tam ekran): 'locked' => Esc/Alt+Tab/Win uzak makineye gider (Esc basili tutulunca cikilir);
+// 'unsupported' => tarayici kilidi desteklemiyor ya da reddetti (Firefox/Safari): Kisayollar menusu kullanilmali.
+const kbLock = ref<'pending' | 'locked' | 'unsupported'>('pending')
+async function toggleFullscreen() {
+  try {
+    if (document.fullscreenElement) await document.exitFullscreen()
+    else await stage.value?.requestFullscreen({ navigationUI: 'hide' })
+  } catch { /* tarayici izin vermedi */ }
+}
+function onFullscreenChange() {
+  isFullscreen.value = document.fullscreenElement === stage.value
+  const kb = (navigator as any).keyboard
+  if (isFullscreen.value) {
+    showFsBar(3500)
+    // Klavye kilidi (Chromium): Esc, Alt+Tab, Win tusu vb. uzak makineye gider.
+    kbLock.value = 'pending'
+    try {
+      if (typeof kb?.lock !== 'function') kbLock.value = 'unsupported'
+      else Promise.resolve(kb.lock()).then(() => { if (isFullscreen.value) kbLock.value = 'locked' }).catch(() => { kbLock.value = 'unsupported' })
+    } catch { kbLock.value = 'unsupported' }
+    stage.value?.focus()
+  } else {
+    fsBar.value = false
+    try { kb?.unlock?.() } catch { /* desteklenmiyor */ }
+  }
+  schedulePlaceCursor()
+}
+function onStagePointerMoveFs(e: PointerEvent) {
+  if (isFullscreen.value && e.clientY <= 6) showFsBar()
+}
+
 function toggleControl() {
   if (viewOnlyLocked.value) return
   control.value = !control.value
@@ -47,7 +96,15 @@ function toggleControl() {
 }
 
 // --- Imlec katmani, pano, kisayollar -----------------------------------------
-const caps = ref({ cursor: false, clipboard: false, files: false })
+const caps = ref<{ cursor: boolean, clipboard: boolean, files: boolean, clipboardImage: boolean, displays: number, display: number }>({ cursor: false, clipboard: false, files: false, clipboardImage: false, displays: 1, display: 0 })
+// Monitor secimi: son kullanici secimi (-1 = secilmedi). Yeniden baglanmada ayni monitor yeniden istenir.
+const wantedDisplay = ref(-1)
+let displayRestoreTried = false
+function selectDisplay(i: number) {
+  if (!handle || i === caps.value.display || i < 0 || i >= caps.value.displays) return
+  wantedDisplay.value = i
+  handle.sendSettings({ display: i })
+}
 const showRemoteCursor = ref(true)
 const cursorPos = ref<ScreenCursorPos | null>(null)
 const cursorShape = ref<{ url: string, w: number, h: number, hotX: number, hotY: number } | null>(null)
@@ -115,6 +172,248 @@ const clipStatus = ref<{ ok: boolean, text: string } | null>(null)
 const remoteClip = ref('')
 const clipUnread = ref(false)
 const clipCopied = ref(false)
+// Otomatik pano: Ctrl+V'de bu bilgisayarin panosu once uzak makineye gonderilir; uzakta kopyalanan
+// metin de bu bilgisayarin panosuna yazilir. Tercih tarayicida saklanir (varsayilan acik).
+const AUTOCLIP_KEY = 'zv_screen_autoclip'
+const autoClip = ref(true)
+function loadAutoClip() { try { autoClip.value = localStorage.getItem(AUTOCLIP_KEY) !== '0' } catch { /* depolama yok */ } }
+watch(autoClip, (v) => { try { localStorage.setItem(AUTOCLIP_KEY, v ? '1' : '0') } catch { /* depolama yok */ } })
+let lastSentClip = ''
+let lastRemoteClip = ''
+let clipAck: (() => void) | null = null
+const deferredPaste = new DeferredPaste<Record<string, unknown>>()
+const clipReadBlocked = ref(false) // tarayici pano okumaya izin vermedi: bir kez bilgi goster
+
+/** Bu bilgisayarin panosunu okur; izin yoksa/desteklenmiyorsa null. */
+async function readLocalClipboard(): Promise<string | null> {
+  try {
+    if (!navigator.clipboard?.readText) return null
+    return await navigator.clipboard.readText()
+  } catch {
+    clipReadBlocked.value = true
+    return null
+  }
+}
+
+/** Metni uzak panoya gonderir ve onayi (clipboard_status) ya da kisa bir sureyi bekler. */
+function pushClipboardAndWait(text: string, timeoutMs = 600): Promise<void> {
+  return new Promise((resolve) => {
+    if (!handle) { resolve(); return }
+    const done = () => { if (clipAck === done) clipAck = null; clearTimeout(timer); resolve() }
+    const timer = setTimeout(done, timeoutMs)
+    clipAck = done
+    lastSentClip = text
+    handle.sendClipboard(text)
+  })
+}
+
+// Gorsel pano: yerel -> uzak (Ctrl+V'de panodaki gorsel PNG olarak uzak panoya) ve uzak -> yerel.
+const PASTEIMG_KEY = 'zv_screen_pasteimg'
+const pasteImages = ref(true)
+function loadPasteImages() { try { pasteImages.value = localStorage.getItem(PASTEIMG_KEY) !== '0' } catch { /* depolama yok */ } }
+watch(pasteImages, (v) => { try { localStorage.setItem(PASTEIMG_KEY, v ? '1' : '0') } catch { /* depolama yok */ } })
+// Uzaktan gelen son gorsel (onizleme + kopyala + indir). Nesne URL'leri degisince/ayrilinca serbest birakilir.
+const remoteImage = ref<{ url: string, blob: Blob, name: string } | null>(null)
+const imgCopied = ref(false)
+let lastRemoteImage: { size: number, at: number } | null = null
+let clipImageAck: ((r: { ok: boolean, reason: string }) => void) | null = null
+function setRemoteImage(png: Blob) {
+  if (remoteImage.value) URL.revokeObjectURL(remoteImage.value.url)
+  remoteImage.value = { url: URL.createObjectURL(png), blob: png, name: remoteImageFileName(new Date()) }
+  imgCopied.value = false
+  lastRemoteImage = { size: png.size, at: Date.now() }
+}
+
+/** Gorseli uzak panoya gonderir; sunucunun sonucunu (clipboard_status image=true) ya da zaman asimini bekler. */
+function pushImageAndWait(png: Blob, timeoutMs = 2500): Promise<{ ok: boolean, reason: string }> {
+  return new Promise((resolve) => {
+    if (!handle) { resolve({ ok: false, reason: 'closed' }); return }
+    const done = (r: { ok: boolean, reason: string }) => { if (clipImageAck === done) clipImageAck = null; clearTimeout(timer); resolve(r) }
+    // Onay gelmezse (eski sunucu) gonderim basarili sayilir: tus yine iletilir.
+    const timer = setTimeout(() => done({ ok: true, reason: 'timeout' }), timeoutMs)
+    clipImageAck = done
+    handle.sendClipboardImage(png)
+  })
+}
+
+const IMG_REASON_KEYS: Record<string, string> = {
+  view_only: 'clipImgViewOnly',
+  unsupported: 'clipImgUnsupported',
+  too_large: 'clipImgTooLarge',
+  invalid: 'clipImgInvalid',
+  rate_limited: 'clipImgRateLimited',
+}
+function imgReasonText(reason: string): string {
+  return t('screen.' + (IMG_REASON_KEYS[reason] ?? 'clipImgInvalid'))
+}
+
+/** Yapistirilan tek gorseli dosya olarak Zorven klasorune yukler (gorsel panosu yoksa/basarisizsa geri donus). */
+function uploadPastedImageAsFile(file: File) {
+  if (!canSendFiles.value) {
+    showStageNote(t('screen.pasteFilesUnavailable'), 'error', 6000)
+    return
+  }
+  const name = pastedFileName(file.name, file.type, new Date())
+  enqueueFiles([name === file.name ? file : new File([file], name, { type: file.type })], false)
+  showStageNote(t('screen.pasteFilesSending', { n: 1 }), 'info', 6000)
+}
+
+/**
+ * Panodaki gorseli PNG'ye cevirip uzak panoya yazar, SONRA bekletilen Ctrl+V'yi iletir (uzak uygulamaya yapissin).
+ * Cevrilemez/cok buyukse ya da istemci gorseli kabul etmezse dosya olarak yuklenir.
+ */
+async function pasteImageToRemote(file: File) {
+  if (lastRemoteImage && isEchoImage(lastRemoteImage, file.size, Date.now())) {
+    // Uzaktan gelip yerel panoya yazdigimiz gorsel: uzak pano zaten ayni gorseli tasiyor.
+    flushDeferredPaste(true)
+    return
+  }
+  const png = await pngWithinLimit(file, renderPngBrowser)
+  if (!png) {
+    flushDeferredPaste(false)
+    uploadPastedImageAsFile(file)
+    return
+  }
+  showStageNote(t('screen.clipImgSending'), 'info', 3000)
+  const r = await pushImageAndWait(png)
+  if (r.ok) {
+    clipStatus.value = { ok: true, text: t('screen.clipImgSent') }
+    if (r.reason !== 'timeout') showStageNote(t('screen.clipImgSent'), 'info', 2500)
+    flushDeferredPaste(true)
+    return
+  }
+  flushDeferredPaste(false)
+  if ((r.reason === 'unsupported' || r.reason === 'too_large') && canSendFiles.value) {
+    uploadPastedImageAsFile(file)
+    return
+  }
+  const text = imgReasonText(r.reason)
+  clipStatus.value = { ok: false, text }
+  showStageNote(text, 'error', 6000)
+}
+
+/** Uzak makineden gelen gorsel: onizleme + (otomatik pano aciksa) bu bilgisayarin panosuna yaz. */
+function onRemoteClipImage(png: Blob) {
+  setRemoteImage(png)
+  if (!showClipboard.value) clipUnread.value = true
+  if (autoClip.value && typeof ClipboardItem !== 'undefined' && navigator.clipboard?.write) {
+    navigator.clipboard.write([new ClipboardItem({ 'image/png': png })])
+      .then(() => showStageNote(t('screen.clipImgReceivedCopied'), 'info', 3000))
+      .catch(() => { showStageNote(t('screen.clipImgReceived'), 'info', 3000) /* odak/izin yok: panelden kopyalanir */ })
+  } else {
+    showStageNote(t('screen.clipImgReceived'), 'info', 3000)
+  }
+}
+
+async function copyRemoteImage() {
+  if (!remoteImage.value) return
+  try {
+    await navigator.clipboard.write([new ClipboardItem({ 'image/png': remoteImage.value.blob })])
+    imgCopied.value = true
+    setTimeout(() => { imgCopied.value = false }, 1500)
+  } catch { showStageNote(t('screen.clipImgCopyFailed'), 'error', 4000) }
+}
+
+function downloadRemoteImage() {
+  const im = remoteImage.value
+  if (!im) return
+  const a = document.createElement('a')
+  a.href = im.url
+  a.download = im.name
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+}
+
+// Sahne uzerinde kisa bilgi (tam ekranda da gorunur): pano/dosya aktarimi ve yeniden baglanma.
+const stageNote = ref<{ text: string, tone: 'info' | 'error' } | null>(null)
+let stageNoteTimer: ReturnType<typeof setTimeout> | null = null
+function showStageNote(text: string, tone: 'info' | 'error' = 'info', ms = 4000) {
+  stageNote.value = { text, tone }
+  if (stageNoteTimer) clearTimeout(stageNoteTimer)
+  stageNoteTimer = setTimeout(() => { stageNote.value = null }, ms)
+}
+
+let pasteFallbackTimer: ReturnType<typeof setTimeout> | null = null
+// Dosya yapistirildiginda Ctrl+V uzak makineye ILETILMEZ (uzak panoda eski icerik yapisirdi);
+// bu durumda V tusunun birakilmasi da yutulur.
+let swallowPasteKeyup = false
+
+/** Bekletilen yapistir tuslarini uzak makineye iletir (ya da atar). */
+function flushDeferredPaste(forward: boolean) {
+  if (pasteFallbackTimer) { clearTimeout(pasteFallbackTimer); pasteFallbackTimer = null }
+  const evs = deferredPaste.finish()
+  if (!forward) {
+    // keydown gitmedi: keyup da gitmesin (henuz gelmediyse geldiginde yutulur).
+    swallowPasteKeyup = evs.length < 2
+    return
+  }
+  if (!handle) return
+  for (const ev of evs) sendInput(handle.ws, ev as any)
+}
+
+/** Yapistir olayi gelmediyse (tarayici vermedi) panoyu dogrudan okuyarak devam et. */
+async function pasteWithLocalClipboard() {
+  const text = await readLocalClipboard()
+  if (text !== null && text !== lastSentClip && text !== lastRemoteClip && clipboardFits(text)) {
+    await pushClipboardAndWait(text)
+  }
+  flushDeferredPaste(true)
+}
+
+/**
+ * Tarayicinin yapistir olayi: bu bilgisayarin panosundaki metin, dosya ve gorselleri verir (izin
+ * sorusu olmadan). Metin uzak panoya yazilip Ctrl+V iletilir; dosya ve gorseller dosya aktarimiyla
+ * uzak makinedeki Zorven klasorune gonderilir.
+ */
+function onWindowPaste(e: ClipboardEvent) {
+  if (!control.value || !handle || !autoClip.value || !isScreen2.value) return
+  const el = e.target as HTMLElement | null
+  if (el && /^(INPUT|SELECT|TEXTAREA)$/.test(el.tagName) && !el.hasAttribute('data-remote-ime')) return
+  const dt = e.clipboardData
+  if (!dt) return
+  e.preventDefault()
+  // Yapistir olayi geldi: "olay gelmedi" yedegi (pasteWithLocalClipboard) devreye girmesin; yanit gelince tus iletilir.
+  if (pasteFallbackTimer) { clearTimeout(pasteFallbackTimer); pasteFallbackTimer = null }
+  // Tek gorsel + istemci gorsel panosunu destekliyor + ayar acik: PNG olarak uzak panoya, sonra Ctrl+V.
+  if (caps.value.clipboardImage && pasteImages.value) {
+    const img = pickPasteImage(
+      Array.from(dt.files ?? []),
+      Array.from(dt.items ?? []).map(i => ({ kind: i.kind, type: i.type, getAsFile: () => i.getAsFile() })),
+    )
+    if (img) {
+      void pasteImageToRemote(img)
+      return
+    }
+  }
+  const data = collectPaste(dt.getData('text/plain') || '', Array.from(dt.files ?? []))
+  if (data.files.length || data.tooLarge.length || data.dropped) {
+    flushDeferredPaste(false)
+    if (!canSendFiles.value) {
+      showStageNote(t('screen.pasteFilesUnavailable'), 'error', 6000)
+      return
+    }
+    const now = new Date()
+    const files = data.files.map((f, i) => {
+      const name = pastedFileName(f.name, f.type, new Date(now.getTime() + i * 1000))
+      return name === f.name ? f : new File([f], name, { type: f.type })
+    })
+    if (files.length) enqueueFiles(files, false)
+    const parts: string[] = []
+    if (files.length) parts.push(t('screen.pasteFilesSending', { n: files.length }))
+    if (data.tooLarge.length) parts.push(t('screen.pasteFilesTooLarge', { n: data.tooLarge.length }))
+    if (data.dropped) parts.push(t('screen.pasteFilesDropped', { n: data.dropped }))
+    showStageNote(parts.join(' '), files.length ? 'info' : 'error', 6000)
+    return
+  }
+  const text = data.text
+  if (!caps.value.clipboard || !text || text === lastSentClip || text === lastRemoteClip || !clipboardFits(text)) {
+    if (text && !clipboardFits(text)) showStageNote(t('screen.clipboardErrTooLarge'), 'error')
+    flushDeferredPaste(true)
+    return
+  }
+  void pushClipboardAndWait(text).then(() => flushDeferredPaste(true))
+}
 
 function sendClipboard() {
   if (!handle || !clipText.value) return
@@ -127,7 +426,16 @@ function onClipPaste() {
   void nextTick(() => setTimeout(sendClipboard, 0))
 }
 
-function onClipboardStatus(ok: boolean, reason: string) {
+function onClipboardStatus(ok: boolean, reason: string, image = false) {
+  if (image) {
+    // Gorsel gonderiminin sonucu: bekleyen yapistirma akisi (pushImageAndWait) varsa ona, yoksa dogrudan ekrana.
+    if (clipImageAck) { clipImageAck({ ok, reason }); return }
+    const text = ok ? t('screen.clipImgSent') : imgReasonText(reason)
+    clipStatus.value = { ok, text }
+    if (!ok) showStageNote(text, 'error', 5000)
+    return
+  }
+  clipAck?.()
   if (ok) {
     clipStatus.value = { ok: true, text: t('screen.clipboardSent') }
     return
@@ -195,6 +503,7 @@ function pumpUploads() {
       x.status = 'done'
       x.loaded = x.file.size
       x.savedAs = r.name
+      if (!showFiles.value) showStageNote(t('screen.pasteFileDone', { name: r.name }))
     }).catch((e: unknown) => {
       const code = e instanceof FileTransferError ? e.code : 'io'
       if (code === 'canceled') {
@@ -202,6 +511,7 @@ function pumpUploads() {
       } else {
         x.status = 'error'
         x.error = fileErrText(code)
+        if (!showFiles.value) showStageNote(`${x.file.name}: ${x.error}`, 'error', 6000)
       }
     }).finally(() => {
       x.abort = null
@@ -211,7 +521,7 @@ function pumpUploads() {
   }
 }
 
-function enqueueFiles(list: File[]) {
+function enqueueFiles(list: File[], openPanel = true) {
   if (!canSendFiles.value) return
   for (const file of list) {
     const x: Xfer = { id: ++xferSeq, file, loaded: 0, status: 'queued', error: '', savedAs: '', abort: null }
@@ -221,7 +531,7 @@ function enqueueFiles(list: File[]) {
     }
     xfers.value.push(x)
   }
-  showFiles.value = true
+  if (openPanel) showFiles.value = true
   pumpUploads()
 }
 
@@ -324,6 +634,8 @@ const SHORTCUTS: { id: string, labelKey: string, combo?: Combo }[] = [
   { id: 'ctrlesc', labelKey: 'shortcutCtrlEsc', combo: { key: 'Escape', code: 'Escape', ctrl: true } },
   { id: 'altf4', labelKey: 'shortcutAltF4', combo: { key: 'F4', code: 'F4', alt: true } },
   { id: 'wind', labelKey: 'shortcutWinD', combo: { key: 'd', code: 'KeyD', meta: true } },
+  { id: 'ctrlshiftesc', labelKey: 'shortcutCtrlShiftEsc', combo: { key: 'Escape', code: 'Escape', ctrl: true, shift: true } },
+  { id: 'printscreen', labelKey: 'shortcutPrintScreen', combo: { key: 'PrintScreen', code: 'PrintScreen' } },
 ]
 
 function sendShortcut(id: string) {
@@ -392,6 +704,30 @@ const inputBadge = computed(() => {
   return map[st] ?? map.unknown
 })
 const showStats = ref(false)
+
+// --- Gecikme rozeti: son 5 olcumun ortalamasi (panel<->sunucu + sunucu<->istemci), 6 sn olcum gelmezse soluk ---
+const rttWindow = new RttWindow()
+const rtt = ref<RttAverage | null>(null)
+const rttAt = ref<number | null>(null)
+const rttNow = ref(Date.now())
+let rttClock: ReturnType<typeof setInterval> | null = null
+function onRttSample(ms: number, agentMs?: number) {
+  rtt.value = rttWindow.push(ms, agentMs)
+  rttAt.value = Date.now()
+  rttNow.value = Date.now()
+}
+function resetRtt() { rttWindow.reset(); rtt.value = null; rttAt.value = null }
+const rttStale = computed(() => isRttStale(rttNow.value, rttAt.value))
+const rttView = computed(() => {
+  const r = rtt.value
+  if (!r) return null
+  const tone = rttTone(r.total)
+  return {
+    text: formatRtt(r.total),
+    cls: tone === 'good' ? 'text-accent' : tone === 'fair' ? 'text-warn' : 'text-danger',
+    title: `${t('screen.rttTitle', { ms: Math.round(r.total) })} · ${t('screen.rttBrowser', { ms: Math.round(r.ms) })} · ${r.agentMs === undefined ? t('screen.rttAgentNone') : t('screen.rttAgent', { ms: Math.round(r.agentMs) })}${rttStale.value ? ' · ' + t('screen.rttStale') : ''}`,
+  }
+})
 
 // --- Performans katmani (varsayilan kapali; tercih localStorage'da) ---------
 // H.264 video modu (screen2_video): tercih + durum (bkz. lib/screenVideo.ts).
@@ -543,7 +879,7 @@ const options = computed(() => {
 // Olayin ekran uzerindeki NORMALIZE (0..1) konumunu hesapla.
 // Goruntu, kutuya "contain" ile sigdigi icin gercek resim alanini buluyoruz;
 // kenar bosluklarina denk gelen tiklamalar yok sayilir.
-function normPoint(e: MouseEvent): { x: number, y: number } | null {
+function normPoint(e: { clientX: number, clientY: number }): { x: number, y: number } | null {
   const el = isScreen2.value ? canvas.value : (codec.value === 'h264' ? video.value : img.value)
   if (!el) return null
   const rect = el.getBoundingClientRect()
@@ -610,6 +946,7 @@ function flushMove() {
 }
 
 function onPointerMove(e: PointerEvent) {
+  if (e.pointerType === 'touch') { onTouchPointer('move', e); return }
   if (!control.value || !handle) return
   const p = normPoint(e)
   if (!p) return
@@ -620,6 +957,7 @@ function onPointerMove(e: PointerEvent) {
 }
 
 function onPointerDown(e: PointerEvent) {
+  if (e.pointerType === 'touch') { onTouchPointer('down', e); return }
   if (!control.value || !handle) return
   const p = normPoint(e)
   if (!p) return
@@ -635,6 +973,7 @@ function onPointerDown(e: PointerEvent) {
 }
 
 function onPointerUp(e: PointerEvent) {
+  if (e.pointerType === 'touch') { onTouchPointer(e.type === 'pointercancel' ? 'cancel' : 'up', e); return }
   if (!control.value || !handle) return
   const p = normPoint(e)
   e.preventDefault()
@@ -666,6 +1005,130 @@ function onWheel(e: WheelEvent) {
   })
 }
 
+// --- Dokunmatik / mobil ------------------------------------------------------------------------
+// Hareket cozumleme lib/screenTouch.ts'tedir (tek dokunus = sol tik, cift dokunus = cift tik, uzun basma = sag tik,
+// tek parmak = imleci parmagin altina tasi, iki parmak = tekerlek, kistirma = YEREL yakinlastirma). Fare/kalem yolu degismez.
+const isTouchDevice = ref(false)
+const touchLock = ref(false) // surukleme kilidi: tek parmak surukleme sol dugme basili gider
+const zoom = ref<ZoomState>({ ...ZOOM_IDENTITY })
+const isZoomed = computed(() => zoom.value.scale > 1.001)
+const zoomStyle = computed(() => {
+  const tr = zoomTransform(zoom.value)
+  return tr ? { transform: tr } : {}
+})
+const zoomPct = computed(() => Math.round(zoom.value.scale * 100))
+const TOUCH_WHEEL_GAIN = 2 // parmak pikseli -> tekerlek birimi
+const touchGestures = new TouchGestures({ dragLock: () => touchLock.value })
+let touchTimer: ReturnType<typeof setTimeout> | null = null
+let touchHintShown = false
+
+function clearTouchTimer() { if (touchTimer) { clearTimeout(touchTimer); touchTimer = null } }
+function armTouchTimer() {
+  clearTouchTimer()
+  const d = touchGestures.nextDeadline
+  if (d === null) return
+  touchTimer = setTimeout(() => {
+    touchTimer = null
+    runTouchActions(touchGestures.tick(performance.now()))
+  }, Math.max(0, d - performance.now()))
+}
+function resetTouch() {
+  clearTouchTimer()
+  touchGestures.reset()
+  zoom.value = { ...ZOOM_IDENTITY }
+  sticky.value = { ctrl: false, alt: false }
+}
+function fitZoom() {
+  zoom.value = { ...ZOOM_IDENTITY }
+  schedulePlaceCursor()
+}
+const NO_MODS = { ctrl: false, shift: false, alt: false, meta: false }
+
+function runTouchActions(acts: TouchAction[]) {
+  if (!handle || !acts.length) return
+  for (const a of acts) {
+    if (a.type === 'wheel') {
+      sendInput(handle.ws, { kind: 'wheel', delta_x: a.dx * TOUCH_WHEEL_GAIN, delta_y: a.dy * TOUCH_WHEEL_GAIN, delta_mode: 0, ...NO_MODS })
+      continue
+    }
+    if (a.type === 'zoom') {
+      const r = stage.value?.getBoundingClientRect()
+      if (!r) continue
+      zoom.value = applyPinch(zoom.value, { factor: a.factor, cx: a.cx - r.left, cy: a.cy - r.top, panX: a.panX, panY: a.panY }, r.width, r.height)
+      schedulePlaceCursor()
+      continue
+    }
+    const p = normPoint({ clientX: a.x, clientY: a.y })
+    if (!p) continue
+    lastPoint = p
+    if (a.type === 'move') {
+      pendingMove = { x: p.x, y: p.y, button: 0, ...NO_MODS }
+      if (!moveRAF) moveRAF = requestAnimationFrame(flushMove)
+      continue
+    }
+    flushMove() // tiklama dogru konumda olsun
+    const button = a.type === 'click' ? (a.button === 'right' ? 2 : 0) : 0
+    if (a.type === 'click' || a.type === 'down') sendInput(handle.ws, { kind: 'mousedown', x: p.x, y: p.y, button, ...NO_MODS })
+    if (a.type === 'click' || a.type === 'up') sendInput(handle.ws, { kind: 'mouseup', x: p.x, y: p.y, button, ...NO_MODS })
+  }
+}
+
+function onTouchPointer(kind: 'down' | 'move' | 'up' | 'cancel', e: PointerEvent) {
+  if (!isTouchDevice.value) isTouchDevice.value = true
+  if (!control.value || !handle) return
+  e.preventDefault()
+  const t0 = e.timeStamp
+  if (kind === 'down') {
+    // Sahne disina cikan parmak da izlensin (surukleme yarida kopmasin).
+    try { (e.currentTarget as Element).setPointerCapture(e.pointerId) } catch { /* destek yok */ }
+    stage.value?.focus({ preventScroll: true })
+    if (isFullscreen.value && e.clientY <= 24) showFsBar() // dokunmatikte "ust kenara gel" yok: ust kenara dokununca cubuk acilir
+    if (!touchHintShown) { touchHintShown = true; showStageNote(t('screen.touchHelp'), 'info', 6000) }
+    runTouchActions(touchGestures.pointerDown(e.pointerId, e.clientX, e.clientY, t0))
+    armTouchTimer()
+  } else if (kind === 'move') {
+    runTouchActions(touchGestures.pointerMove(e.pointerId, e.clientX, e.clientY, t0))
+  } else {
+    runTouchActions(touchGestures.pointerUp(e.pointerId, t0, kind === 'cancel'))
+    armTouchTimer()
+  }
+}
+
+// Sanal klavye: gizli IME kutusuna odaklanir (yazim "text" olarak gider); ek tus seridi Esc/Tab/oklar/F tuslari icindir.
+// Ctrl/Alt "yapiskan": bir sonraki tusa (serit tusu ya da klavyeden yazilan harf) uygulanir.
+const showVkb = ref(false)
+const vkbFKeys = ref(false)
+const sticky = ref({ ctrl: false, alt: false })
+const VKB_KEYS: { label: string, key: string, code: string, icon?: string, meta?: boolean }[] = [
+  { label: 'Esc', key: 'Escape', code: 'Escape' },
+  { label: 'Tab', key: 'Tab', code: 'Tab' },
+  { label: 'Win', key: 'Meta', code: 'MetaLeft', meta: true },
+  { label: '', key: 'ArrowLeft', code: 'ArrowLeft', icon: 'lucide:arrow-left' },
+  { label: '', key: 'ArrowDown', code: 'ArrowDown', icon: 'lucide:arrow-down' },
+  { label: '', key: 'ArrowUp', code: 'ArrowUp', icon: 'lucide:arrow-up' },
+  { label: '', key: 'ArrowRight', code: 'ArrowRight', icon: 'lucide:arrow-right' },
+]
+const F_KEYS = Array.from({ length: 12 }, (_, i) => ({ label: `F${i + 1}`, key: `F${i + 1}`, code: `F${i + 1}` }))
+function toggleVkb() {
+  showVkb.value = !showVkb.value
+  if (showVkb.value) focusIme()
+  else imeInput.value?.blur()
+}
+function toggleSticky(k: 'ctrl' | 'alt') {
+  sticky.value = { ...sticky.value, [k]: !sticky.value[k] }
+  focusIme()
+}
+/** Ek tus seridinden tek tus: yapiskan Ctrl/Alt uygulanip sifirlanir. */
+function tapKey(key: string, code: string, meta = false) {
+  if (!handle || !control.value) return
+  const { mods, next } = consumeSticky(sticky.value)
+  sticky.value = next
+  const m = { ctrl: mods.ctrl, alt: mods.alt, shift: false, meta }
+  sendInput(handle.ws, { kind: 'keydown', key, code, repeat: false, ...m })
+  sendInput(handle.ws, { kind: 'keyup', key, code, repeat: false, ...m })
+  focusIme()
+}
+
 // Basili tuslar (code -> key): odak kaybinda hepsi birakilir (yalniz modifier degil).
 const heldKeys = new Map<string, string>()
 // IME bilesimi sirasinda yutulan tuslar: ayni tusun keyup'i da yutulur.
@@ -687,18 +1150,37 @@ function onKey(kind: string, e: KeyboardEvent) {
   }
   if (kind === 'keyup' && swallowedCodes.delete(e.code)) return
 
-  // Tarayici kisayollarini (F5, Ctrl+W...) uzak makineye gecirmek icin engelle.
-  e.preventDefault()
-  if (kind === 'keydown') heldKeys.set(e.code, e.key)
-  else heldKeys.delete(e.code)
-  sendInput(handle.ws, {
+  const ev = {
     kind,
     key: e.key,
     // code FIZIKSEL tustur: ozel tuslar ve kisayollar bununla eslenir.
     code: e.code,
     repeat: e.repeat,
     ...mods(e),
-  })
+  }
+  // Otomatik pano: yapistir kisayolunda tarayicinin kendi "paste" olayina izin verilir (varsayilan
+  // ENGELLENMEZ); olay bu bilgisayarin panosundaki metni, dosyalari ve gorselleri verir. Tus, pano
+  // uzak makineye ulastiktan sonra iletilir (keyup da siradan cikmasin diye bekletilir).
+  if (autoClip.value && isScreen2.value && (caps.value.clipboard || caps.value.clipboardImage || canSendFiles.value)) {
+    if (kind === 'keydown' && isPasteCombo(e)) {
+      heldKeys.set(e.code, e.key)
+      if (e.repeat || !deferredPaste.begin(ev)) { e.preventDefault(); return }
+      swallowPasteKeyup = false
+      // Yapistir olayi gelmezse (bazi tarayicilar duzenlenebilir olmayan alanda vermez) panoyu dogrudan oku.
+      pasteFallbackTimer = setTimeout(() => { pasteFallbackTimer = null; if (deferredPaste.active) void pasteWithLocalClipboard() }, 150)
+      return
+    }
+    if (kind === 'keyup' && e.code === 'KeyV') {
+      heldKeys.delete(e.code)
+      if (deferredPaste.keyup(ev)) { e.preventDefault(); return }
+      if (swallowPasteKeyup) { swallowPasteKeyup = false; e.preventDefault(); return }
+    }
+  }
+  // Tarayici kisayollarini (F5, Ctrl+W...) uzak makineye gecirmek icin engelle.
+  e.preventDefault()
+  if (kind === 'keydown') heldKeys.set(e.code, e.key)
+  else heldKeys.delete(e.code)
+  sendInput(handle.ws, ev)
 }
 
 function onKeyDown(e: KeyboardEvent) {
@@ -744,6 +1226,11 @@ function releaseModifiers() {
 const imeInput = ref<HTMLTextAreaElement | null>(null)
 function sendText(text: string) {
   if (!text || !handle || !control.value) return
+  // Yapiskan Ctrl/Alt + tek harf/rakam (sanal klavye): metin degil, kisayol olarak gider (Ctrl+C gibi).
+  if ((sticky.value.ctrl || sticky.value.alt) && Array.from(text).length === 1 && codeForChar(text)) {
+    tapKey(text, codeForChar(text))
+    return
+  }
   // Istemci en fazla 4096 bayt kabul eder; uzun metni parcala.
   const chunk = 1024
   const units = Array.from(text)
@@ -773,7 +1260,56 @@ function focusIme() {
  * Akisi (yeniden) acar. Cozunurluk degistiginde ScreenOpen yeniden gonderilmeli,
  * cunku olcekleme istemci tarafinda yapiliyor — bu yuzden WS'i kapatip aciyoruz.
  */
-async function open(maxWidth: number) {
+// Otomatik yeniden baglanma: baglanti beklenmedik sekilde koparsa artan araliklarla yeniden denenir.
+const reconnect = ref<{ attempt: number, inSec: number } | null>(null)
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+let reconnectTick: ReturnType<typeof setInterval> | null = null
+let reconnectAttempts = 0
+let stableTimer: ReturnType<typeof setTimeout> | null = null
+let unmounted = false
+
+function cancelReconnect() {
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
+  if (reconnectTick) { clearInterval(reconnectTick); reconnectTick = null }
+  reconnect.value = null
+}
+/** Kullanici elle yeniden denedi ya da vazgecti: sayaci sifirla. */
+function manualRetry() {
+  cancelReconnect()
+  reconnectAttempts = 0
+  void open(selectedWidth.value || 0)
+}
+function stopRetrying() {
+  cancelReconnect()
+  reconnectAttempts = RECONNECT_MAX_ATTEMPTS
+}
+function scheduleReconnect() {
+  if (unmounted || reconnectTimer) return
+  if (reconnectAttempts >= RECONNECT_MAX_ATTEMPTS) return
+  reconnectAttempts++
+  const delay = reconnectDelayMs(reconnectAttempts)
+  reconnect.value = { attempt: reconnectAttempts, inSec: Math.ceil(delay / 1000) }
+  reconnectTick = setInterval(() => {
+    if (reconnect.value && reconnect.value.inSec > 1) reconnect.value = { ...reconnect.value, inSec: reconnect.value.inSec - 1 }
+  }, 1000)
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null
+    if (reconnectTick) { clearInterval(reconnectTick); reconnectTick = null }
+    if (!unmounted) void open(selectedWidth.value || 0, true)
+  }, delay)
+}
+/** Ag geri geldi: beklemeden hemen dene. */
+function onOnline() {
+  if (state.value === 'error' && reconnectAttempts < RECONNECT_MAX_ATTEMPTS) {
+    cancelReconnect()
+    void open(selectedWidth.value || 0, true)
+  }
+}
+
+async function open(maxWidth: number, auto = false) {
+  if (!auto) { cancelReconnect(); reconnectAttempts = 0 }
+  else reconnect.value = null
+  if (stableTimer) { clearTimeout(stableTimer); stableTimer = null }
   handle?.close()
   handle = null
   state.value = 'connecting'
@@ -785,7 +1321,10 @@ async function open(maxWidth: number) {
   inputStatus.value = null
   viewerState.value = null
   viewers.value = null
-  caps.value = { cursor: false, clipboard: false, files: false }
+  caps.value = { cursor: false, clipboard: false, files: false, clipboardImage: false, displays: 1, display: 0 }
+  displayRestoreTried = false
+  resetRtt()
+  resetTouch()
   capsFps.value = undefined // yeni oturum: ajan tavani WS'ten yeniden gelir
   filesState.value = { enabled: false, controller: false, token: '' }
   cursorPos.value = null
@@ -836,9 +1375,21 @@ async function open(maxWidth: number) {
       onVideoInfo: (i) => { videoInfo.value = i },
       onInputStatus: onInputStatusMsg,
       onCaps: (c) => {
-        caps.value = { cursor: c.cursor, clipboard: c.clipboard, files: c.files }
+        const displays = c.displays ?? 1
+        caps.value = { cursor: c.cursor, clipboard: c.clipboard, files: c.files, clipboardImage: !!c.clipboardImage, displays, display: c.display ?? 0 }
         capsFps.value = c.maxFps
+        // Yeniden baglanma: onceki monitor secimi korunur (her oturumda bir kez yeniden istenir).
+        if (!displayRestoreTried) {
+          displayRestoreTried = true
+          if (wantedDisplay.value >= 0 && wantedDisplay.value < displays && wantedDisplay.value !== (c.display ?? 0)) {
+            handle?.sendSettings({ display: wantedDisplay.value })
+          } else {
+            wantedDisplay.value = displays > 1 ? (c.display ?? 0) : -1
+          }
+        }
       },
+      onRtt: onRttSample,
+      onClipboardImage: onRemoteClipImage,
       onPlanLimits: (l) => { planFps.value = l.maxFps },
       onFiles: (f) => { filesState.value = f },
       onCursor: (c) => { cursorPos.value = c; schedulePlaceCursor() },
@@ -849,7 +1400,13 @@ async function open(maxWidth: number) {
       },
       onClipboard: (text) => {
         remoteClip.value = text
+        lastRemoteClip = text
         if (!showClipboard.value) clipUnread.value = true
+        // Otomatik pano: uzakta kopyalanan metin bu bilgisayarin panosuna da yazilir (izin yoksa sessizce gecilir;
+        // panelden elle kopyalanabilir).
+        if (autoClip.value && text && navigator.clipboard?.writeText) {
+          navigator.clipboard.writeText(text).then(() => { lastSentClip = text }).catch(() => { /* odak/izin yok */ })
+        }
       },
       onClipboardStatus,
       viewOnly: !control.value,
@@ -867,12 +1424,18 @@ async function open(maxWidth: number) {
         if (s.max_width) selectedWidth.value = s.max_width
         if (s.quality) qualityPreset.value = s.quality >= 70 ? 'high' : 'low'
       },
-      onOpen: () => { state.value = 'open' },
-      onError: (m) => { state.value = 'error'; errorMsg.value = m },
+      onOpen: () => {
+        state.value = 'open'
+        // Baglanti bir sure ayakta kalirsa deneme sayaci sifirlanir (sonraki kopusta bastan baslar).
+        stableTimer = setTimeout(() => { reconnectAttempts = 0 }, 10000)
+      },
+      onError: (m) => { state.value = 'error'; errorMsg.value = m; scheduleReconnect() },
       onClose: (code, reason) => {
+        if (stableTimer) { clearTimeout(stableTimer); stableTimer = null }
         if (state.value === 'connecting' || (code && code !== 1000)) {
           state.value = 'error'
           errorMsg.value = t('screen.errClosed', { code: code ?? 1006, reason: reason ? ' · ' + reason : '' })
+          scheduleReconnect()
         } else if (state.value !== 'error') {
           state.value = 'closed'
         }
@@ -888,6 +1451,9 @@ async function open(maxWidth: number) {
     if (code === 'screen_stream_limit_reached') {
       openUpgrade(msg, 'screen')
     }
+    // Kalici hatalarda (yetki, plan, bulunamadi) denenmez; ag/sunucu hatasi ve cevrimdisi istemcide denenir.
+    if (shouldAutoRetry(e?.statusCode ?? e?.status, code)) scheduleReconnect()
+    else cancelReconnect()
   }
 }
 
@@ -915,6 +1481,15 @@ onMounted(async () => {
   window.addEventListener('keyup', onKeyUp, true)
   // Sekme/pencere odagi kaybolunca basili modifier'lari birak (Alt+Tab).
   window.addEventListener('blur', releaseModifiers)
+  document.addEventListener('fullscreenchange', onFullscreenChange)
+  window.addEventListener('paste', onWindowPaste, true)
+  window.addEventListener('online', onOnline)
+  fullscreenSupported.value = !!document.fullscreenEnabled
+  try { isTouchDevice.value = window.matchMedia('(pointer: coarse)').matches } catch { /* yok say */ }
+  // Gecikme rozetinin "eski" durumu icin saat (olcum 6 sn gelmezse soluklasir).
+  rttClock = setInterval(() => { rttNow.value = Date.now() }, 1000)
+  loadAutoClip()
+  loadPasteImages()
   void loadClientInfo()
   await nextTick()
   if (typeof ResizeObserver !== 'undefined' && stage.value) {
@@ -930,6 +1505,19 @@ onUnmounted(() => {
   window.removeEventListener('keydown', onKeyDown, true)
   window.removeEventListener('keyup', onKeyUp, true)
   window.removeEventListener('blur', releaseModifiers)
+  document.removeEventListener('fullscreenchange', onFullscreenChange)
+  window.removeEventListener('paste', onWindowPaste, true)
+  window.removeEventListener('online', onOnline)
+  unmounted = true
+  cancelReconnect()
+  if (stableTimer) clearTimeout(stableTimer)
+  if (stageNoteTimer) clearTimeout(stageNoteTimer)
+  if (pasteFallbackTimer) clearTimeout(pasteFallbackTimer)
+  if (fsBarTimer) clearTimeout(fsBarTimer)
+  if (rttClock) clearInterval(rttClock)
+  clearTouchTimer()
+  if (remoteImage.value) URL.revokeObjectURL(remoteImage.value.url)
+  try { (navigator as any).keyboard?.unlock?.() } catch { /* desteklenmiyor */ }
   if (moveRAF) cancelAnimationFrame(moveRAF)
   if (cursorRAF) cancelAnimationFrame(cursorRAF)
   clearTimeout(sasTimer)
@@ -973,6 +1561,44 @@ onUnmounted(() => {
         <span v-if="codec" class="rounded border border-line px-2 py-0.5 font-mono text-[10px] text-fg-muted">
           {{ codec === 'screen2' ? 'Screen2' : codec === 'h264' ? t('screen.codecHw') : 'MJPEG' }}
         </span>
+
+        <!-- Gecikme rozeti: son 5 olcumun ortalamasi; 6 sn olcum gelmezse soluk -->
+        <span
+          v-if="rttView"
+          class="inline-flex items-center gap-1 rounded border border-line px-2 py-0.5 font-mono text-[10px] transition-opacity duration-300"
+          :class="[rttView.cls, rttStale ? 'opacity-40' : '']"
+          role="status"
+          :aria-label="t('screen.rttLabel')"
+          :title="rttView.title"
+          data-testid="screen-rtt"
+        >
+          <Icon name="lucide:signal" class="size-3" aria-hidden="true" />{{ rttView.text }}
+        </span>
+
+        <!-- Monitor secici (yalniz birden cok monitor varsa) -->
+        <div
+          v-if="caps.displays > 1"
+          class="flex items-center gap-1"
+          role="group"
+          :aria-label="t('screen.displayLabel')"
+          :title="t('screen.displayHint')"
+          data-testid="screen-displays"
+        >
+          <Icon name="lucide:monitor-smartphone" class="size-3.5 text-fg-subtle" aria-hidden="true" />
+          <button
+            v-for="i in caps.displays"
+            :key="i"
+            type="button"
+            class="cursor-pointer rounded border px-2 py-1 font-mono text-[11px] transition-colors duration-150 hover:bg-surface"
+            :class="caps.display === i - 1 ? 'border-accent text-accent' : 'border-line text-fg-muted'"
+            :aria-pressed="caps.display === i - 1"
+            :aria-label="t('screen.displayN', { n: i })"
+            :data-testid="'screen-display-' + (i - 1)"
+            @click="selectDisplay(i - 1)"
+          >
+            {{ i }}
+          </button>
+        </div>
 
         <!-- Kalite (yalniz screen2): otomatik istemcinin uyarlamasina birakir -->
         <label v-if="isScreen2" class="flex items-center gap-1.5">
@@ -1112,6 +1738,7 @@ onUnmounted(() => {
           :class="showClipboard ? 'text-accent' : 'text-fg-muted'"
           :aria-expanded="showClipboard"
           :title="t('screen.clipboardHint')"
+          data-testid="screen-clipboard-toggle"
           @click="toggleClipboard"
         >
           <Icon name="lucide:clipboard" class="size-3.5" aria-hidden="true" />
@@ -1133,8 +1760,44 @@ onUnmounted(() => {
           {{ t('screen.files') }}
         </button>
 
+        <!-- Dokunmatik: surukleme kilidi, sigdir (yerel yakinlastirmayi sifirla), sanal klavye -->
+        <template v-if="isTouchDevice && control && state === 'open'">
+          <button
+            type="button"
+            class="flex cursor-pointer items-center gap-1.5 rounded border px-2.5 py-1.5 font-mono text-[11px] transition-colors duration-150 hover:bg-surface"
+            :class="touchLock ? 'border-accent text-accent' : 'border-line text-fg-muted'"
+            :aria-pressed="touchLock"
+            :title="t('screen.touchLockHint')"
+            data-testid="screen-touch-lock"
+            @click="touchLock = !touchLock"
+          >
+            <Icon name="lucide:move" class="size-3.5" aria-hidden="true" />{{ t('screen.touchLock') }}
+          </button>
+          <button
+            v-if="isZoomed"
+            type="button"
+            class="flex cursor-pointer items-center gap-1.5 rounded border border-line px-2.5 py-1.5 font-mono text-[11px] text-fg-muted transition-colors duration-150 hover:bg-surface"
+            :title="t('screen.touchFitHint')"
+            data-testid="screen-touch-fit"
+            @click="fitZoom"
+          >
+            <Icon name="lucide:scan" class="size-3.5" aria-hidden="true" />{{ t('screen.touchFit', { pct: zoomPct }) }}
+          </button>
+          <button
+            type="button"
+            class="flex cursor-pointer items-center gap-1.5 rounded border px-2.5 py-1.5 font-mono text-[11px] transition-colors duration-150 hover:bg-surface"
+            :class="showVkb ? 'border-accent text-accent' : 'border-line text-fg-muted'"
+            :aria-pressed="showVkb"
+            :title="t('screen.touchKeyboardHint')"
+            data-testid="screen-vkb"
+            @click="toggleVkb"
+          >
+            <Icon name="lucide:keyboard" class="size-3.5" aria-hidden="true" />{{ t('screen.touchKeyboard') }}
+          </button>
+        </template>
+
         <!-- Kisayollar: Ctrl+Alt+Del ve tarayicinin yakalayamadigi kombinasyonlar -->
-        <div v-if="control" class="relative">
+        <div v-if="control && !isFullscreen" class="relative">
           <button
             type="button"
             class="flex cursor-pointer items-center gap-1.5 rounded border border-line px-2.5 py-1.5 font-mono text-[11px] text-fg-muted transition-colors duration-150 hover:bg-surface"
@@ -1160,6 +1823,7 @@ onUnmounted(() => {
               type="button"
               role="menuitem"
               class="flex w-full cursor-pointer items-center gap-2 rounded px-2.5 py-1.5 text-left font-mono text-[11px] text-fg-muted transition-colors hover:bg-surface hover:text-fg"
+              :data-testid="'screen-shortcut-' + sc.id"
               @click="sendShortcut(sc.id)"
             >
               <Icon :name="sc.id === 'sas' ? 'lucide:shield' : 'lucide:command'" class="size-3.5 text-fg-subtle" aria-hidden="true" />
@@ -1167,6 +1831,18 @@ onUnmounted(() => {
             </button>
           </div>
         </div>
+
+        <button
+          v-if="fullscreenSupported"
+          type="button"
+          class="flex cursor-pointer items-center gap-1.5 rounded border border-line px-2.5 py-1.5 font-mono text-[11px] text-fg-muted transition-colors duration-150 hover:bg-surface hover:text-fg"
+          :title="t('screen.fullscreenHint')"
+          data-testid="screen-fullscreen"
+          @click="toggleFullscreen"
+        >
+          <Icon name="lucide:maximize" class="size-3.5" aria-hidden="true" />
+          {{ t('screen.fullscreen') }}
+        </button>
 
         <button
           class="flex cursor-pointer items-center gap-1.5 rounded border border-line px-2.5 py-1.5 font-mono text-[11px] transition-colors duration-150 hover:bg-surface disabled:cursor-not-allowed disabled:opacity-60"
@@ -1270,6 +1946,23 @@ onUnmounted(() => {
         <Icon name="lucide:info" class="mr-1 inline size-3.5" aria-hidden="true" />{{ t('screen.clipboardUnsupported') }}
       </p>
       <template v-else>
+        <div class="md:col-span-2">
+          <label class="flex cursor-pointer items-start gap-2 text-xs text-fg">
+            <input v-model="autoClip" type="checkbox" class="mt-0.5 cursor-pointer accent-accent" data-testid="screen-autoclip">
+            <span>
+              {{ t('screen.clipboardAuto') }}
+              <span class="mt-0.5 block text-[11px] text-fg-subtle">{{ t('screen.clipboardAutoHint') }}</span>
+              <span v-if="clipReadBlocked" class="mt-0.5 block text-[11px] text-danger">{{ t('screen.clipboardAutoBlocked') }}</span>
+            </span>
+          </label>
+          <label v-if="caps.clipboardImage" class="mt-2 flex cursor-pointer items-start gap-2 text-xs text-fg">
+            <input v-model="pasteImages" type="checkbox" class="mt-0.5 cursor-pointer accent-accent" data-testid="screen-pasteimg">
+            <span>
+              {{ t('screen.clipboardImages') }}
+              <span class="mt-0.5 block text-[11px] text-fg-subtle">{{ t('screen.clipboardImagesHint') }}</span>
+            </span>
+          </label>
+        </div>
         <div class="space-y-2">
           <p class="font-mono text-[11px] text-fg-subtle">{{ t('screen.clipboardSendTitle') }}</p>
           <textarea
@@ -1322,6 +2015,31 @@ onUnmounted(() => {
             <Icon :name="clipCopied ? 'lucide:check' : 'lucide:copy'" class="size-3.5" aria-hidden="true" />
             {{ clipCopied ? t('screen.clipboardCopied') : t('screen.clipboardCopy') }}
           </button>
+
+          <!-- Uzak panodaki son gorsel: onizleme + kopyala + indir -->
+          <div v-if="remoteImage" class="space-y-2 border-t border-line pt-2" data-testid="screen-remote-image">
+            <p class="font-mono text-[11px] text-fg-subtle">{{ t('screen.clipImgRecvTitle') }}</p>
+            <img :src="remoteImage.url" :alt="t('screen.clipImgAlt')" class="max-h-40 max-w-full rounded border border-line bg-bg object-contain" data-testid="screen-remote-image-preview">
+            <div class="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                class="flex cursor-pointer items-center gap-1.5 rounded border border-line px-2.5 py-1.5 font-mono text-[11px] text-accent transition-colors hover:bg-surface"
+                data-testid="screen-remote-image-copy"
+                @click="copyRemoteImage"
+              >
+                <Icon :name="imgCopied ? 'lucide:check' : 'lucide:copy'" class="size-3.5" aria-hidden="true" />
+                {{ imgCopied ? t('screen.clipboardCopied') : t('screen.clipboardCopy') }}
+              </button>
+              <button
+                type="button"
+                class="flex cursor-pointer items-center gap-1.5 rounded border border-line px-2.5 py-1.5 font-mono text-[11px] text-accent transition-colors hover:bg-surface"
+                data-testid="screen-remote-image-download"
+                @click="downloadRemoteImage"
+              >
+                <Icon name="lucide:download" class="size-3.5" aria-hidden="true" />{{ t('screen.filesDownload') }}
+              </button>
+            </div>
+          </div>
         </div>
       </template>
     </div>
@@ -1457,23 +2175,40 @@ onUnmounted(() => {
       class="flex items-center justify-between gap-3 rounded-lg border border-danger/30 bg-danger/10 px-4 py-3 text-sm text-danger"
       role="alert"
     >
-      <span>{{ errorMsg }}</span>
-      <button
-        type="button"
-        class="cursor-pointer rounded border border-danger/40 bg-danger/20 px-2.5 py-1 text-xs font-semibold hover:bg-danger/30"
-        @click="open(selectedWidth || 0)"
-      >
-        {{ t('common.retry') }}
-      </button>
+      <span>
+        {{ errorMsg }}
+        <span v-if="reconnect" class="mt-0.5 block text-xs opacity-90" data-testid="screen-reconnect">
+          {{ t('screen.reconnecting', { n: reconnect.attempt, max: RECONNECT_MAX_ATTEMPTS, sec: reconnect.inSec }) }}
+        </span>
+      </span>
+      <span class="flex shrink-0 items-center gap-2">
+        <button
+          v-if="reconnect"
+          type="button"
+          class="cursor-pointer rounded border border-danger/40 px-2.5 py-1 text-xs font-semibold hover:bg-danger/20"
+          @click="stopRetrying"
+        >
+          {{ t('common.cancel') }}
+        </button>
+        <button
+          type="button"
+          class="cursor-pointer rounded border border-danger/40 bg-danger/20 px-2.5 py-1 text-xs font-semibold hover:bg-danger/30"
+          data-testid="screen-retry"
+          @click="manualRetry"
+        >
+          {{ t('common.retry') }}
+        </button>
+      </span>
     </div>
 
     <!-- Ekran sahnesi: img (MJPEG) veya video (H.264) -->
     <div
       ref="stage"
-      class="relative grid min-h-[300px] place-items-center overflow-hidden rounded-xl border border-line bg-black"
-      :class="control ? 'cursor-crosshair' : 'cursor-default'"
+      class="relative grid min-h-[300px] touch-none select-none place-items-center overflow-hidden bg-black outline-none"
+      :class="[control ? 'cursor-crosshair' : 'cursor-default', isFullscreen ? 'h-screen w-screen' : 'rounded-xl border border-line']"
       tabindex="0"
-      @pointermove="onPointerMove"
+      data-testid="screen-stage"
+      @pointermove="(e) => { onPointerMove(e); onStagePointerMoveFs(e) }"
       @pointerdown="onPointerDown"
       @pointerup="onPointerUp"
       @pointercancel="onPointerUp"
@@ -1486,9 +2221,214 @@ onUnmounted(() => {
       @dragleave="onDragLeave"
       @drop="onDrop"
     >
-      <img ref="img" hidden :alt="t('screen.remoteScreenAlt')" class="max-h-[80vh] max-w-full object-contain" draggable="false">
-      <video ref="video" hidden muted playsinline class="max-h-[80vh] max-w-full object-contain" />
-      <canvas ref="canvas" hidden class="max-h-[80vh] max-w-full object-contain" />
+      <img ref="img" hidden :style="zoomStyle" :alt="t('screen.remoteScreenAlt')" class="max-w-full object-contain" :class="isFullscreen ? 'max-h-screen' : 'max-h-[80vh]'" draggable="false">
+      <video ref="video" hidden :style="zoomStyle" muted playsinline class="max-w-full object-contain" :class="isFullscreen ? 'max-h-screen' : 'max-h-[80vh]'" />
+      <canvas ref="canvas" hidden :style="zoomStyle" class="max-w-full object-contain" :class="isFullscreen ? 'max-h-screen' : 'max-h-[80vh]'" />
+
+      <!-- Sahne notu: pano/dosya aktarimi ve yeniden baglanma durumu (tam ekranda da gorunur) -->
+      <div
+        v-if="stageNote || (isFullscreen && (reconnect || state === 'connecting'))"
+        class="pointer-events-none absolute bottom-3 left-1/2 z-20 max-w-[90%] -translate-x-1/2 rounded-lg border px-3 py-1.5 text-center font-mono text-[11px] shadow-lg"
+        :class="stageNote?.tone === 'error' ? 'border-danger/40 bg-danger/90 text-white' : 'border-line bg-surface/95 text-fg'"
+        role="status"
+        data-testid="screen-stage-note"
+      >
+        <template v-if="stageNote">{{ stageNote.text }}</template>
+        <template v-else-if="reconnect">{{ t('screen.reconnecting', { n: reconnect.attempt, max: RECONNECT_MAX_ATTEMPTS, sec: reconnect.inSec }) }}</template>
+        <template v-else>{{ t('screen.connecting') }}</template>
+      </div>
+
+      <!-- Tam ekran cubugu: girince ve fare ust kenara gelince gorunur; tiklamalar uzak makineye gitmez -->
+      <div
+        v-if="isFullscreen"
+        class="absolute left-1/2 top-2 z-20 flex max-w-[96%] -translate-x-1/2 flex-wrap items-center justify-center gap-2 rounded-lg border border-line bg-surface/95 px-2.5 py-1.5 shadow-lg transition-opacity duration-200"
+        :class="fsBar ? 'opacity-100' : 'pointer-events-none opacity-0'"
+        data-testid="screen-fs-bar"
+        @pointerdown.stop
+        @pointerup.stop
+        @pointermove.stop="showFsBar()"
+        @wheel.stop
+        @contextmenu.stop
+      >
+        <span
+          class="font-mono text-[11px]"
+          :class="kbLock === 'unsupported' ? 'text-warn' : 'text-fg-muted'"
+          role="status"
+          data-testid="screen-fs-kblock"
+          :data-kblock="kbLock"
+        >{{ kbLock === 'unsupported' ? t('screen.kbLockUnsupported') : t('screen.fullscreenExitHint') }}</span>
+
+        <span
+          v-if="rttView"
+          class="inline-flex items-center gap-1 rounded border border-line px-2 py-0.5 font-mono text-[10px]"
+          :class="[rttView.cls, rttStale ? 'opacity-40' : '']"
+          role="status"
+          :aria-label="t('screen.rttLabel')"
+          :title="rttView.title"
+          data-testid="screen-fs-rtt"
+        >
+          <Icon name="lucide:signal" class="size-3" aria-hidden="true" />{{ rttView.text }}
+        </span>
+
+        <div v-if="caps.displays > 1" class="flex items-center gap-1" role="group" :aria-label="t('screen.displayLabel')" :title="t('screen.displayHint')">
+          <Icon name="lucide:monitor-smartphone" class="size-3.5 text-fg-subtle" aria-hidden="true" />
+          <button
+            v-for="i in caps.displays"
+            :key="i"
+            type="button"
+            class="cursor-pointer rounded border px-2 py-0.5 font-mono text-[11px] transition-colors hover:bg-bg"
+            :class="caps.display === i - 1 ? 'border-accent text-accent' : 'border-line text-fg-muted'"
+            :aria-pressed="caps.display === i - 1"
+            :aria-label="t('screen.displayN', { n: i })"
+            :data-testid="'screen-fs-display-' + (i - 1)"
+            @click="selectDisplay(i - 1)"
+          >
+            {{ i }}
+          </button>
+        </div>
+
+        <template v-if="isTouchDevice && control">
+          <button
+            type="button"
+            class="flex cursor-pointer items-center gap-1.5 rounded border px-2 py-1 font-mono text-[11px] transition-colors hover:bg-bg"
+            :class="touchLock ? 'border-accent text-accent' : 'border-line text-fg-muted'"
+            :aria-pressed="touchLock"
+            :title="t('screen.touchLockHint')"
+            @click="touchLock = !touchLock"
+          >
+            <Icon name="lucide:move" class="size-3.5" aria-hidden="true" />{{ t('screen.touchLock') }}
+          </button>
+          <button
+            v-if="isZoomed"
+            type="button"
+            class="flex cursor-pointer items-center gap-1.5 rounded border border-line px-2 py-1 font-mono text-[11px] text-fg-muted transition-colors hover:bg-bg"
+            :title="t('screen.touchFitHint')"
+            @click="fitZoom"
+          >
+            <Icon name="lucide:scan" class="size-3.5" aria-hidden="true" />{{ t('screen.touchFit', { pct: zoomPct }) }}
+          </button>
+          <button
+            type="button"
+            class="flex cursor-pointer items-center gap-1.5 rounded border px-2 py-1 font-mono text-[11px] transition-colors hover:bg-bg"
+            :class="showVkb ? 'border-accent text-accent' : 'border-line text-fg-muted'"
+            :aria-pressed="showVkb"
+            :title="t('screen.touchKeyboardHint')"
+            @click="toggleVkb"
+          >
+            <Icon name="lucide:keyboard" class="size-3.5" aria-hidden="true" />{{ t('screen.touchKeyboard') }}
+          </button>
+        </template>
+
+        <!-- Kisayollar: tam ekranda da ayni menu (klavye kilidi yoksa Alt+Tab/Win/Esc buradan gider) -->
+        <div v-if="control" class="relative">
+          <button
+            type="button"
+            class="flex cursor-pointer items-center gap-1.5 rounded border border-line px-2 py-1 font-mono text-[11px] text-fg-muted transition-colors hover:bg-bg"
+            :aria-expanded="showShortcuts"
+            aria-haspopup="menu"
+            :title="t('screen.shortcutsHint')"
+            data-testid="screen-fs-shortcuts"
+            @click="showShortcuts = !showShortcuts; showFsBar()"
+            @keydown.esc="showShortcuts = false"
+          >
+            <Icon name="lucide:keyboard" class="size-3.5" aria-hidden="true" />
+            {{ t('screen.shortcuts') }}
+            <Icon name="lucide:chevron-down" class="size-3" aria-hidden="true" />
+          </button>
+          <div
+            v-if="showShortcuts"
+            role="menu"
+            class="absolute right-0 top-full z-30 mt-1 min-w-52 rounded-lg border border-line bg-bg p-1 shadow-lg"
+            @keydown.esc="showShortcuts = false"
+          >
+            <button
+              v-for="sc in SHORTCUTS"
+              :key="sc.id"
+              type="button"
+              role="menuitem"
+              class="flex w-full cursor-pointer items-center gap-2 rounded px-2.5 py-1.5 text-left font-mono text-[11px] text-fg-muted transition-colors hover:bg-surface hover:text-fg"
+              :data-testid="'screen-fs-shortcut-' + sc.id"
+              @click="sendShortcut(sc.id); stage?.focus()"
+            >
+              <Icon :name="sc.id === 'sas' ? 'lucide:shield' : 'lucide:command'" class="size-3.5 text-fg-subtle" aria-hidden="true" />
+              {{ t('screen.' + sc.labelKey) }}
+            </button>
+          </div>
+        </div>
+
+        <button
+          type="button"
+          class="flex cursor-pointer items-center gap-1.5 rounded border border-line px-2 py-1 font-mono text-[11px] text-fg transition-colors hover:bg-bg"
+          data-testid="screen-fs-exit"
+          @click="toggleFullscreen"
+        >
+          <Icon name="lucide:minimize" class="size-3.5" aria-hidden="true" />{{ t('screen.fullscreenExit') }}
+        </button>
+      </div>
+
+      <!-- Sanal klavye ek tus seridi (dokunmatik): Ctrl/Alt yapiskan; yazim gizli IME kutusuyla -->
+      <div
+        v-if="showVkb && control && isTouchDevice"
+        class="absolute inset-x-0 bottom-0 z-20 flex flex-wrap items-center justify-center gap-1.5 border-t border-line bg-surface/95 px-2 py-1.5"
+        role="toolbar"
+        :aria-label="t('screen.touchKeysLabel')"
+        data-testid="screen-vkb-strip"
+        @pointerdown.stop
+        @pointerup.stop
+        @pointermove.stop
+        @wheel.stop
+      >
+        <button
+          v-for="k in VKB_KEYS"
+          :key="k.key"
+          type="button"
+          class="flex min-w-9 cursor-pointer items-center justify-center rounded border border-line px-2 py-1.5 font-mono text-[11px] text-fg transition-colors hover:bg-bg"
+          :aria-label="k.label || k.key"
+          :data-testid="'screen-vkb-' + k.key"
+          @mousedown.prevent
+          @click="tapKey(k.key, k.code, !!k.meta)"
+        >
+          <Icon v-if="k.icon" :name="k.icon" class="size-3.5" aria-hidden="true" /><template v-else>{{ k.label }}</template>
+        </button>
+        <button
+          v-for="m in (['ctrl', 'alt'] as const)"
+          :key="m"
+          type="button"
+          class="min-w-9 cursor-pointer rounded border px-2 py-1.5 font-mono text-[11px] transition-colors hover:bg-bg"
+          :class="sticky[m] ? 'border-accent text-accent' : 'border-line text-fg'"
+          :aria-pressed="sticky[m]"
+          :title="t('screen.touchStickyHint')"
+          :data-testid="'screen-vkb-' + m"
+          @mousedown.prevent
+          @click="toggleSticky(m)"
+        >
+          {{ m === 'ctrl' ? 'Ctrl' : 'Alt' }}
+        </button>
+        <button
+          type="button"
+          class="min-w-9 cursor-pointer rounded border px-2 py-1.5 font-mono text-[11px] transition-colors hover:bg-bg"
+          :class="vkbFKeys ? 'border-accent text-accent' : 'border-line text-fg'"
+          :aria-expanded="vkbFKeys"
+          data-testid="screen-vkb-fkeys"
+          @mousedown.prevent
+          @click="vkbFKeys = !vkbFKeys"
+        >
+          F1-F12
+        </button>
+        <div v-if="vkbFKeys" class="flex w-full flex-wrap items-center justify-center gap-1.5">
+          <button
+            v-for="k in F_KEYS"
+            :key="k.key"
+            type="button"
+            class="min-w-9 cursor-pointer rounded border border-line px-2 py-1.5 font-mono text-[11px] text-fg transition-colors hover:bg-bg"
+            :data-testid="'screen-vkb-' + k.key"
+            @mousedown.prevent
+            @click="tapKey(k.key, k.code)"
+          >
+            {{ k.label }}
+          </button>
+        </div>
+      </div>
 
       <!-- Gizli IME kutusu: bilesim/emoji metni "text" olarak gider; normal yazim tus olaylariyla -->
       <textarea

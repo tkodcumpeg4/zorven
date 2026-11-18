@@ -2,10 +2,27 @@
 
 package agent
 
-// Pano Windows disinda desteklenmiyor: Linux X11 secim protokolu (CLIPBOARD /
-// INCR / hedef donusumu) saf Go'da buyuk bir is; macOS icin cgo gerekir. Bu
-// platformlarda FeatureScreenClipboard ilan edilmez, panel pano arayuzunu gizler.
+import (
+	"os"
+	"os/exec"
+	"runtime"
+)
 
-func clipboardSupported() bool { return false }
+// Windows disinda pano alt surec araclariyla yapilir (screen_clipboard_cmd.go):
+// macOS pbcopy/pbpaste, Wayland wl-clipboard, X11 xclip/xsel. Arac ya da ekran
+// ortami (DISPLAY/WAYLAND_DISPLAY) yoksa FeatureScreenClipboard ilan edilmez.
+// Gorsel panosu bu platformlarda YOK.
 
-func newClipboardBackend() clipboardBackend { return nil }
+func platClipTool() *clipTool { return detectClipTool(runtime.GOOS, os.Getenv, exec.LookPath) }
+
+func clipboardSupported() bool { return platClipTool() != nil }
+
+func clipboardImageSupported() bool { return false }
+
+func newClipboardBackend() clipboardBackend {
+	t := platClipTool()
+	if t == nil {
+		return nil
+	}
+	return newCmdClipboard(execRunner{}, *t)
+}

@@ -128,6 +128,22 @@ type Session struct {
 	// pazarladiysa true (el sikismada yazilir, sonra yalniz okunur).
 	screenCursor    bool
 	screenClipboard bool
+	// screenClipboardImage (gorsel panosu, FrameClipImage), screenInfo (monitor
+	// bilgisi), screenPing (gidis-donus yaniti): el sikismada yazilir, sonra yalniz okunur.
+	screenClipboardImage bool
+	screenInfo           bool
+	screenPing           bool
+
+	// Gorsel panosu (screen_aux.go): akis kimligi -> birlestirici (yalniz okuma
+	// dongusu goroutine'i dokunur; harita scrMu altinda), gonderim seri, hiz siniri.
+	clipAsm        map[uint64]*protocol.ClipImageAssembler
+	clipImgSendMu  sync.Mutex
+	clipImgLast    map[string]time.Time // session_id -> son kabul edilen gorsel
+	clipImgPending atomic.Int32         // hub'in henuz islemedigi gorsel sayisi
+	// agentRTT: son screen_pong ile olculen sunucu<->istemci gidis-donus (ns; 0 => yok).
+	agentRTT   atomic.Int64
+	agentRTTAt atomic.Int64 // olcum zamani (unix ns)
+	lastPingAt atomic.Int64 // son screen_ping gonderimi (unix ns)
 	// screen2Stats, istemci saniyelik canli olcum ozetini pazarladiysa true.
 	screen2Stats bool
 	// screen2Feedback, istemci izleyici teslim geri bildirimini kabul ediyorsa true.
@@ -152,6 +168,7 @@ type Session struct {
 	onDeviceUpdate func(ctx context.Context, upd protocol.DeviceUpdate)
 	lastDevUpd     time.Time
 	sendHook       func(ctx context.Context, v any, t protocol.MessageType) error // testler
+	sendBinHook    func(ctx context.Context, f protocol.BodyFrame) error          // testler
 	// Dosya aktarimlari (files.go); fileMu altinda, tembel olusturulur.
 	fileMu   sync.Mutex
 	files    map[uint64]*srvXfer
@@ -238,6 +255,8 @@ func NewSession(id, clientID, clientName, remoteAddr string, conn *websocket.Con
 		scrInp:      make(map[string]chan<- protocol.ScreenInputStatus),
 		scr2:        make(map[uint64]*screen2Sub),
 		scrAux:      make(map[string]chan<- ScreenAux),
+		clipAsm:     make(map[uint64]*protocol.ClipImageAssembler),
+		clipImgLast: make(map[string]time.Time),
 		scr2Ids:     make(map[string]uint64),
 	}
 }
@@ -316,6 +335,9 @@ func (s *Session) sendWindowUpdate(reqID uint64, n int) {
 
 // SendBinary, govde cercevesini gonderir (Phase 2'de kullanilacak).
 func (s *Session) SendBinary(ctx context.Context, frame protocol.BodyFrame) error {
+	if s.sendBinHook != nil { // yalniz testler
+		return s.sendBinHook(ctx, frame)
+	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
@@ -403,6 +425,10 @@ func (s *Session) Run(ctx context.Context) (err error) {
 			s.badFrames.Store(0)
 			if frame.FrameType == protocol.FrameScreen {
 				s.routeScreen2(data)
+				continue
+			}
+			if frame.FrameType == protocol.FrameClipImage {
+				s.routeClipImage(frame)
 				continue
 			}
 			if frame.FrameType == protocol.FrameVideo {
@@ -661,7 +687,10 @@ func (s *Session) handleControl(ctx context.Context, data []byte) error {
 			}
 		}
 
-	case protocol.TypeScreenCursor, protocol.TypeScreenCursorShape, protocol.TypeScreenClipboard, protocol.TypeScreen2Stats:
+	case protocol.TypeScreenPong:
+		s.handleScreenPong(data)
+
+	case protocol.TypeScreenCursor, protocol.TypeScreenCursorShape, protocol.TypeScreenClipboard, protocol.TypeScreen2Stats, protocol.TypeScreenInfo:
 		// Bozuk/asiri buyuk mesaj okuma dongusunu dusurmez; yalnizca atilir.
 		s.routeScreenAux(t, data)
 
@@ -1059,8 +1088,10 @@ func (s *Session) CloseScreen(ctx context.Context, sessionID string) {
 	delete(s.scrErr, sessionID)
 	delete(s.scrInp, sessionID)
 	delete(s.scrAux, sessionID)
+	delete(s.clipImgLast, sessionID)
 	if id, ok := s.scr2Ids[sessionID]; ok {
 		delete(s.scr2, id)
+		delete(s.clipAsm, id)
 		delete(s.scr2Ids, sessionID)
 	}
 	s.scrMu.Unlock()

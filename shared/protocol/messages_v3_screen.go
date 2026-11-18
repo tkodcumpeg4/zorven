@@ -31,3 +31,41 @@ const (
 	InputButtonBack    = 3
 	InputButtonForward = 4
 )
+
+// 0.3.10 uzak ekran eklemeleri (yalniz ekleme). Hepsi ozellik bayragi arkasinda:
+// pazarlanmadiysa ilgili mesaj HIC gonderilmez (eski ajan/sunucu ile uyum).
+const (
+	// FeatureScreenInfo: ajan screen_info (monitor sayisi + secili monitor) yollar.
+	FeatureScreenInfo = "screen_info"
+	// FeatureScreenPing: ajan screen_ping'e screen_pong ile yanit verir.
+	FeatureScreenPing = "screen_ping"
+	// FeatureScreenClipboardImage: iki yonlu gorsel (PNG) panosu (FrameClipImage).
+	// Yalniz FeatureScreenClipboard ile birlikte ilan edilir.
+	FeatureScreenClipboardImage = "screen_clipboard_image"
+)
+
+// ScreenInfo (istemci -> sunucu): yakalanabilir monitor sayisi ve secili monitor.
+// Oturum basinda ve secili monitor degisince gonderilir.
+type ScreenInfo struct {
+	Type      MessageType `json:"type"`
+	SessionID string      `json:"session_id"`
+	Displays  int         `json:"displays"`
+	Display   int         `json:"display"`
+}
+
+// Valid, alanlarin makul sinirlarda oldugunu soyler.
+func (s ScreenInfo) Valid() bool {
+	return s.Displays >= 1 && s.Displays <= 32 && s.Display >= 0 && s.Display < s.Displays
+}
+
+// ScreenPing (sunucu -> istemci) ve ScreenPong (istemci -> sunucu): T sunucunun
+// saatidir (opak sayi), istemci aynen yankilar.
+type ScreenPing struct {
+	Type MessageType `json:"type"`
+	T    int64       `json:"t"`
+}
+
+type ScreenPong struct {
+	Type MessageType `json:"type"`
+	T    int64       `json:"t"`
+}

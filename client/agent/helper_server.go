@@ -22,6 +22,9 @@ type helperBackend interface {
 	ClipSeq() uint32
 	ClipGet() (string, error)
 	ClipSet(text string) error
+	// ClipGetImage/ClipSetImage: gorsel panosu (PNG); gorsel yoksa (nil, nil).
+	ClipGetImage() ([]byte, error)
+	ClipSetImage(png []byte) error
 }
 
 type helperInputReq struct {
@@ -36,9 +39,11 @@ type helperInputResp struct {
 }
 
 const (
-	clipOpSeq byte = 0
-	clipOpGet byte = 1
-	clipOpSet byte = 2
+	clipOpSeq    byte = 0
+	clipOpGet    byte = 1
+	clipOpSet    byte = 2
+	clipOpGetImg byte = 3 // PNG oku (gorsel yoksa uzunluk 0)
+	clipOpSetImg byte = 4 // PNG yaz
 )
 
 // helperServer, yardimci tarafinda istek dongusu. Tek is parcaciginda calisir
@@ -225,7 +230,7 @@ func (s *helperServer) clip(p []byte) []byte {
 	r := rbuf{b: p}
 	op := r.u8()
 	text := ""
-	if op == clipOpSet {
+	if op == clipOpSet || op == clipOpSetImg {
 		n := int(r.u32())
 		text = string(r.take(n))
 	}
@@ -244,6 +249,17 @@ func (s *helperServer) clip(p []byte) []byte {
 		}
 		b.u32(uint32(len(t)))
 		b.WriteString(t)
+	case clipOpGetImg:
+		png, err := s.b.ClipGetImage()
+		if err != nil {
+			return encodeErr(err.Error())
+		}
+		b.u32(uint32(len(png)))
+		b.Write(png)
+	case clipOpSetImg:
+		if err := s.b.ClipSetImage([]byte(text)); err != nil {
+			return encodeErr(err.Error())
+		}
 	case clipOpSet:
 		if err := s.b.ClipSet(text); err != nil {
 			return encodeErr(err.Error())

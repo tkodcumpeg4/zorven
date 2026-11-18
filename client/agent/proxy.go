@@ -96,6 +96,11 @@ type clientSession struct {
 	// screenCursor / screenClipboard, imlec katmani / pano pazarlandiysa true (conn.go).
 	screenCursor    bool
 	screenClipboard bool
+	// screenClipboardImage: gorsel panosu (FrameClipImage); screenInfo: screen_info
+	// gonderilir; screenPing: screen_ping'e screen_pong doner (hepsi conn.go'da pazarlanir).
+	screenClipboardImage bool
+	screenInfo           bool
+	screenPing           bool
 	// screenFiles, dosya aktarimi pazarlandiysa ve yerelde kapatilmadiysa true (conn.go).
 	screenFiles bool
 	// windows, istek basina gonderim kredisi (bkz. flowcontrol.go).

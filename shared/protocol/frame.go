@@ -52,6 +52,11 @@ const (
 	// Yalniz FeatureScreen2Video pazarlanmissa. Yuk duzeni: screen2_video.go.
 	FrameVideo uint8 = 9
 
+	// FrameClipImage, pano gorseli (PNG) parcasini tasir (cift yonlu). ReqID = ekran
+	// akis kimligi (ScreenOpen.StreamID), Seq = 0'dan artan parca sirasi, FlagEOF son
+	// parca. Yalniz FeatureScreenClipboardImage pazarlanmissa gonderilir; bkz. clipimage.go.
+	FrameClipImage uint8 = 10
+
 	FlagEOF uint8 = 1 << 0
 	// FlagKeyframe (yalniz FrameScreen): kare tum ekrani tasir; alici once
 	// onceki durumu atabilir. FlagFirst: kareyi olusturan ilk mesaj.
@@ -100,7 +105,7 @@ func DecodeBodyFrame(data []byte) (BodyFrame, error) {
 	}
 	ft := data[0]
 	if ft != FrameRequestBody && ft != FrameResponseBody && ft != FrameWSData &&
-		ft != FrameStreamData && ft != FrameDatagram && ft != FrameScreen && ft != FrameFile && ft != FrameWG && ft != FrameVideo {
+		ft != FrameStreamData && ft != FrameDatagram && ft != FrameScreen && ft != FrameFile && ft != FrameWG && ft != FrameVideo && ft != FrameClipImage {
 		return BodyFrame{}, fmt.Errorf("%w: %d", ErrUnknownFrame, ft)
 	}
 	return BodyFrame{

@@ -182,6 +182,8 @@ type Agent struct {
 	// screenCursor / screenClipboard: sunucu hello_ack ile etkinlestirdiyse true.
 	screenCursor    bool
 	screenClipboard bool
+	// Hello onayiyla pazarlananlar: gorsel panosu, monitor bilgisi, gidis-donus yaniti.
+	screenClipboardImage, screenInfo, screenPing bool
 	// screenFiles: sunucu hello_ack ile dosya aktarimini etkinlestirdiyse true.
 	screenFiles bool
 
@@ -723,6 +725,9 @@ func (a *Agent) handshake(ctx context.Context, conn *websocket.Conn) error {
 	a.screenCursor = false
 	a.screenClipboard = false
 	a.screenFiles = false
+	a.screenClipboardImage = false
+	a.screenInfo = false
+	a.screenPing = false
 	a.deviceUpdate = false
 	var wgNet, wgRelay bool
 	for _, f := range ack.Features {
@@ -772,6 +777,15 @@ func (a *Agent) handshake(ctx context.Context, conn *websocket.Conn) error {
 		}
 		if f == protocol.FeatureScreenFiles {
 			a.screenFiles = true
+		}
+		if f == protocol.FeatureScreenClipboardImage {
+			a.screenClipboardImage = true
+		}
+		if f == protocol.FeatureScreenInfo {
+			a.screenInfo = true
+		}
+		if f == protocol.FeatureScreenPing {
+			a.screenPing = true
 		}
 		if f == protocol.FeatureDeviceUpdate {
 			a.deviceUpdate = true
@@ -839,6 +853,9 @@ func (a *Agent) readLoop(parent context.Context, conn *websocket.Conn, cork *cor
 	cs.screen2Video = a.screen2 && a.screen2Video
 	cs.screenCursor = a.screenCursor
 	cs.screenClipboard = a.screenClipboard && !a.NoClipboard
+	cs.screenClipboardImage = cs.screenClipboard && a.screenClipboardImage && clipboardImageSupported()
+	cs.screenInfo = a.screenInfo
+	cs.screenPing = a.screenPing
 	cs.screenFiles = a.screenFiles && !a.NoFileTransfer
 	cs.onRequest = a.OnRequest
 	cs.zapp = a.zapp
@@ -965,6 +982,12 @@ func (a *Agent) readLoop(parent context.Context, conn *websocket.Conn, cork *cor
 			}
 			if frame.FrameType == protocol.FrameScreen {
 				continue // sunucu screen2 karesi gondermez; yok say
+			}
+			if frame.FrameType == protocol.FrameClipImage {
+				if cs.screenClipboardImage && a.settings.screenAllowed() && !a.NoClipboard {
+					sm.clipImageChunk(frame)
+				}
+				continue
 			}
 			if frame.FrameType == protocol.FrameFile {
 				if cs.screenFiles && a.settings.screenAllowed() {
@@ -1187,6 +1210,17 @@ func (a *Agent) readLoop(parent context.Context, conn *websocket.Conn, cork *cor
 				continue
 			}
 			sm.clipboardSet(m)
+
+		case protocol.TypeScreenPing:
+			// Yalniz pazarlandiysa yanit verilir (sunucu zaten pazarlanmadan yollamaz).
+			if !cs.screenPing {
+				continue
+			}
+			var m protocol.ScreenPing
+			if err := json.Unmarshal(data, &m); err != nil {
+				continue
+			}
+			_ = cs.sendControl(ctx, protocol.ScreenPong{Type: protocol.TypeScreenPong, T: m.T}, protocol.TypeScreenPong)
 
 		case protocol.TypeScreenClipboardWatch:
 			var m protocol.ScreenClipboardWatch

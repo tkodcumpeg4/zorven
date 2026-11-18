@@ -49,6 +49,20 @@ type screen2Agent interface {
 	ScreenClipboardWatch(ctx context.Context, sessionID string, enable bool) error
 }
 
+// imageAgent, gorsel panosu (FeatureScreenClipboardImage) yetenegi; screen2Agent'a
+// EKLENMEDI (sahte ajanlar ve eski ajanlar bozulmasin): tip dogrulamasiyla aranir.
+type imageAgent interface {
+	SupportsScreenClipboardImage() bool
+	ScreenClipboardImageSet(ctx context.Context, sessionID string, png []byte) error
+}
+
+// pingAgent, sunucu<->istemci gidis-donus olcumu (FeatureScreenPing).
+type pingAgent interface {
+	SupportsScreenPing() bool
+	ScreenPing(ctx context.Context) error
+	AgentRTT() (time.Duration, bool)
+}
+
 // screen2Registry, istemci kimligine gore canli yayinlari tutar.
 type screen2Registry struct {
 	mu   sync.Mutex
@@ -69,6 +83,12 @@ type screen2Viewer struct {
 	out  chan []byte // ikili screen2 mesajlari (sinirli; dolunca anahtar kareye kadar dusurulur)
 	msgs chan []byte // JSON kontrol mesajlari (sinirli, en iyi caba)
 	cur  chan []byte // imlec konumu: kapasite 1, en yeni kazanir (birlestirilir)
+	img  chan []byte // pano gorseli (panel ikili mesaji, marker+PNG): kapasite 1, en yeni kazanir
+
+	// lastImg/lastPing: panel istek hiz sinirlari (yalniz izleyicinin kendi okuma goroutine tokenlari; imgMu altinda).
+	imgMu    sync.Mutex
+	lastImg  time.Time
+	lastPing time.Time
 
 	// hub.mu altinda
 	resync   bool
@@ -118,6 +138,14 @@ type screen2Hub struct {
 	curOK   bool // istemci imlec katmani pazarladi mi
 	clipOK  bool // istemci pano pazarladi mi
 	filesOK bool // istemci dosya aktarimi pazarladi mi
+	imgOK   bool // istemci gorsel panosu pazarladi mi (clipOK ile birlikte)
+
+	// Optional ajan yetenekleri (screen_aux.go: gorsel panosu, gidis-donus olcumu).
+	imgAgent  imageAgent
+	pingAgent pingAgent
+
+	// Monitor bilgisi (ajan screen_info; 0 => bilinmiyor): mu altinda.
+	displays, display int
 
 	// agentFPSMax, ajanin fps tavani (screen2_fps60 yoksa 30, varsa 60); yayin
 	// yaratilirken atanir, sonra degismez. Kullanim: agentFPSLimit.
@@ -221,6 +249,12 @@ func (r *screen2Registry) joinCapped(clientID string, agent screen2Agent, o tunn
 		if creator {
 			h.inpOK = agent.SubscribeScreenInputStatus(h.sid, h.inp)
 			h.curOK, h.clipOK = agent.SubscribeScreenAux(h.sid, h.aux)
+			if ia, ok := agent.(imageAgent); ok && h.clipOK && ia.SupportsScreenClipboardImage() {
+				h.imgOK, h.imgAgent = true, ia
+			}
+			if pa, ok := agent.(pingAgent); ok && pa.SupportsScreenPing() {
+				h.pingAgent = pa
+			}
 			if fa, ok := agent.(fileAgent); ok {
 				h.filesOK = fa.SupportsScreenFiles()
 			}
@@ -269,7 +303,7 @@ func (r *screen2Registry) joinCapped(clientID string, agent screen2Agent, o tunn
 		}
 
 		v := &screen2Viewer{
-			hub: h, out: make(chan []byte, 32), msgs: make(chan []byte, 16), cur: make(chan []byte, 1),
+			hub: h, out: make(chan []byte, 32), msgs: make(chan []byte, 16), cur: make(chan []byte, 1), img: make(chan []byte, 1),
 			resync: !h.layered, viewOnly: viewOnly || locked, locked: locked, fileTok: randomHex(16),
 			wake: make(chan struct{}, 1), quit: make(chan struct{}),
 			fps: o.FPS, quality: o.Quality, maxWidth: o.MaxWidth, pref: prefFromQuality(o.Quality),
@@ -360,8 +394,19 @@ func settingsMsg(o tunnel.Screen2Options) []byte {
 
 // capsMsg, yayinin imlec/pano yeteneklerini ve izleyicinin etkin fps tavanini
 // (maxFPS: plan ve ajan yeteneginin asgarisi) panele bildirir.
+//
+// clipboard_image: gorsel panosu (PNG). displays/display: ajan screen_info
+// gonderdiyse monitor sayisi ve secili monitor; ESKI ajanda alanlar HIC yoktur
+// (panel 1 varsayar). h.mu elde OLMADAN cagrilir.
 func (h *screen2Hub) capsMsg(maxFPS int) []byte {
-	b, _ := json.Marshal(map[string]any{"type": "caps", "cursor": h.curOK, "clipboard": h.clipOK, "files": h.filesOK, "video": h.vid.ok, "max_fps": maxFPS})
+	m := map[string]any{"type": "caps", "cursor": h.curOK, "clipboard": h.clipOK, "clipboard_image": h.imgOK,
+		"files": h.filesOK, "video": h.vid.ok, "max_fps": maxFPS}
+	h.mu.Lock()
+	if h.displays > 0 {
+		m["displays"], m["display"] = h.displays, h.display
+	}
+	h.mu.Unlock()
+	b, _ := json.Marshal(m)
 	return b
 }
 
@@ -545,6 +590,40 @@ func (h *screen2Hub) relayAux(a tunnel.ScreenAux) {
 			}
 			b, _ := json.Marshal(m)
 			v.sendMsg(b)
+		}
+		h.mu.Unlock()
+	case a.Info != nil:
+		// Monitor bilgisi: kaydet ve guncel caps'i (displays/display) herkese yolla.
+		h.mu.Lock()
+		changed := h.displays != a.Info.Displays || h.display != a.Info.Display
+		h.displays, h.display = a.Info.Displays, a.Info.Display
+		vs := make([]*screen2Viewer, 0, len(h.viewers))
+		for v := range h.viewers {
+			vs = append(vs, v)
+		}
+		h.mu.Unlock()
+		if changed {
+			for _, v := range vs {
+				v.sendMsg(h.capsMsg(v.fpsLimit()))
+			}
+		}
+	case a.ClipImage != nil:
+		// Gorsel YALNIZ kontrolcu izleyicilere gider (metinle ayni kural). Mesaj
+		// bir kez kurulur, izleyiciler ayni dilimi paylasir (kapasite 1, en yeni kazanir).
+		if a.Done != nil {
+			defer a.Done()
+		}
+		if !protocol.ClipImageOK(a.ClipImage) {
+			return
+		}
+		msg := make([]byte, 0, len(a.ClipImage)+1)
+		msg = append(msg, protocol.PanelClipImageMarker)
+		msg = append(msg, a.ClipImage...)
+		h.mu.Lock()
+		for v := range h.viewers {
+			if !v.viewOnly {
+				v.putImage(msg)
+			}
 		}
 		h.mu.Unlock()
 	case a.Clipboard != nil:

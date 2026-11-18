@@ -417,6 +417,48 @@ func (h helperClipboard) Get() (string, error) {
 }
 func (h helperClipboard) Set(text string) error { _, _, err := h.c.clip(clipOpSet, text); return err }
 
+// clipImage, gorsel panosu istegi (clipOpGetImg: PNG oku; clipOpSetImg: PNG yaz).
+// Yardimcinin kalici hata metinleri tur hatalarina geri cevrilir.
+func (c *helperClient) clipImage(op byte, png []byte) ([]byte, error) {
+	var b wbuf
+	b.u8(op)
+	if op == clipOpSetImg {
+		b.u32(uint32(len(png)))
+		b.Write(png)
+	}
+	p, err := c.call(hmClipReq, b.Bytes(), hmClipResp)
+	if err != nil {
+		return nil, err
+	}
+	r := rbuf{b: p}
+	if r.u8() != 0 {
+		switch msg := r.str(); msg {
+		case errClipImageInvalid.Error():
+			return nil, errClipImageInvalid
+		case errClipImageTooLarge.Error():
+			return nil, errClipImageTooLarge
+		default:
+			return nil, errors.New(msg)
+		}
+	}
+	if op != clipOpGetImg {
+		return nil, r.err
+	}
+	n := int(r.u32())
+	if n == 0 {
+		return nil, r.err
+	}
+	return append([]byte(nil), r.take(n)...), r.err
+}
+
+var _ clipboardImageBackend = helperClipboard{}
+
+func (h helperClipboard) GetImage() ([]byte, error) { return h.c.clipImage(clipOpGetImg, nil) }
+func (h helperClipboard) SetImage(png []byte) error {
+	_, err := h.c.clipImage(clipOpSetImg, png)
+	return err
+}
+
 // Close, yardimciyi kapatir (kanal + surec).
 func (c *helperClient) Close() error {
 	c.mu.Lock()

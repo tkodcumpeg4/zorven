@@ -411,6 +411,10 @@ const screenModeScreen2 = "screen2"
 // metnin JSON kacislariyla sismesini karsilar, yine de bellek icin sinirli.
 const screenPanelReadLimit = 512 << 10
 
+// screenPanelImageReadLimit, kontrolcu izleyicinin tek WS mesaji ust siniri:
+// 8 MiB PNG + 1 bayt isaretci (panel -> sunucu pano gorseli; bkz. screen_clip_image.go).
+const screenPanelImageReadLimit = protocol.MaxScreenClipboardImage + 4096
+
 // chooseScreenMode, panelin istedigi modu istemci yetenegiyle birlestirir.
 // "screen2" ve "auto" yalniz istemci screen2 pazarladiysa screen2 olur; aksi
 // halde eski yol (mjpeg/h264 ya da bos = istemci varsayilani).
@@ -436,9 +440,10 @@ func screenModeLegacy(requested string) string {
 type screenControl struct {
 	kind  string // keyframe | settings | view_only | video (value=supported, layer=mode)
 	opts  tunnel.Screen2Options
-	value bool   // view_only degeri
-	text  string // clipboard metni
-	layer string // settings: auto|high|low (bos => kaliteden turetilir)
+	value bool            // view_only degeri
+	text  string          // clipboard metni
+	layer string          // settings: auto|high|low (bos => kaliteden turetilir)
+	t     json.RawMessage // ping: panelin saati (sayi; aynen yankilanir)
 }
 
 // parseScreenControl, {"type":"keyframe"} ve {"type":"settings",...} mesajlarini
@@ -446,16 +451,17 @@ type screenControl struct {
 // (degistirme); negatif/asiri degerler sifira (degismez) indirilir.
 func parseScreenControl(data []byte) (screenControl, bool) {
 	var m struct {
-		Type     string `json:"type"`
-		FPS      int    `json:"fps"`
-		Quality  int    `json:"quality"`
-		MaxWidth int    `json:"max_width"`
-		Display  *int   `json:"display"`
-		Value    bool   `json:"value"`
-		Text     string `json:"text"`
-		Layer    string `json:"layer"`
-		Mode     string `json:"mode"`
-		Supports bool   `json:"supported"`
+		Type     string          `json:"type"`
+		FPS      int             `json:"fps"`
+		Quality  int             `json:"quality"`
+		MaxWidth int             `json:"max_width"`
+		Display  *int            `json:"display"`
+		Value    bool            `json:"value"`
+		Text     string          `json:"text"`
+		Layer    string          `json:"layer"`
+		Mode     string          `json:"mode"`
+		Supports bool            `json:"supported"`
+		T        json.RawMessage `json:"t"`
 	}
 	if json.Unmarshal(data, &m) != nil {
 		return screenControl{}, false
@@ -465,6 +471,8 @@ func parseScreenControl(data []byte) (screenControl, bool) {
 		return screenControl{kind: "keyframe"}, true
 	case "video":
 		return screenControl{kind: "video", value: m.Supports, layer: m.Mode}, true
+	case "ping":
+		return screenControl{kind: "ping", t: m.T}, true
 	case "view_only":
 		return screenControl{kind: "view_only", value: m.Value}, true
 	case "clipboard":
@@ -623,6 +631,15 @@ func (s *Server) serveScreen2Shared(ctx context.Context, cancel context.CancelFu
 					cancel()
 					return
 				}
+			case b := <-v.img:
+				// Pano gorseli (marker + PNG): buyuk, kendi zaman asimiyla.
+				wctx, wcancel := context.WithTimeout(ctx, 30*time.Second)
+				err := conn.Write(wctx, websocket.MessageBinary, b)
+				wcancel()
+				if err != nil {
+					cancel()
+					return
+				}
 			case b := <-v.cur:
 				// Imlec konumu: birlestirilmis en yeni deger; hizi agent ~30/sn'ye kisar.
 				if !writeText(b) {
@@ -639,9 +656,25 @@ func (s *Server) serveScreen2Shared(ctx context.Context, cancel context.CancelFu
 	}()
 
 	for {
-		_, data, err := conn.Read(ctx)
+		// Gorsel (8 MiB PNG) yalniz kontrolcu izleyiciden beklenir; salt-izleyicinin
+		// okuma siniri kucuk kalir (buyuk mesaj baglantiyi kapatir).
+		if v.isViewOnly() {
+			conn.SetReadLimit(screenPanelReadLimit)
+		} else {
+			conn.SetReadLimit(screenPanelImageReadLimit)
+		}
+		typ, data, err := conn.Read(ctx)
 		if err != nil {
 			return true, true
+		}
+		if typ == websocket.MessageBinary {
+			if len(data) > 1 && data[0] == protocol.PanelClipImageMarker {
+				v.clipboardImage(ctx, data[1:])
+			}
+			continue
+		}
+		if len(data) > screenPanelReadLimit {
+			continue // metin mesajlari eski sinirla
 		}
 		if c, ok := parseScreenControl(data); ok {
 			switch c.kind {
@@ -655,6 +688,8 @@ func (s *Server) serveScreen2Shared(ctx context.Context, cancel context.CancelFu
 				v.setViewOnly(c.value)
 			case "clipboard":
 				v.clipboard(ctx, c.text)
+			case "ping":
+				v.ping(c.t)
 			}
 			continue
 		}

@@ -299,8 +299,10 @@ func (sm *screenManager) runScreen2(ctx context.Context, ss *screenSession, p sc
 			sm.sendInputStatus(ctx, ss.id, inputResult{State: state, Detail: detail})
 		}
 	}
-	s.onDisplay = func(_ int, b image.Rectangle) {
+	s.onDisplay = func(d int, b image.Rectangle) {
 		ss.setBounds(displayRect{x: b.Min.X, y: b.Min.Y, w: b.Dx(), h: b.Dy()})
+		// Baslangicta ve secili monitor degisince: monitor sayisi + secili indeks.
+		sm.sendScreenInfo(ctx, ss.id, d, s.cap.NumDisplays())
 	}
 	ss.boundsMu.Lock()
 	ss.s2 = s

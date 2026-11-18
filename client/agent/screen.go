@@ -44,6 +44,8 @@ type screenSession struct {
 	s2       *screen2Session
 	// clip: pano izleyici (yalniz screen2 + FeatureScreenClipboard; boundsMu altinda).
 	clip *clipboardWatcher
+	// clipAsm: panelden gelen gorsel parcalari (yalniz okuma dongusu goroutine'i dokunur).
+	clipAsm protocol.ClipImageAssembler
 
 	// input, girdi olaylarinin kuyrugu.
 	//

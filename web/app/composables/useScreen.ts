@@ -13,6 +13,10 @@ import type { AgentStats, BrowserPerf } from '~/lib/screenPerf'
 import { parseAgentStats } from '~/lib/screenPerf'
 import type { VideoInfo, VideoPref } from '~/lib/screenVideo'
 import { ScreenVideoDecoder, detectVideoSupport, emptyVideoInfo, isVideoFrame } from '~/lib/screenVideo'
+import {
+  RTT_INTERVAL_MS, buildPing, decodeClipboardImage, encodeClipboardImage, isClipboardImageMessage,
+  parseCapsExtra, parsePong, shouldMeasureRtt,
+} from './screenWire'
 
 export interface ScreenHandle {
   ws: WebSocket
@@ -27,6 +31,12 @@ export interface ScreenHandle {
   sendViewOnly: (value: boolean) => void
   /** screen2: metni uzak makinenin panosuna gonder (yalniz kontrolcu; sunucu zorlar). */
   sendClipboard: (text: string) => void
+  /**
+   * screen2: PNG'yi uzak makinenin panosuna gonder (yalniz kontrolcu; sunucu zorlar).
+   * Bos ya da 8 MiB'i asan gorsel gonderilmez ve onClipboardStatus(false, 'too_large', true)
+   * cagrilir. Sunucu sonucu onClipboardStatus(ok, reason, true) ile bildirir.
+   */
+  sendClipboardImage: (png: Blob) => void
   /** screen2_video: karo/video tercihini (auto|tiles|video) sunucuya bildir. */
   sendVideoMode: (mode: VideoPref) => void
 }
@@ -48,7 +58,18 @@ export interface ScreenViewerState { layered: boolean, layer: 'high' | 'low', au
  * bu izleyici icin etkin kare hizi tavani (plan ve ajan yeteneginin asgarisi);
  * eski sunucuda yok.
  */
-export interface ScreenCaps { cursor: boolean, clipboard: boolean, files: boolean, maxFps?: number }
+export interface ScreenCaps {
+  cursor: boolean
+  clipboard: boolean
+  files: boolean
+  maxFps?: number
+  /** Gorsel (PNG) panosu: yalniz Windows ajaninda; eski sunucu/ajanda yok (=false). */
+  clipboardImage?: boolean
+  /** Uzak makinedeki monitor sayisi; eski ajan/sunucuda undefined (panel 1 varsayar). */
+  displays?: number
+  /** Su an yayinlanan monitorun indeksi (0 tabanli); displays ile birlikte gelir. */
+  display?: number
+}
 
 /** Bilet yanitindaki plan sinirlari (WS acilmadan once bildirilir). */
 export interface ScreenPlanLimits { maxFps: number, maxResolution: string }
@@ -87,7 +108,13 @@ type FrameMsg = {
   /** caps / cursor / cursor_shape / clipboard / clipboard_status mesajlari. */
   cursor?: boolean
   clipboard?: boolean
+  /** caps mesaji: gorsel panosu (PNG). */
+  clipboard_image?: boolean
+  displays?: number
   files?: boolean
+  /** pong mesaji: sunucu<->ajan gidis-donus (ms); yoksa olcum yok. */
+  agent_ms?: number
+  t?: number
   /** files mesaji: dosya aktarimi etkin mi / kontrolcu mu / HTTP belirteci. */
   enabled?: boolean
   controller?: boolean
@@ -225,8 +252,18 @@ export function useScreen() {
       onCursorShape?: (s: ScreenCursorShape) => void
       /** Uzak makinenin panosu degisti (yalniz kontrolcuye gelir). */
       onClipboard?: (text: string) => void
-      /** Pano gonderiminin sonucu: ok=false iken reason: view_only|unsupported|too_large|invalid. */
-      onClipboardStatus?: (ok: boolean, reason: string) => void
+      /**
+       * Pano gonderiminin sonucu: ok=false iken reason: view_only|unsupported|too_large|invalid
+       * (gorselde ayrica rate_limited). image=true ise sonuc bir GORSEL gonderimine aittir.
+       */
+      onClipboardStatus?: (ok: boolean, reason: string, image?: boolean) => void
+      /** Uzak makinenin panosundaki gorsel (PNG) degisti (yalniz kontrolcuye gelir). */
+      onClipboardImage?: (png: Blob) => void
+      /**
+       * Gidis-donus gecikmesi (~2 sn'de bir; sekme gizliyken olculmez). ms: panel<->sunucu;
+       * agentMs: sunucu<->ajan (eski ajanda/olcum yokken undefined). Toplam yaklasik ms + agentMs.
+       */
+      onRtt?: (ms: number, agentMs?: number) => void
       /** screen2_video: karo/video tercihi (baglantida okunur; sonradan sendVideoMode ile degisir). */
       videoMode?: () => VideoPref
       /** screen2_video: video durumu ozeti (durum degisince ve saniyede bir). */
@@ -432,6 +469,23 @@ export function useScreen() {
       if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'clipboard', text }))
     }
 
+    function sendClipboardImage(png: Blob) {
+      if (ws.readyState !== WebSocket.OPEN) return
+      const msg = encodeClipboardImage(png)
+      if (!msg) { opts.onClipboardStatus?.(false, 'too_large', true); return }
+      ws.send(msg)
+    }
+
+    // Gidis-donus olcumu: ~2 sn'de bir ping; yalniz sekme gorunurken. Sunucu hiz
+    // sinirlar (>=500 ms) ve pong'a sunucu<->ajan bacagini ekler.
+    const rttTimer = opts.onRtt
+      ? setInterval(() => {
+          if (shouldMeasureRtt(typeof document === 'undefined' ? 'visible' : document.visibilityState, ws.readyState === WebSocket.OPEN)) {
+            ws.send(buildPing(performance.now()))
+          }
+        }, RTT_INTERVAL_MS)
+      : undefined
+
     function startScreen2() {
       vdec ??= new ScreenVideoDecoder({
         canvas: () => opts.canvas,
@@ -450,6 +504,12 @@ export function useScreen() {
     }
 
     function onBinary(buf: ArrayBuffer) {
+      // Pano gorseli (ilk bayt 0x20; ekran kareleri 6/9 ile baslar): kare yolundan once ayrilir.
+      if (isClipboardImageMessage(buf)) {
+        const png = decodeClipboardImage(buf)
+        if (png) opts.onClipboardImage?.(png)
+        return
+      }
       if (activeMode !== 'screen2' || !opts.canvas) return
       if (isVideoFrame(buf)) { vdec?.handle(buf); return }
       const m = parseScreen2(buf)
@@ -607,7 +667,15 @@ export function useScreen() {
       if (msg.type === 'caps') {
         vinfo.available = !!msg.video
         emitVideo()
-        opts.onCaps?.({ cursor: !!msg.cursor, clipboard: !!msg.clipboard, files: !!msg.files, maxFps: msg.max_fps || undefined })
+        opts.onCaps?.({
+          cursor: !!msg.cursor, clipboard: !!msg.clipboard, files: !!msg.files, maxFps: msg.max_fps || undefined,
+          ...parseCapsExtra(msg),
+        })
+        return
+      }
+      if (msg.type === 'pong') {
+        const r = parsePong(msg, performance.now())
+        if (r) opts.onRtt?.(Math.round(r.ms * 10) / 10, r.agentMs === undefined ? undefined : Math.round(r.agentMs * 10) / 10)
         return
       }
       if (msg.type === 'files') {
@@ -632,7 +700,7 @@ export function useScreen() {
         return
       }
       if (msg.type === 'clipboard_status') {
-        opts.onClipboardStatus?.(!!msg.ok, msg.reason || '')
+        opts.onClipboardStatus?.(!!msg.ok, msg.reason || '', (msg as { image?: boolean }).image === true)
         return
       }
       if (msg.type === 'input_status') {
@@ -699,6 +767,7 @@ export function useScreen() {
       closed = true
       if (statsTimer) clearInterval(statsTimer)
       if (videoTimer) clearInterval(videoTimer)
+      if (rttTimer) clearInterval(rttTimer)
       vdec?.close()
       try { ws.close() } catch { /* yok say */ }
       if (mediaSource && mediaSource.readyState === 'open') {
@@ -708,7 +777,7 @@ export function useScreen() {
       if (prev) URL.revokeObjectURL(prev)
     }
 
-    return { ws, close, mode: () => activeMode, requestKeyframe, sendSettings, sendViewOnly, sendClipboard, sendVideoMode }
+    return { ws, close, mode: () => activeMode, requestKeyframe, sendSettings, sendViewOnly, sendClipboard, sendClipboardImage, sendVideoMode }
   }
 
   /** sendInput, normalize (0..1) koordinatli fare/klavye olayini gonderir. */

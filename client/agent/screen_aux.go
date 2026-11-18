@@ -14,7 +14,7 @@ var errClipboardTooLarge = errors.New("pano metni gecersiz veya 64 KiB'i asiyor"
 // helloFeatures, Hello'da ilan edilen yetenekler. Imlec ve pano yalniz platform
 // destekliyorsa; pano ayrica --no-clipboard ile ilan edilmez.
 func (a *Agent) helloFeatures() []string {
-	f := []string{protocol.FeatureFlowControl, protocol.FeatureScreenInputStatus, protocol.FeatureScreen2, protocol.FeatureScreen2Layers, protocol.FeatureScreen2Stats, protocol.FeatureScreen2Feedback, protocol.FeatureScreen2FPS60}
+	f := []string{protocol.FeatureFlowControl, protocol.FeatureScreenInputStatus, protocol.FeatureScreen2, protocol.FeatureScreen2Layers, protocol.FeatureScreen2Stats, protocol.FeatureScreen2Feedback, protocol.FeatureScreen2FPS60, protocol.FeatureScreenInfo, protocol.FeatureScreenPing}
 	if videoEncoderAvailable() {
 		f = append(f, protocol.FeatureScreen2Video)
 	}
@@ -23,6 +23,9 @@ func (a *Agent) helloFeatures() []string {
 	}
 	if clipboardSupported() && !a.NoClipboard {
 		f = append(f, protocol.FeatureScreenClipboard)
+		if clipboardImageSupported() {
+			f = append(f, protocol.FeatureScreenClipboardImage)
+		}
 	}
 	if !a.NoFileTransfer {
 		f = append(f, protocol.FeatureScreenFiles)
@@ -80,6 +83,9 @@ func (sm *screenManager) startAux(ctx context.Context, ss *screenSession, s *scr
 					sm.sendInputStatus(ctx, ss.id, inputResult{State: protocol.InputStateDegraded, Detail: detail})
 				}
 			}
+			if sm.cs.screenClipboardImage {
+				w.enableImages(func(png []byte) { sm.sendClipImage(ctx, ss, png) })
+			}
 			ss.boundsMu.Lock()
 			ss.clip = w
 			ss.boundsMu.Unlock()
@@ -109,6 +115,70 @@ func (sm *screenManager) clipboardSet(m protocol.ScreenClipboard) {
 	if err := w.Apply(m.Text); err != nil {
 		sm.cs.log.Warn("pano yazilamadi", "session", m.SessionID, "hata", err)
 	}
+}
+
+// sendClipImage, uzak makinenin panosundaki gorseli (PNG) FrameClipImage
+// parcalariyla sunucuya yollar. Tek goroutine'den (izleyici) cagrilir.
+func (sm *screenManager) sendClipImage(ctx context.Context, ss *screenSession, png []byte) {
+	if !protocol.ClipImageOK(png) {
+		return
+	}
+	parts := protocol.SplitClipImage(png)
+	for i, p := range parts {
+		fr := protocol.BodyFrame{FrameType: protocol.FrameClipImage, ReqID: ss.streamID, Seq: uint32(i), EOF: i == len(parts)-1, Payload: p}
+		if sm.cs.sendBinary(ctx, fr.Encode()) != nil {
+			return
+		}
+	}
+}
+
+// clipImageChunk, sunucudan gelen gorsel parcasini (FrameClipImage) birlestirir;
+// tamamlaninca panoya yazar. Yalniz okuma dongusu goroutine'i cagirir.
+func (sm *screenManager) clipImageChunk(f protocol.BodyFrame) {
+	sm.mu.Lock()
+	var ss *screenSession
+	for _, s := range sm.sessions {
+		if s.streamID == f.ReqID && f.ReqID != 0 {
+			ss = s
+			break
+		}
+	}
+	sm.mu.Unlock()
+	if ss == nil {
+		return
+	}
+	png, done, err := ss.clipAsm.Add(f.Seq, f.EOF, f.Payload)
+	if err != nil {
+		sm.cs.log.Warn("pano gorseli parcasi atildi", "session", ss.id, "hata", err)
+		return
+	}
+	if !done {
+		return
+	}
+	w := sm.clipboardOf(ss.id)
+	if w == nil || !w.imagesEnabled() {
+		return
+	}
+	go func() {
+		if err := w.ApplyImage(png); err != nil {
+			sm.cs.log.Warn("pano gorseli yazilamadi", "session", ss.id, "hata", err)
+		}
+	}()
+}
+
+// sendScreenInfo, monitor sayisini ve secili monitoru sunucuya bildirir
+// (yalniz FeatureScreenInfo pazarlandiysa; eski sunucu bu mesaji hic gormez).
+func (sm *screenManager) sendScreenInfo(ctx context.Context, sessionID string, display, displays int) {
+	if !sm.cs.screenInfo {
+		return
+	}
+	if displays < 1 {
+		displays = 1
+	}
+	if display < 0 || display >= displays {
+		display = 0
+	}
+	_ = sm.cs.sendControl(ctx, protocol.ScreenInfo{Type: protocol.TypeScreenInfo, SessionID: sessionID, Displays: displays, Display: display}, protocol.TypeScreenInfo)
 }
 
 // clipboardWatch, pano izlemeyi acar/kapatir (yalniz kontrolcu izleyici varken).

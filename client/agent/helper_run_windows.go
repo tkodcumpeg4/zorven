@@ -29,12 +29,14 @@ type winHelperBackend struct {
 	clip winClipboard
 }
 
-func (b *winHelperBackend) NumDisplays() int             { return b.cap.NumDisplays() }
-func (b *winHelperBackend) Bounds(d int) image.Rectangle { return b.cap.Bounds(d) }
-func (b *winHelperBackend) Attach() bool                 { return attachToInputDesktop() }
-func (b *winHelperBackend) ClipSeq() uint32              { return b.clip.Seq() }
-func (b *winHelperBackend) ClipGet() (string, error)     { return b.clip.Get() }
-func (b *winHelperBackend) ClipSet(t string) error       { return b.clip.Set(t) }
+func (b *winHelperBackend) NumDisplays() int              { return b.cap.NumDisplays() }
+func (b *winHelperBackend) Bounds(d int) image.Rectangle  { return b.cap.Bounds(d) }
+func (b *winHelperBackend) Attach() bool                  { return attachToInputDesktop() }
+func (b *winHelperBackend) ClipSeq() uint32               { return b.clip.Seq() }
+func (b *winHelperBackend) ClipGet() (string, error)      { return b.clip.Get() }
+func (b *winHelperBackend) ClipSet(t string) error        { return b.clip.Set(t) }
+func (b *winHelperBackend) ClipGetImage() ([]byte, error) { return b.clip.GetImage() }
+func (b *winHelperBackend) ClipSetImage(p []byte) error   { return b.clip.SetImage(p) }
 
 func (b *winHelperBackend) Method() string {
 	if m, ok := b.cap.(captureMethoder); ok {

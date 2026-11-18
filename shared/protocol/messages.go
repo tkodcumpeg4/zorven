@@ -117,6 +117,12 @@ const (
 	TypeScreenCursorShape    MessageType = "screen_cursor_shape"    // istemci -> sunucu: imlec bicimi
 	TypeScreenClipboard      MessageType = "screen_clipboard"       // iki yon: pano metni
 	TypeScreenClipboardWatch MessageType = "screen_clipboard_watch" // sunucu -> istemci: pano izlemeyi ac/kapat
+	// TypeScreenInfo (istemci -> sunucu): monitor sayisi + secili monitor
+	// (FeatureScreenInfo). TypeScreenPing / TypeScreenPong: sunucu <-> istemci gidis-donus
+	// olcumu (FeatureScreenPing).
+	TypeScreenInfo MessageType = "screen_info"
+	TypeScreenPing MessageType = "screen_ping" // sunucu -> istemci
+	TypeScreenPong MessageType = "screen_pong" // istemci -> sunucu (t aynen yankilanir)
 
 	// Ekran oturumu dosya aktarimi (FeatureScreenFiles; bkz. files.go).
 	TypeFileOpen       MessageType = "file_open"        // sunucu -> istemci
