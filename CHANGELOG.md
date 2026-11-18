@@ -5,6 +5,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-18
+
+### Added
+- Panel on phones: compact top bar with larger touch targets, the organization switcher on its own row, horizontally scrollable tab bars, and a card layout for the tunnel and client lists on narrow screens.
+- Request log entries carry an optional `worker` field (`request_logs.worker`, migration 0125); it is empty unless a response was produced by an add-on layer.
+
+### Changed
+- Desktop and CLI client version 0.4.1 (they are released together).
+- The API token route check understands Go `ServeMux` trailing wildcard patterns (`{name...}`).
+- `/web/node_modules` is ignored even when it is a symlink.
+
 ## [0.4.0] - 2026-11-18
 
 ### Added

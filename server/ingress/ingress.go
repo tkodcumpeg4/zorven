@@ -959,6 +959,8 @@ type recorder struct {
 	// zid/fwdID: ziyaretci yanitina yazilacak istek kimlikleri (requestid.go).
 	zid, fwdID string
 	stamped    bool
+	// worker: istegi bir ek katman (worker) karsiladiysa adi (istek gunlugu Entry.Worker).
+	worker string
 }
 
 // countingBody, istek govdesinden ajana/dugume gercekten okunan baytlari sayar.
@@ -1052,6 +1054,7 @@ func (h *Handler) recordWithID(tunnelID, tenantID string, _ bool, r *http.Reques
 		DurationMS: time.Since(started).Milliseconds(),
 		BytesIn:    bytesIn,
 		BytesOut:   bytesOut,
+		Worker:     rec.worker,
 	})
 }
 

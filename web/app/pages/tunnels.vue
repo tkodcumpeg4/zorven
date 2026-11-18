@@ -1325,7 +1325,7 @@ function ephBadgeClass(tn: Tunnel): string {
       <p v-else-if="!tunnels.length" class="px-4 py-8 text-center text-sm text-fg-muted">{{ t('tunnels.noTunnels') }}</p>
 
       <div v-else class="overflow-x-auto">
-        <table class="w-full text-sm">
+        <table class="zv-cards w-full text-sm">
           <thead>
             <tr class="border-b border-line text-left">
               <th class="label-sys px-4 py-2 font-normal">{{ t('tunnels.colNames') }}</th>
@@ -1353,10 +1353,10 @@ function ephBadgeClass(tn: Tunnel): string {
                   </span>
                 </p>
               </td>
-              <td class="px-4 py-2.5">
+              <td class="px-4 py-2.5" :data-label="t('tunnels.colClient')">
                 <span class="inline-flex items-center gap-1.5">
                   <span
-                    class="size-1.5 rounded-full"
+                    class="size-1.5 shrink-0 rounded-full"
                     :class="clientStatusOf(tn.client_id) === 'online' ? 'bg-accent' : clientStatusOf(tn.client_id) === 'offline' ? 'bg-fg-subtle' : 'bg-danger'"
                     :title="clientStatusOf(tn.client_id) === 'online' ? t('tunnels.online') : clientStatusOf(tn.client_id) === 'offline' ? t('tunnels.offline') : t('tunnels.unknownClient')"
                   />
@@ -1364,9 +1364,9 @@ function ephBadgeClass(tn: Tunnel): string {
                   <span v-else class="font-mono text-xs text-fg-subtle">{{ tn.client_id }} <span class="text-danger">({{ t('tunnels.unknownClient') }})</span></span>
                 </span>
               </td>
-              <td class="px-4 py-2.5 font-mono text-xs text-fg-muted">{{ tn.target }}</td>
-              <td class="px-4 py-2.5"><StatusPill :status="tn.enabled ? 'enabled' : 'disabled'" /></td>
-              <td class="px-4 py-2.5 text-xs text-fg-muted">{{ relativeTime(tn.created_at) }}</td>
+              <td class="px-4 py-2.5 font-mono text-xs text-fg-muted" :data-label="t('tunnels.colTarget')">{{ tn.target }}</td>
+              <td class="px-4 py-2.5" :data-label="t('tunnels.colStatus')"><StatusPill :status="tn.enabled ? 'enabled' : 'disabled'" /></td>
+              <td class="px-4 py-2.5 text-xs text-fg-muted" :data-label="t('tunnels.colCreated')">{{ relativeTime(tn.created_at) }}</td>
               <td class="px-4 py-2.5">
                 <div class="flex justify-end gap-1">
                   <button
@@ -2235,7 +2235,7 @@ function ephBadgeClass(tn: Tunnel): string {
                 <span class="label-sys">{{ t('tunnels.alertTitle') }}</span>
                 <span v-if="alertForm.enabled" class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium"
                       :class="alertState === 'firing' ? 'bg-danger/15 text-danger' : 'bg-emerald-500/15 text-emerald-500'">
-                  <span class="size-1.5 rounded-full" :class="alertState === 'firing' ? 'bg-danger' : 'bg-emerald-500'" />
+                  <span class="size-1.5 shrink-0 rounded-full" :class="alertState === 'firing' ? 'bg-danger' : 'bg-emerald-500'" />
                   {{ alertState === 'firing' ? t('tunnels.alertFiring') : t('tunnels.alertOk') }}
                 </span>
               </div>
@@ -2342,7 +2342,7 @@ function ephBadgeClass(tn: Tunnel): string {
                         <td class="max-w-[160px] truncate px-2 py-1.5 font-mono text-fg" :title="ev.identity">{{ ev.identity || '-' }}</td>
                         <td class="px-2 py-1.5">
                           <span class="inline-flex items-center gap-1 whitespace-nowrap rounded-full px-2 py-0.5 text-[10px] font-medium" :class="ev.success ? 'bg-emerald-500/15 text-emerald-500' : 'bg-danger/15 text-danger'">
-                            <span class="size-1.5 rounded-full" :class="ev.success ? 'bg-emerald-500' : 'bg-danger'" />
+                            <span class="size-1.5 shrink-0 rounded-full" :class="ev.success ? 'bg-emerald-500' : 'bg-danger'" />
                             {{ ev.success ? t('tunnels.statsOk') : t('tunnels.statsFail') }}
                           </span>
                           <div v-if="!ev.success || (ev.reason || '').startsWith('session_')" class="mt-0.5 text-[10px] text-fg-muted">{{ statsReason(ev.reason) }}</div>

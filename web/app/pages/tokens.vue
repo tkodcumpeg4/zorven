@@ -356,7 +356,7 @@ function isExpired(expiresAt?: string | null) {
     </div>
 
     <!-- Sekme Butonları -->
-    <div class="flex border-b border-line gap-4">
+    <div class="no-scrollbar flex gap-4 overflow-x-auto whitespace-nowrap border-b border-line">
       <button
         type="button"
         class="flex cursor-pointer items-center gap-2 pb-3 text-sm font-medium transition-colors border-b-2"

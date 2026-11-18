@@ -259,11 +259,19 @@ func tokenMayAccess(method, path string) bool {
 	return false
 }
 
-// segMatch, "{id}" gibi tek-segment joker iceren bir deseni yola karsi esler.
+// segMatch, "{id}" gibi tek-segment joker iceren bir deseni yola karsi esler. Desenin SON segmenti "{ad...}"
+// ise (Go ServeMux sozdizimi) kalan en az bir segmentin tamamini eser.
 func segMatch(pattern, path string) bool {
 	ps := strings.Split(strings.Trim(pattern, "/"), "/")
 	xs := strings.Split(strings.Trim(path, "/"), "/")
-	if len(ps) != len(xs) {
+	rest := len(ps) > 0 && strings.HasPrefix(ps[len(ps)-1], "{") && strings.HasSuffix(ps[len(ps)-1], "...}")
+	if rest {
+		if len(xs) < len(ps) {
+			return false
+		}
+		ps = ps[:len(ps)-1]
+		xs = xs[:len(ps)]
+	} else if len(ps) != len(xs) {
 		return false
 	}
 	for i := range ps {

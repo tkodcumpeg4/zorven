@@ -9,6 +9,8 @@
 
 # Node.js / Nuxt
 node_modules/
+# baglanti (symlink) olarak da izlenmesin
+/web/node_modules
 .nuxt/
 .output/
 .nitro/

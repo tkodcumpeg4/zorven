@@ -239,7 +239,7 @@ const currentCmd = computed(() => {
       <p v-if="pending" class="px-4 py-6 text-sm text-fg-muted">{{ t('common.loading') }}</p>
 
       <div v-else class="overflow-x-auto">
-        <table class="w-full text-sm">
+        <table class="zv-cards w-full text-sm">
           <thead>
             <tr class="border-b border-line text-left">
               <th class="label-sys px-4 py-2 font-normal">{{ t('clients.colName') }}</th>
@@ -266,7 +266,7 @@ const currentCmd = computed(() => {
                   {{ c.ips.slice(0, 2).join(', ') }}<span v-if="c.ips.length > 2"> +{{ c.ips.length - 2 }}</span>
                 </div>
               </td>
-              <td class="px-4 py-3">
+              <td class="px-4 py-3" :data-label="t('clients.colStatus')">
                 <div class="flex flex-col gap-1 items-start">
                   <StatusPill :status="c.status" />
                   <span
@@ -288,7 +288,7 @@ const currentCmd = computed(() => {
               </td>
 
               <!-- Canlı Metrikler (CPU / RAM / Disk) -->
-              <td class="px-4 py-3">
+              <td class="px-4 py-3" :data-label="t('clients.colMetrics')">
                 <div v-if="c.status === 'online' && c.metrics" class="space-y-1.5 min-w-[160px] max-w-[200px]">
                   <!-- CPU -->
                   <div>
@@ -338,7 +338,7 @@ const currentCmd = computed(() => {
                 <span v-else class="text-xs text-fg-muted">—</span>
               </td>
 
-              <td class="px-4 py-3">
+              <td class="px-4 py-3" :data-label="t('clients.colVersion')">
                 <div class="font-mono text-xs text-fg-muted">
                   {{ c.version ?? c.agent_version ?? '—' }}
                   <!-- Offline iken gosterilen surum CANLI degil, son bilinendir. -->
@@ -354,7 +354,7 @@ const currentCmd = computed(() => {
                 </span>
                 <div class="font-mono text-xs text-fg-subtle">{{ c.remote_addr ?? '—' }}</div>
               </td>
-              <td class="px-4 py-3 text-xs text-fg-muted">{{ relativeTime(c.last_seen_at) }}</td>
+              <td class="px-4 py-3 text-xs text-fg-muted" :data-label="t('clients.colLastSeen')">{{ relativeTime(c.last_seen_at) }}</td>
               <td class="px-4 py-3">
                 <div class="flex justify-end gap-1">
                   <NuxtLink

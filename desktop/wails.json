@@ -6,7 +6,7 @@
   "wailsjsdir": "./frontend",
   "info": {
     "productName": "Zorven",
-    "productVersion": "0.4.0",
+    "productVersion": "0.4.1",
     "companyName": "Zorven",
     "comments": "Zorven Güvenli Tünel İstemcisi"
   }

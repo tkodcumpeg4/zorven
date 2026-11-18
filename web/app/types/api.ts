@@ -842,6 +842,8 @@ export interface RequestLog {
   bytes_out: number
   /** Ingress istegi proxy'lemeden reddettiyse nedeni (ip_forbidden, policy_deny ...). Bos = proxy'lendi. */
   reject_reason?: string
+  /** Yanit bir ek katmandan (worker) geldiyse worker adi (reject degil, normal yanit). */
+  worker?: string
 }
 
 /** Loglar sayfası gelişmiş filtre ölçütleri (sunucuya query param olarak gider). */

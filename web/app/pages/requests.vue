@@ -421,7 +421,7 @@ function rejectText(r: string): string {
                 <td class="max-w-[280px] truncate px-3 py-2 font-mono text-xs" :title="r.path">{{ r.path }}</td>
                 <td class="max-w-[150px] truncate px-3 py-2 font-mono text-[11px] text-fg-muted" :title="r.client_ip">{{ r.client_ip || '—' }}</td>
                 <td class="px-3 py-2">
-                  <span class="inline-flex items-center gap-1.5"><StatusCode :code="r.status" /><RejectBadge :reason="r.reject_reason" /></span>
+                  <span class="inline-flex flex-wrap items-center gap-1.5"><StatusCode :code="r.status" /><RejectBadge :reason="r.reject_reason" /></span>
                 </td>
                 <td class="px-3 py-2 font-mono text-[11px] tabular-nums text-fg-muted">{{ duration(r.duration_ms) }}</td>
               </tr>

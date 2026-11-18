@@ -252,3 +252,60 @@ html.light {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   Telefon gorunumu (< 640 px). Yalniz mobil varsayilanlarini ekler; masaustu (sm+) degismez.
+   Katmansiz (unlayered) oldugu icin Tailwind yardimci siniflarini ezer.
+--------------------------------------------------------------------------- */
+@media (max-width: 639px) {
+  html, body { overflow-x: clip; }
+  main { min-width: 0; }
+  main img, main video, main canvas { max-width: 100%; }
+  main pre, main code { overflow-wrap: anywhere; }
+  main pre { white-space: pre-wrap; max-width: 100%; overflow-x: auto; }
+
+  /* Form alanlari: iOS odakta yakinlastirmasin (>= 16px), rahat dokunma yuksekligi */
+  input:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=file]):not([type=hidden]),
+  select, textarea {
+    font-size: 16px !important;
+    min-height: 44px;
+    max-width: 100%;
+  }
+  input, textarea { min-width: 0; }
+  textarea { min-height: 88px; }
+  label:has(> input[type=checkbox]), label:has(> input[type=radio]) { min-height: 40px; display: flex; align-items: center; gap: 0.5rem; }
+  main a.inline-flex, main a.cursor-pointer, main a.flex { min-height: 40px; align-items: center; }
+  main a.inline-flex, main a.cursor-pointer:not(.flex) { display: inline-flex; }
+  select { min-width: 0; text-overflow: ellipsis; }
+  input[type=checkbox], input[type=radio] { width: 1.25rem; height: 1.25rem; }
+
+  /* Dokunma hedefleri: dugmeler >= 40px; yalniz ikon dugmeleri kare */
+  button, [role=button], summary { min-height: 40px; }
+  button:has(> svg:only-child), button:has(> .iconify:only-child) { min-width: 40px; justify-content: center; }
+  button { flex-shrink: 0; }
+  td .flex.justify-end { gap: 0.25rem; }
+
+  /* Modal / cekmece: ekrana sigar, icerik kendi icinde kayar */
+  /* main kendi yigin baglamini kurar (z-10): acik pencere ust cubugun (z-20) altinda kaliyordu */
+  main:has(.fixed.inset-0.z-50) { z-index: 50; }
+  .fixed.inset-0.z-50 { overflow-y: auto; overscroll-behavior: contain; padding: 0.75rem; }
+  .fixed.inset-0.z-50 > div { max-height: calc(100dvh - 1.5rem); overflow-y: auto; max-width: 100%; }
+
+  /* Tablolar: kendi kabinda yatay kayar, ilk sutun (ad) sabit kalir */
+  .overflow-x-auto, .overflow-auto { -webkit-overflow-scrolling: touch; max-width: 100%; }
+  .overflow-x-auto > table th:first-child, .overflow-x-auto > table td:first-child,
+  .overflow-auto > table th:first-child, .overflow-auto > table td:first-child { position: sticky; left: 0; z-index: 1; background-color: var(--color-surface); max-width: 45vw; }
+  /* Kart tablo (table.zv-cards): satirlar kart olur; hucre etiketi data-label'dan gelir */
+  table.zv-cards, table.zv-cards tbody { display: block; width: 100%; }
+  table.zv-cards thead { display: none; }
+  table.zv-cards tr { display: flex; flex-direction: column; gap: 0.375rem; padding: 0.75rem 1rem; }
+  table.zv-cards td, .overflow-x-auto > table.zv-cards td:first-child {
+    display: flex; align-items: center; justify-content: space-between; gap: 0.75rem;
+    padding: 0 !important; position: static; max-width: none; background: none; text-align: right;
+  }
+  table.zv-cards td:first-child, .overflow-x-auto > table.zv-cards td:first-child { display: block; text-align: left; }
+  table.zv-cards td[data-label]::before { content: attr(data-label); flex-shrink: 0; text-align: left; font-family: var(--font-mono); font-size: 0.6875rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--color-fg-muted); }
+  table.zv-cards td p.truncate { white-space: normal; overflow-wrap: anywhere; }
+  table.zv-cards td .flex.justify-end { justify-content: flex-start; }
+  label, .grid > * { min-width: 0; }
+}

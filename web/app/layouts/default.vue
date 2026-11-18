@@ -239,7 +239,7 @@ watch(authed, (isAuth) => {
         </NuxtLink>
         <button
           type="button"
-          class="grid size-8 cursor-pointer place-items-center rounded-lg text-fg-muted hover:bg-surface hover:text-fg lg:hidden"
+          class="grid size-10 cursor-pointer place-items-center rounded-lg text-fg-muted hover:bg-surface hover:text-fg sm:size-8 lg:hidden"
           :aria-label="t('shell.closeMenu')"
           @click="sidebarOpen = false"
         >
@@ -379,13 +379,13 @@ watch(authed, (isAuth) => {
           <div class="flex min-w-0 items-center gap-2">
             <button
               type="button"
-              class="grid size-8 cursor-pointer place-items-center rounded-lg border border-line text-fg-muted hover:bg-surface hover:text-fg lg:hidden"
+              class="grid size-10 shrink-0 cursor-pointer place-items-center rounded-lg border border-line text-fg-muted hover:bg-surface hover:text-fg sm:size-8 lg:hidden"
               :aria-label="t('shell.openMenu')"
               @click="sidebarOpen = true"
             >
               <Icon name="lucide:menu" class="size-4" />
             </button>
-            <NuxtLink to="/" class="flex items-center gap-2 lg:hidden">
+            <NuxtLink to="/" class="flex size-10 items-center justify-center gap-2 sm:size-auto lg:hidden">
               <Logo class="size-6 shrink-0" />
               <span class="hidden font-mono text-sm font-bold tracking-tight text-fg sm:inline">zorven</span>
             </NuxtLink>
@@ -395,7 +395,7 @@ watch(authed, (isAuth) => {
             <NuxtLink
               v-if="authed"
               to="/organization"
-              class="flex min-w-0 items-center gap-1.5 rounded-lg border border-line bg-surface/60 px-2.5 py-1 text-xs text-fg transition-colors hover:border-accent/40 hover:bg-surface"
+              class="hidden min-w-0 items-center gap-1.5 sm:flex rounded-lg border border-line bg-surface/60 px-2.5 py-1 text-xs text-fg transition-colors hover:border-accent/40 hover:bg-surface"
               :title="t('shell.contextTitle')"
             >
               <Icon name="lucide:building-2" class="size-3.5 shrink-0 text-accent" />
@@ -412,7 +412,7 @@ watch(authed, (isAuth) => {
           <NuxtLink
             v-if="platformAdmin"
             to="/platform"
-            class="flex items-center gap-1.5 rounded-lg border border-line bg-surface px-2.5 py-1 text-xs font-semibold text-fg transition-all duration-150 hover:border-accent/40 hover:bg-surface-2 active:scale-95 shadow-xs"
+            class="flex min-h-10 items-center gap-1.5 rounded-lg border border-line bg-surface px-2.5 py-1 text-xs font-semibold text-fg transition-all sm:min-h-0 duration-150 hover:border-accent/40 hover:bg-surface-2 active:scale-95 shadow-xs"
             :title="t('shell.platformPanel')"
           >
             <Icon name="lucide:shield-check" class="size-3.5 text-accent" />
@@ -447,7 +447,7 @@ watch(authed, (isAuth) => {
           <!-- Tema Degistirici (Aydinlik / Koyu) -->
           <button
             type="button"
-            class="grid size-8 cursor-pointer place-items-center rounded-lg border border-line
+            class="grid size-10 cursor-pointer place-items-center rounded-lg border border-line sm:size-8
                    text-fg-muted transition-all duration-200 hover:bg-surface hover:text-fg hover:border-accent/40 active:scale-95"
             :title="isLight ? t('header.toDarkMode') : t('header.toLightMode')"
             :aria-label="isLight ? t('header.toDarkMode') : t('header.toLightMode')"
@@ -470,6 +470,20 @@ watch(authed, (isAuth) => {
             <Icon name="lucide:github" class="size-4" />
           </a>
           </div>
+        </div>
+        <div v-if="authed" class="flex min-w-0 px-4 pb-2.5 sm:hidden">
+            <NuxtLink
+              v-if="authed"
+              to="/organization"
+              class="flex min-h-10 min-w-0 items-center gap-1.5 rounded-lg border border-line bg-surface/60 px-2.5 py-1.5 text-xs text-fg transition-colors hover:border-accent/40 hover:bg-surface"
+              :title="t('shell.contextTitle')"
+            >
+              <Icon name="lucide:building-2" class="size-3.5 shrink-0 text-accent" />
+              <span class="max-w-[42vw] truncate font-mono font-medium ">{{ tenantSlug || t('shell.orgDefault') }}</span>
+              <span class="text-fg-subtle">/</span>
+              <Icon name="lucide:folder-git-2" class="size-3.5 shrink-0 text-accent" />
+              <span class="max-w-[42vw] truncate font-mono font-medium ">{{ activeProjectObj?.name || activeProject || t('projects.default') }}</span>
+            </NuxtLink>
         </div>
     </header>
 

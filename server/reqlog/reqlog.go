@@ -70,6 +70,10 @@ type Entry struct {
 	// nedenidir; bos = normal proxy'lenen istek. Reddedilenlerin upstream gecikmesi
 	// yoktur: P95/ortalama sure hesaplarina katilmaz.
 	RejectReason string `json:"reject_reason,omitempty"`
+	// Worker, istegi (kismen ya da tamamen) bir ek katman (worker) karsiladiysa
+	// worker'in adi; bos = istek tunele proxy'lendi ya da reddedildi. Worker yaniti
+	// normal bir yanittir (RejectReason bos), bu yuzden gecikme istatistiklerine katilir.
+	Worker string `json:"worker,omitempty"`
 }
 
 // MetricBucket, bir zaman dilimindeki (bucket) toplu istek metrikleri (FAZ 6.3).

@@ -166,7 +166,7 @@ onMounted(() => {
     </div>
 
     <!-- Sekmeler -->
-    <div class="flex gap-2 border-b border-line pb-3">
+    <div class="no-scrollbar flex gap-2 overflow-x-auto whitespace-nowrap border-b border-line pb-3">
       <button
         type="button"
         class="flex cursor-pointer items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors"
